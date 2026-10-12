@@ -35,6 +35,7 @@ pub fn register(c: &mut CvarRegistry) {
     c.set_flags("vid_width", engine_core::cvar::ARCHIVE | HIDDEN);
     c.set_flags("vid_height", engine_core::cvar::ARCHIVE | HIDDEN);
     c.string("fs_data", "Game folder", Game, "");
+    c.bool("r_autopack", "Build the HD textures on first run", Video, true);
     c.string("snd_soundfont", "SoundFont", Audio, "");
 }
 

@@ -9,6 +9,7 @@ mod config;
 mod gamepad;
 mod module_app;
 mod present;
+mod setup;
 #[cfg(feature = "sdl")]
 mod sdl_pad;
 
@@ -135,6 +136,8 @@ struct App {
     pack: Option<engine_core::pack::LoadedPack>,
     last: Instant,
     started: Instant,
+    /// First-run HD pack build in the background.
+    pack_job: Option<setup::PackJob>,
     /// Screenshot requested by --screenshot-after (quit once it is saved).
     auto_shot: bool,
     window: Option<Arc<Window>>,
@@ -155,6 +158,16 @@ impl App {
 
     fn redraw(&mut self) {
         let now = Instant::now();
+        if let Some(result) = self.pack_job.as_mut().and_then(setup::PackJob::poll) {
+            self.pack_job = None;
+            match result {
+                Ok(dir) => {
+                    log::info!("HD texture pack ready: {}", dir.display());
+                    let _ = self.game.cvars.set("r_texpack", &dir.display().to_string());
+                }
+                Err(e) => log::warn!("HD texture pack: {e}"),
+            }
+        }
         // Automated screenshot: request it once the time has passed; quit on the next frame
         // (saving settings as a normal quit does; command-line overrides are not kept).
         if let Some((secs, path)) = &self.opts.screenshot_after
@@ -375,7 +388,7 @@ impl ApplicationHandler for App {
         }
         let c = &self.game.cvars;
         let mut attrs = Window::default_attributes()
-            .with_title("Exploding Lips")
+            .with_title("Big Lips")
             .with_inner_size(PhysicalSize::new(c.get_int("vid_width") as u32, c.get_int("vid_height") as u32));
         if c.get_bool("vid_fullscreen") {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
@@ -508,10 +521,11 @@ fn main() {
         eprintln!("{e}");
         std::process::exit(2);
     });
-    let data = match cvars.get_str("fs_data") {
-        d if d.is_empty() => PathBuf::from("original"),
-        d => PathBuf::from(d),
-    };
+    // Bring your own data: the configured folder, the usual places, or ask.
+    let data = setup::find_game_dir(&cvars.get_str("fs_data")).or_else(setup::ask_game_dir).unwrap_or_else(|| {
+        eprintln!("Big Lips needs your copy of Exploding Lips: run it with --data <folder with LIPS00.XRB>");
+        std::process::exit(1);
+    });
     let mut vfs = Vfs::from_dir(&data).unwrap_or_else(|e| {
         eprintln!("cannot read game data from {}: {e}", data.display());
         std::process::exit(1);
@@ -572,11 +586,19 @@ fn main() {
         pack: None,
         last: Instant::now(),
         started: Instant::now(),
+        pack_job: None,
         auto_shot: false,
         window: None,
         mouse_captured: false,
         presenter: None,
     };
+    // First run: build the HD texture pack from the player's files in the background.
+    if app.game.cvars.get_bool("r_autopack")
+        && app.game.cvars.get_str("r_texpack").is_empty()
+        && let Some(out) = setup::auto_pack_dir().filter(|d| !d.join("pack.txt").is_file())
+    {
+        app.pack_job = setup::PackJob::start(&data, out);
+    }
     if app.opts.host || app.opts.join.is_some() {
         let level = app.opts.level.clone().unwrap_or_else(|| "LIPS00".into());
         let result = match &app.opts.join {

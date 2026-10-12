@@ -74,7 +74,7 @@ def launch(exe, extra_args=()):
     config = ROOT / "target" / "pilot-config"
     shutil.rmtree(config, ignore_errors=True)
     env["XDG_CONFIG_HOME"] = str(config)
-    binary = ROOT / "target" / "release" / "lips-desktop"
+    binary = ROOT / "target" / "release" / "biglips"
     return subprocess.Popen([str(binary), "--data", str(ROOT / "original"), "--size", f"{WIDTH}x{HEIGHT}", "--mute", *extra_args],
                             cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             start_new_session=True)

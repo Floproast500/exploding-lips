@@ -1,4 +1,4 @@
-"""Virtual Xbox 360-style gamepad (uinput) driving lips-desktop on Xvfb; screenshots each step.
+"""Virtual Xbox 360-style gamepad (uinput) driving biglips on Xvfb; screenshots each step.
 
 Needs the uinput kernel module (`sudo modprobe uinput`) and write access to /dev/uinput.
     python3 tools/pilot/gamepad_pilot.py . re/shots/gamepad
@@ -24,7 +24,7 @@ print("virtual pad", ui.device.path, flush=True)
 time.sleep(1.5)
 env = {k: v for k, v in os.environ.items() if k != "WAYLAND_DISPLAY"}
 env.update(DISPLAY=":99", XDG_CONFIG_HOME=out + "/cfg", RUST_LOG="info")
-game = subprocess.Popen([root + "/target/release/lips-desktop", "--data", root + "/original", "--software",
+game = subprocess.Popen([root + "/target/release/biglips", "--data", root + "/original", "--software",
                          "--mute", "--level", "LIPS00", "--size", "640x480"], env=env,
                         stdout=open(out + "/game.log", "w"), stderr=subprocess.STDOUT)
 def shot(n):

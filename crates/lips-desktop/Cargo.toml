@@ -1,6 +1,6 @@
 [package]
 name = "lips-desktop"
-description = "Native front end for the Exploding Lips reimplementation"
+description = "Big Lips: the Exploding Lips source port on the Floproast Kiln engine (desktop)"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
@@ -22,6 +22,11 @@ pollster = "1"
 softbuffer = "0.4"
 wgpu = "30"
 winit = "0.30"
+rfd = "0.15"
+
+[[bin]]
+name = "biglips"
+path = "src/main.rs"
 
 [features]
 # SDL3 gamepads: gyro aiming and rumble (needs the system SDL3 library).
