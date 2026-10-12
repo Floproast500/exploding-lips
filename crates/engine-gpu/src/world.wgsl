@@ -146,7 +146,8 @@ fn hd_color(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -
     }
 }
 
-fn hd_normal(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+// Tangent-space normal (xyz) and specular amount (w).
+fn hd_normal(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
     var n: vec4<f32>;
     switch cls {
         case 0u: { n = textureSampleGrad(nm0, hd_smp, uv, layer, gx, gy); }
@@ -155,12 +156,20 @@ fn hd_normal(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) 
         case 3u: { n = textureSampleGrad(nm3, hd_smp, uv, layer, gx, gy); }
         default: { n = textureSampleGrad(nm4, hd_smp, uv, layer, gx, gy); }
     }
-    return n.xyz * 2.0 - 1.0;
+    return vec4<f32>(n.xyz * 2.0 - 1.0, n.w);
 }
 
 // Linear colour lit by the sector brightness and the dynamic lights.
 fn lit(albedo: vec3<f32>, b: f32, world: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
+    return lit_spec(albedo, b, world, normal, 0.0);
+}
+
+// Sector light `b`, plus dynamic lights with diffuse and (for `spec` > 0) Blinn-Phong
+// highlights.
+fn lit_spec(albedo: vec3<f32>, b: f32, world: vec3<f32>, normal: vec3<f32>, spec: f32) -> vec4<f32> {
     var light = vec3<f32>(b);
+    var shine = vec3<f32>(0.0);
+    let view = normalize(u.cam.xyz - world);
     if (u.modern.y > 0.5) {
         let n = normalize(normal);
         for (var i = 0u; i < u32(u.modern.z); i = i + 1u) {
@@ -171,9 +180,11 @@ fn lit(albedo: vec3<f32>, b: f32, world: vec3<f32>, normal: vec3<f32>) -> vec4<f
             let att = pow(clamp(1.0 - d / p.w, 0.0, 1.0), 2.0);
             let facing = max(dot(n, to / max(d, 1e-3)), 0.0);
             light = light + c * att * mix(facing, 1.0, 0.25);
+            let h = normalize(to / max(d, 1e-3) + view);
+            shine = shine + c * att * spec * pow(max(dot(n, h), 0.0), 24.0) * select(0.0, 1.0, facing > 0.0);
         }
     }
-    return vec4<f32>(albedo * light, 1.0);
+    return vec4<f32>(albedo * light + shine * 0.6, 1.0);
 }
 
 fn wrap(x: i32, n: i32) -> i32 {
@@ -322,6 +333,7 @@ fn hd_main(in: VsOut, flags: u32, duv_dx: vec2<f32>, duv_dy: vec2<f32>, dp_dx: v
     let n = normalize(in.normal);
     var shading_normal = n;
     var relief = 1.0;
+    var spec = 0.0;
     if ((flags & HD_NORMAL) != 0u) {
         // Cotangent frame from screen-space derivatives (no tangent attributes needed).
         let dp2perp = cross(dp_dy, n);
@@ -331,10 +343,11 @@ fn hd_main(in: VsOut, flags: u32, duv_dx: vec2<f32>, duv_dy: vec2<f32>, dp_dx: v
         let inv = inverseSqrt(max(max(dot(t, t), dot(b, b)), 1e-12));
         let tn = hd_normal(cls, layer, uv, gx, gy);
         shading_normal = normalize(t * inv * tn.x + b * inv * tn.y + n * tn.z);
+        spec = tn.w;
         // Relief under sector light: surfaces facing away from the viewer darken slightly.
         let v = normalize(u.cam.xyz - in.world);
         relief = clamp(dot(shading_normal, v) / max(dot(n, v), 0.25), 0.7, 1.15);
     }
     let b = brightness(shade_of(in, flags)) * mix(1.0, relief, 0.6);
-    return lit(c.rgb, b, in.world, shading_normal);
+    return lit_spec(c.rgb, b, in.world, shading_normal, spec);
 }

@@ -107,6 +107,8 @@ pub struct Game {
     light_fit: ([f32; 16], [u32; 8]),
     ui_colors: (u8, u8, u8, u8),
     fps: FpsCounter,
+    /// GPU time of a recent frame (milliseconds), reported by the front end for `r_stats`.
+    pub gpu_ms: Option<f32>,
     /// Ticks since the game was created (the original HUD clock is time since launch).
     uptime_ticks: u64,
     /// Character save slots, carried across levels.
@@ -185,6 +187,7 @@ impl Game {
                 text::nearest_color(&palette.rgb, [255, 40, 40]),
             ),
             fps: FpsCounter::default(),
+            gpu_ms: None,
             uptime_ticks: 0,
             save: options
                 .save
@@ -778,7 +781,9 @@ impl Game {
             bloom: c.get_bool("r_bloom"),
             tonemap: c.get_int("r_tonemap") as u32,
             exposure: c.get_float("r_exposure") as f32,
-            msaa: if c.get_int("r_msaa") > 0 { 4 } else { 1 },
+            msaa: 1 << c.get_int("r_msaa").clamp(0, 3),
+            render_scale: c.get_float("r_scale") as f32,
+            fxaa: c.get_bool("r_fxaa"),
         });
         if modern.is_some_and(|m| m.dynamic_lights) {
             frame.lights = scene_lights(session, &self.physics);
@@ -905,9 +910,21 @@ impl Game {
             let prompt = format!("{marker}] {}_", self.console.line);
             text::draw_text(frame, 2 * s as i32, (rows * line_h + s) as i32, s, self.ui_colors.3, &prompt);
         }
+        let s = (frame.height / CLASSIC_HEIGHT).max(1);
+        let mut line = 0;
         if self.options.show_fps {
-            let s = (frame.height / CLASSIC_HEIGHT).max(1);
             text::draw_text(frame, 2 * s as i32, 2 * s as i32, s, self.ui_colors.3, &format!("{} fps", self.fps.shown));
+            line += 1;
+        }
+        if self.cvars.get_bool("r_stats") {
+            let c = &self.cvars;
+            let frame_ms = if self.fps.shown > 0 { format!("{:.2} ms", 1000.0 / self.fps.shown as f32) } else { "-".into() };
+            let gpu = self.gpu_ms.map_or_else(|| "n/a".into(), |g| format!("{g:.2} ms"));
+            let msaa = 1 << c.get_int("r_msaa").clamp(0, 3);
+            let lines = [format!("frame {frame_ms}  gpu {gpu}"), format!("scale {:.2}  msaa {msaa}x{}", c.get_float("r_scale"), if c.get_bool("r_fxaa") { "  fxaa" } else { "" })];
+            for (k, text) in lines.iter().enumerate() {
+                text::draw_text(frame, 2 * s as i32, ((2 + (line + k) * 10) * s) as i32, s, self.ui_colors.3, text);
+            }
         }
     }
 }

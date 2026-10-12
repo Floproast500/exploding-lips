@@ -54,6 +54,14 @@ impl Presenter {
         }
     }
 
+    /// GPU time of a recent world frame in milliseconds (devices with timestamp queries).
+    pub fn gpu_ms(&mut self) -> Option<f32> {
+        match self {
+            Self::Gpu(p) => p.world.as_mut().and_then(|(w, _)| w.gpu_ms(&p.device)),
+            Self::Cpu(_) => None,
+        }
+    }
+
     pub fn is_gpu(&self) -> bool {
         matches!(self, Self::Gpu(_))
     }
@@ -118,6 +126,7 @@ pub struct GpuPresenter {
     frames: engine_gpu::FramePresenter,
     /// GPU world renderer, plus the level epoch and pack folder whose images it holds.
     world: Option<(engine_gpu::WorldRenderer, (u64, Option<std::path::PathBuf>))>,
+    adapter: wgpu::Adapter,
 }
 
 impl GpuPresenter {
@@ -134,6 +143,7 @@ impl GpuPresenter {
         log::info!("adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("lips"),
+            required_features: engine_gpu::features_for(&adapter),
             required_limits: engine_gpu::limits_for(&adapter),
             ..Default::default()
         }))
@@ -154,7 +164,7 @@ impl GpuPresenter {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        Ok(Self { frames: engine_gpu::FramePresenter::new(&device, format), surface, device, queue, config, world: None })
+        Ok(Self { frames: engine_gpu::FramePresenter::new(&device, format), surface, device, queue, config, world: None, adapter })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -190,7 +200,12 @@ impl GpuPresenter {
 
     fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame, pack: Option<&engine_core::pack::LoadedPack>) {
         let (device, queue) = (&self.device, &self.queue);
-        let (world, loaded) = self.world.get_or_insert_with(|| (engine_gpu::WorldRenderer::new(device, self.config.format), (u64::MAX, None)));
+        let adapter = &self.adapter;
+        let (world, loaded) = self.world.get_or_insert_with(|| {
+            let mut w = engine_gpu::WorldRenderer::new(device, self.config.format);
+            w.use_adapter(device, queue, adapter);
+            (w, (u64::MAX, None))
+        });
         let wanted = (view.epoch, pack.map(|p| p.dir.clone()));
         if *loaded != wanted {
             world.set_palette(device, queue, game.palette(), game.shade_rows());
@@ -222,6 +237,7 @@ impl GpuPresenter {
             world.draw_ui(device, queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage, list, game.cvars.get_bool("hud_smooth"));
         }
         queue.submit([encoder.finish()]);
+        world.submitted();
         queue.present(output);
     }
 }

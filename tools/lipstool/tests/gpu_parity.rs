@@ -90,3 +90,24 @@ fn hd_textures_keep_texture_coordinates() {
         assert!(e < 0.04, "{level}: HD textures moved or stretched (RMSE {e:.4})");
     }
 }
+
+/// Render scale, FXAA and every MSAA level change only edges and filtering: the view stays
+/// the same picture as the default modern settings.
+#[test]
+fn quality_settings_keep_the_picture() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../original");
+    if !dir.join("LIPS00.XRB").exists() || engine_gpu::headless().is_none() {
+        eprintln!("skipped: needs original/ and a GPU adapter");
+        return;
+    }
+    let base = ["640x400", "135", "r126", "-", "0", "modern"];
+    let (_, _, reference) = lipstool::render_gpu(&dir, "LIPS00", &base).unwrap();
+    for extra in [&["set:r_fxaa=1"][..], &["set:r_scale=0.5"], &["set:r_scale=2"], &["set:r_msaa=off"], &["set:r_msaa=8x"], &["set:r_msaa=2x", "set:r_fxaa=1"]] {
+        let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+        let (_, _, img) = lipstool::render_gpu(&dir, "LIPS00", &args).unwrap();
+        let e = rmse(&reference, &img);
+        println!("{extra:?}: RMSE {e:.4}");
+        assert!(e < 0.05, "{extra:?} changed the picture (RMSE {e:.4})");
+        assert!(img.iter().any(|&v| v > 40), "{extra:?}: blank image");
+    }
+}

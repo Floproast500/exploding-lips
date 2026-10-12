@@ -9,7 +9,8 @@
 //! Each `tex` line: name, content hash of the original pixels (so same-named images that differ
 //! between levels stay apart; `-` matches by name only), class, the original (logical) size,
 //! the albedo PNG and an optional normal map (`-` for none). Logical size stays the original's,
-//! so texture coordinates never change.
+//! so texture coordinates never change. With `spec=1` in the header, normal maps carry a
+//! specular amount in their alpha channel (older packs: no highlights).
 
 use std::fmt::Write;
 
@@ -28,6 +29,8 @@ pub struct PackManifest {
     pub name: String,
     pub scale: u32,
     pub game: String,
+    /// Normal maps hold specular in alpha.
+    pub spec: bool,
     pub entries: Vec<PackEntry>,
 }
 
@@ -55,6 +58,7 @@ impl PackManifest {
                         match kv.split_once('=') {
                             Some(("scale", v)) => m.scale = v.parse().map_err(|_| format!("line {}: bad scale", n + 1))?,
                             Some(("game", v)) => m.game = v.to_string(),
+                            Some(("spec", v)) => m.spec = v == "1",
                             _ => {}
                         }
                     }
@@ -77,7 +81,7 @@ impl PackManifest {
     }
 
     pub fn write(&self) -> String {
-        let mut out = format!("pack {} scale={} game={}\n", self.name, self.scale, self.game);
+        let mut out = format!("pack {} scale={} game={}{}\n", self.name, self.scale, self.game, if self.spec { " spec=1" } else { "" });
         for e in &self.entries {
             let hash = e.hash.map_or("-".to_string(), |h| format!("{h:016x}"));
             let _ = writeln!(
@@ -120,7 +124,13 @@ impl LoadedPack {
         let read = |rel: &str| std::fs::read(self.dir.join(rel)).ok().and_then(|d| decode_png(&d).ok());
         let one = |(name, hash): &(String, u64)| {
             let e = self.manifest.find(name, *hash)?;
-            Some((read(&e.albedo)?, e.normal.as_deref().and_then(read)))
+            let mut normal = e.normal.as_deref().and_then(read);
+            if !self.manifest.spec
+                && let Some(n) = &mut normal
+            {
+                n.pixels.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 0);
+            }
+            Some((read(&e.albedo)?, normal))
         };
         parallel_map(keys, one)
     }
@@ -186,6 +196,9 @@ mod tests {
         assert!(m.find("NOPE", 0).is_none());
         assert_eq!(PackManifest::parse(&m.write()).unwrap(), m);
         assert!(PackManifest::parse("tex broken").is_err());
+        let spec = PackManifest::parse("pack hd scale=4 game=godd spec=1\n").unwrap();
+        assert!(spec.spec && !m.spec);
+        assert_eq!(PackManifest::parse(&spec.write()).unwrap(), spec);
     }
 
     #[test]

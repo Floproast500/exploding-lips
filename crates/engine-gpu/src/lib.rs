@@ -8,9 +8,11 @@ use engine_scene::scene::{HdTexture, IndexedImage, SceneCamera, SceneFrame, Shad
 mod frame;
 mod hd;
 mod post;
+mod timer;
 mod ui_list;
 pub use frame::{CpuFrame, FramePresenter, letterbox};
 use hd::HdSet;
+use timer::GpuTimer;
 use post::Post;
 
 /// Vertex flags added by the renderer: sample the HD texture set (and its normal map).
@@ -134,6 +136,9 @@ pub struct WorldRenderer {
     bind_group: Option<wgpu::BindGroup>,
     depth: Option<(wgpu::TextureView, u32, u32)>,
     depth_samples: u32,
+    /// Sample counts usable for the HDR and depth targets (bit n = 2^n samples).
+    sample_support: u32,
+    timer: Option<GpuTimer>,
     vertices: Option<(wgpu::Buffer, u64)>,
     staging: Vec<GpuVertex>,
     ui: UiOverlay,
@@ -248,6 +253,9 @@ impl WorldRenderer {
             bind_group: None,
             depth: None,
             depth_samples: 1,
+            // 1x and 4x are guaranteed everywhere (WebGPU and WebGL2 included).
+            sample_support: 1 | 4,
+            timer: None,
             vertices: None,
             staging: Vec::new(),
         }
@@ -341,6 +349,35 @@ impl WorldRenderer {
         write(queue, atlas, &data, (slot.x as u32, slot.y as u32, slot.layer), (w as u32, h as u32), 1);
     }
 
+    /// Allow every sample count `adapter` supports for the HDR and depth targets (otherwise
+    /// only 1x and 4x), and time frames on the GPU when the device has timestamp queries.
+    pub fn use_adapter(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, adapter: &wgpu::Adapter) {
+        // Counts other than 1x/4x need the adapter-specific format features on the device.
+        if device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+            let (hdr, depth) = (adapter.get_texture_format_features(HDR_FORMAT).flags, adapter.get_texture_format_features(DEPTH_FORMAT).flags);
+            self.sample_support = [1u32, 2, 4, 8].into_iter().filter(|&n| hdr.sample_count_supported(n) && depth.sample_count_supported(n)).fold(1, |m, n| m | n);
+        }
+        self.timer = GpuTimer::new(device, queue);
+    }
+
+    /// The largest supported sample count not above `wanted`.
+    fn supported_samples(&self, wanted: u32) -> u32 {
+        [8u32, 4, 2, 1].into_iter().find(|&n| n <= wanted.max(1) && self.sample_support & n != 0).unwrap_or(1)
+    }
+
+    /// GPU time of the last measured frame in milliseconds (with timestamp queries), polled
+    /// without waiting.
+    pub fn gpu_ms(&mut self, device: &wgpu::Device) -> Option<f32> {
+        self.timer.as_mut().and_then(|t| t.read(device))
+    }
+
+    /// Call after submitting the commands of a frame drawn with [`WorldRenderer::render`].
+    pub fn submitted(&mut self) {
+        if let Some(t) = &mut self.timer {
+            t.submitted();
+        }
+    }
+
     /// Draw the scene into `target` (size `target_size`) within `viewport` (x, y, w, h).
     #[allow(clippy::too_many_arguments)]
     pub fn render(
@@ -360,7 +397,7 @@ impl WorldRenderer {
             self.hd = Some(HdSet::empty(device, queue));
             self.bind_group = None;
         }
-        let pipeline = self.pipeline(device, if shading.modern.is_some() { HDR_FORMAT } else { self.format }, shading.modern.map_or(1, |m| m.msaa.clamp(1, 8)));
+        let pipeline = self.pipeline(device, if shading.modern.is_some() { HDR_FORMAT } else { self.format }, shading.modern.map_or(1, |m| self.supported_samples(m.msaa)));
         let (Some(atlas), Some((colormap, levels))) = (&self.atlas, &self.colormap) else { return };
         if self.bind_group.is_none() {
             let hd = self.hd.as_ref().expect("hd set");
@@ -397,10 +434,11 @@ impl WorldRenderer {
         // Modern lighting renders into an HDR image the size of the viewport, then post-
         // processes into the target; classic lighting draws straight into the target.
         let modern = shading.modern;
-        let samples = modern.map_or(1, |m| m.msaa.clamp(1, 8));
+        let samples = modern.map_or(1, |m| self.supported_samples(m.msaa));
         let (draw_size, draw_vp) = match modern {
-            Some(_) => {
-                let size = (viewport[2].round().max(1.0) as u32, viewport[3].round().max(1.0) as u32);
+            Some(m) => {
+                let scale = m.render_scale.clamp(0.25, 2.0);
+                let size = ((viewport[2] * scale).round().max(1.0) as u32, (viewport[3] * scale).round().max(1.0) as u32);
                 (size, [0.0, 0.0, size.0 as f32, size.1 as f32])
             }
             None => (target_size, viewport),
@@ -526,6 +564,7 @@ impl WorldRenderer {
             Some(_) => self.post.world_targets(),
             None => (target, None),
         };
+        let timed = self.timer.as_mut().is_some_and(|t| t.begin(encoder));
         let (depth, ..) = self.depth.as_ref().expect("depth");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("world"),
@@ -576,6 +615,9 @@ impl WorldRenderer {
         drop(pass);
         if let Some(m) = modern {
             self.post.run(device, queue, encoder, target, target_size, original_viewport, &m);
+        }
+        if timed && let Some(t) = &mut self.timer {
+            t.end(encoder);
         }
     }
 
@@ -723,6 +765,13 @@ fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], (x, y, z): (
     );
 }
 
+/// Optional device features the renderer uses when the adapter has them: GPU frame timing,
+/// and sample counts beyond WebGPU's guaranteed 1x/4x.
+pub fn features_for(adapter: &wgpu::Adapter) -> wgpu::Features {
+    adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES)
+}
+
 /// Device limits: WebGL2-level baseline (so everything also runs in browsers), raised to the
 /// adapter's resolution and texture-array sizes (HD texture packs need many layers).
 pub fn limits_for(adapter: &wgpu::Adapter) -> wgpu::Limits {
@@ -735,6 +784,11 @@ pub fn limits_for(adapter: &wgpu::Adapter) -> wgpu::Limits {
 
 /// A device without a window, for tools and tests. `None` when no adapter is available.
 pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
+    headless_adapter().map(|(_, d, q)| (d, q))
+}
+
+/// As [`headless`], with the adapter and the optional features (GPU timing) enabled.
+pub fn headless_adapter() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -743,12 +797,14 @@ pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
         apply_limit_buckets: false,
     }))
     .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("headless"),
+        required_features: features_for(&adapter),
         required_limits: limits_for(&adapter),
         ..Default::default()
     }))
-    .ok()
+    .ok()?;
+    Some((adapter, device, queue))
 }
 
 /// A UI layer: size, palette indices and coverage drawn on the CPU, and recorded UI drawing.

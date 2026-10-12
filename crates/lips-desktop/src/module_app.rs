@@ -50,6 +50,7 @@ impl Gpu {
         .map_err(|e| e.to_string())?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("module"),
+            required_features: engine_gpu::features_for(&adapter),
             required_limits: engine_gpu::limits_for(&adapter),
             ..Default::default()
         }))
@@ -69,7 +70,9 @@ impl Gpu {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        Ok(Self { world: engine_gpu::WorldRenderer::new(&device, format), surface, device, queue, config, loaded: u64::MAX })
+        let mut world = engine_gpu::WorldRenderer::new(&device, format);
+        world.use_adapter(&device, &queue, &adapter);
+        Ok(Self { world, surface, device, queue, config, loaded: u64::MAX })
     }
 }
 
@@ -120,6 +123,7 @@ impl ModuleApp {
             gpu.world.draw_ui(&gpu.device, &gpu.queue, &mut encoder, &target, vp, (self.ui.width, self.ui.height), &self.ui.pixels, coverage, list, true);
         }
         gpu.queue.submit([encoder.finish()]);
+        gpu.world.submitted();
         gpu.queue.present(output);
     }
 

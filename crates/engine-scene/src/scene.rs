@@ -83,8 +83,13 @@ pub struct Modern {
     /// 0 clamp, 1 soft shoulder (keeps the original's colours), 2 ACES filmic.
     pub tonemap: u32,
     pub exposure: f32,
-    /// Multisampling (1, 2, 4 or 8).
+    /// Multisampling (1, 2, 4 or 8; limited to what the GPU supports).
     pub msaa: u32,
+    /// The 3D view is drawn at this fraction of the display resolution (0.25 .. 2; above 1
+    /// supersamples) and filtered to the display.
+    pub render_scale: f32,
+    /// Fast approximate anti-aliasing on the tonemapped image.
+    pub fxaa: bool,
 }
 
 /// A coloured point light (projectiles, explosions, muzzle flashes).

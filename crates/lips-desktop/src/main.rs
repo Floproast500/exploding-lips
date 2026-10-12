@@ -211,6 +211,9 @@ impl App {
             let (uw, uh) = self.game.ui_layer_size(w, h);
             self.ui.resize(uw, uh);
             self.ui.pixel_aspect = 1.0;
+            if let Some(p) = &mut self.presenter {
+                self.game.gpu_ms = p.gpu_ms();
+            }
             if let Some(view) = self.game.gpu_frame(&mut self.ui, self.clock.alpha())
                 && let Some(p) = &mut self.presenter
                 && p.present_world(&self.game, &view, &self.ui, self.pack.as_ref())

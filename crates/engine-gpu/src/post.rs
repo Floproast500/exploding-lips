@@ -236,7 +236,9 @@ impl Post {
             }
         }
         let strength = if m.bloom { BLOOM_STRENGTH } else { 0.0 };
-        write_uniform(queue, &t.passes[last].0, &params([0.0, strength, m.exposure, m.tonemap as f32], texel(t.size)));
+        let mut tex = texel(t.size);
+        tex[2] = m.fxaa as u32 as f32;
+        write_uniform(queue, &t.passes[last].0, &params([0.0, strength, m.exposure, m.tonemap as f32], tex));
         pass(encoder, target, &self.tonemap, &t.passes[last].1, false, Some(viewport));
     }
 }

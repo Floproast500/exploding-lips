@@ -147,7 +147,7 @@ impl GameModule for BspViewer {
                 fullbright: false,
                 max_object_shade: 15.0,
                 zero_substitute: 0,
-                modern: Some(Modern { brightness, emissive, dynamic_lights: false, bloom: true, tonemap: 1, exposure: 1.4, msaa: 4 }),
+                modern: Some(Modern { brightness, emissive, dynamic_lights: false, bloom: true, tonemap: 1, exposure: 1.4, msaa: 4, render_scale: 1.0, fxaa: false }),
             },
             scene: self.scene.clone(),
             epoch: 1,

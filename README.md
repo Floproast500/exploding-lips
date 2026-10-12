@@ -15,10 +15,10 @@ the engine reads them from your install folder at runtime.
 | File formats: XRB levels, XPG pixels, PAL, PIC, BMP, INI scripts, GAM saves | parsed; tested on every shipped file; byte-identical save rewrite; damaged-input robustness tests |
 | Renderer: portals, stacked (room-over-room) regions, floors/ceilings, sky, sprites with rotations, masked walls, original lighting | software renderer matches the original (golden test: RMSE 0.04 view / 0.06 full screen vs. `lips.exe`) |
 | GPU renderer (wgpu): triangulated regions, portal visibility with exact screen windows, original shade tables or true colour, true-3D freelook | matches the software renderer (parity test: 110 views over 9 levels, worst RMSE 0.03); default on desktop (`r_renderer`) |
-| HD texture packs (`tools/packbuilder`, `r_texpack`): 4x upscaled textures with normal maps, mipmaps, anisotropic filtering | texture coordinates verified unchanged (test: 4x copies render within RMSE 0.02 of the originals) |
+| HD texture packs (`tools/packbuilder`, `r_texpack`): 4x Real-ESRGAN upscales (seamless tiling, clean sprite alpha) with normal and specular maps, mipmaps, anisotropic filtering | texture coordinates verified unchanged (test: 4x copies render within RMSE 0.02 of the originals) |
 | First-person weapon on the GPU (screen-space quad: HD packs apply) | parity test unchanged (worst RMSE 0.033) |
 | Engine/game split: `GameModule` interface implemented by Exploding Lips and the BSP viewer; desktop `--bsp` runner | tested with LIPS00C.BSP, Hexen II demo1–3 and Quake E1M1 (when installed) |
-| Modern lighting (`r_lighting modern`, default with the GPU renderer): smooth light fitted to the original shade tables, coloured dynamic lights (shots, projectiles, explosions), HDR, 4x MSAA, bloom, soft/filmic tonemapping, exposure | 3440x1440 in ~0.8 ms GPU + 0.3 ms CPU per frame on an RX 9070 XT (`lipstool bench-gpu`) |
+| Modern lighting (`r_lighting modern`, default with the GPU renderer): smooth light fitted to the original shade tables, coloured dynamic lights with specular highlights on HD textures (shots, projectiles, explosions), HDR, 2x/4x/8x MSAA, FXAA, render scale 0.25-2x, bloom, soft/filmic tonemapping, exposure; `r_stats` shows frame and GPU time | 3440x1440 with the full HD pack, 4x MSAA and bloom: 0.6 ms GPU (timestamp queries) on an RX 9070 XT; 8x MSAA 1.4 ms; 2x supersampling + 8x MSAA + FXAA 6.6 ms (`lipstool bench-gpu`); quality settings GPU-tested |
 | Movement & collision (walk/run/turn/jump/fall/step, see-through floors) | constants from the original; golden-tested against memory probes of `lips.exe` |
 | Script VM (`ONTAG`, tags, OS states with thresholds, `XM`/`XT`/`OTEXT`/`XCHANGE`/…) | complete for the shipped INIs, original quirks included |
 | World effects: doors, lifts, jump pads, rotating rooms, ramps, rafts, switches, region triggers, scrolling/animated textures | implemented; data-driven tests on the shipped levels |
@@ -102,7 +102,9 @@ Packs are generated locally and must not be shared.
 
 ```sh
 cargo run --release -p packbuilder -- /path/to/ExplodingLips packs/lips-hd
-#   uses Real-ESRGAN (realesrgan-ncnn-vulkan, AUR) when installed, else the built-in scale2x
+#   uses Real-ESRGAN when found ($REALESRGAN, realesrgan-ncnn-vulkan on the PATH, or the
+#   portable release unpacked in ~/.local/share/exploding-lips/realesrgan/), else scale2x;
+#   all 2374 Exploding Lips textures take about a minute on an RX 9070 XT
 #   --upscaler esrgan|scale2x   --levels LIPS00,LIPS01   --normal-strength 2.0
 cargo run --release -p lips-desktop -- --set r_texpack packs/lips-hd    # or `set r_texpack ...` in the console
 ```

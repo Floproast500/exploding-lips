@@ -15,7 +15,7 @@
 //!                                                  (extra words: look, shear, modern, boom)
 //!   lipstool render-bsp <PAK|BSP> <MAP> <OUT.png> [WxH] [palette=FILE]
 //!                                                  a Quake-family map (Quake, Hexen II) from the start
-//!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern]
+//!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern] [pack=DIR] [set:CVAR=VALUE]... [frames=N]
 //!                                                  GPU frame time
 
 use godd_formats::xrb::{Orb, RecordExt, Section};
@@ -49,9 +49,10 @@ fn main() -> AnyResult {
             save_rgb(Path::new(out), size.0, size.1, &rgb)
         }
         ["bench-gpu", dir, level, rest @ ..] => {
-            let ms = lipstool::bench_gpu(Path::new(dir), level, rest, 200)?;
-            let cpu = lipstool::bench_scene(Path::new(dir), level, rest, 200)?;
-            println!("{level} {rest:?}: GPU {ms:.2} ms, CPU scene {cpu:.2} ms per frame");
+            let frames = rest.iter().find_map(|a| a.strip_prefix("frames=")?.parse().ok()).unwrap_or(200);
+            println!("{}", lipstool::bench_gpu(Path::new(dir), level, rest, frames)?);
+            let cpu = lipstool::bench_scene(Path::new(dir), level, rest, frames as u32)?;
+            println!("CPU scene {cpu:.2} ms per frame");
             Ok(())
         }
         ["render-gpu", dir, level, out, rest @ ..] => {

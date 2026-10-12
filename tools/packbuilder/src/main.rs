@@ -79,7 +79,7 @@ fn main() -> AnyResult {
     let out = PathBuf::from(out);
     std::fs::create_dir_all(out.join("t"))?;
     println!("{} unique images from {} levels; upscaler {upscaler}", sources.len(), levels.len());
-    let mut manifest = PackManifest { name: out.file_name().map_or("pack".into(), |n| n.to_string_lossy().into_owned()), scale: SCALE as u32, game: "godd".into(), entries: Vec::new() };
+    let mut manifest = PackManifest { name: out.file_name().map_or("pack".into(), |n| n.to_string_lossy().into_owned()), scale: SCALE as u32, game: "godd".into(), spec: true, entries: Vec::new() };
     let rgba: Vec<Rgba> = sources.iter().map(|s| to_rgba(s, &palette)).collect();
     let classes: Vec<Class> = sources.iter().map(|s| s.class).collect();
     let big = upscale::upscale_all(&upscaler, &rgba, &classes, SCALE)?;
@@ -191,7 +191,15 @@ fn to_rgba(s: &Source, palette: &[[u8; 3]; 256]) -> Rgba {
     Rgba { width: s.width, height: s.height, pixels }
 }
 
-/// Tangent-space normal map from luminance as height (blurred, Sobel), wrapping for tiles.
+/// Specular amount (alpha of the normal map): bright texels and fine raised detail (metal
+/// edges, wet stone) shine; dark, flat areas stay matte.
+pub fn specular(lum: f32, blurred: f32) -> u8 {
+    let detail = (lum - blurred).max(0.0) * 4.0;
+    ((lum * lum * 0.6 + detail).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Tangent-space normal map from luminance as height (blurred, Sobel), wrapping for tiles;
+/// specular in alpha.
 pub fn normal_map(img: &Rgba, strength: f32, wrap: bool) -> Rgba {
     let (w, h) = (img.width, img.height);
     let lum: Vec<f32> = img.pixels.as_chunks::<4>().0.iter().map(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0).collect();
@@ -217,8 +225,7 @@ pub fn normal_map(img: &Rgba, strength: f32, wrap: bool) -> Rgba {
             let (nx, ny, nz) = (-gx * strength, -gy * strength, 1.0f32);
             let len = (nx * nx + ny * ny + nz * nz).sqrt();
             let enc = |v: f32| ((v / len * 0.5 + 0.5) * 255.0).round() as u8;
-            let alpha = img.pixels[(y as usize * w + x as usize) * 4 + 3];
-            pixels.extend_from_slice(&[enc(nx), enc(ny), enc(nz), alpha]);
+            pixels.extend_from_slice(&[enc(nx), enc(ny), enc(nz), specular(at(&lum, x, y), s(0, 0))]);
         }
     }
     Rgba { width: w, height: h, pixels }

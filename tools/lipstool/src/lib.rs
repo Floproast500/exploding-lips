@@ -79,6 +79,10 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
     }
     // GPU renders use the original lighting (parity with `render`) unless asked for "modern".
     let _ = game.cvars.set("r_lighting", if rest.contains(&"modern") { "modern" } else { "classic" });
+    // "set:NAME=VALUE": any cvar (r_msaa=8x, r_scale=1.5, r_fxaa=1 ...).
+    for (name, value) in rest.iter().filter_map(|a| a.strip_prefix("set:")?.split_once('=')) {
+        game.cvars.set(name, value)?;
+    }
     Ok((vfs, game, w, h))
 }
 
@@ -95,8 +99,9 @@ pub fn render_gpu_with(
     hd: impl Fn(&godd_game::Game) -> Option<Vec<Option<engine_scene::scene::HdTexture>>>,
 ) -> AnyResult<(usize, usize, Vec<u8>)> {
     let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
-    let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
+    let (adapter, device, queue) = engine_gpu::headless_adapter().ok_or("no GPU adapter")?;
     let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    renderer.use_adapter(&device, &queue, &adapter);
     let (uw, uh) = game.ui_layer_size(w, h);
     let mut ui = godd_game::Frame::new(uw, uh);
     // Repeat so the HUD's rolling counters reach their values, as `render` does.
@@ -182,47 +187,6 @@ pub fn viewpoints(dir: &Path, level: &str, n: usize) -> AnyResult<Vec<usize>> {
     Ok(good)
 }
 
-/// Average GPU frame time (milliseconds) of the view at `size`, rendering `frames` frames into
-/// an off-screen target (each frame waits for the GPU, so this includes the whole pipeline).
-pub fn bench_gpu(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyResult<f64> {
-    let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
-    let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
-    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-    let (uw, uh) = game.ui_layer_size(w, h);
-    let mut ui = godd_game::Frame::new(uw, uh);
-    let view = game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
-    renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
-    renderer.set_images(&device, &queue, &game.world_images());
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("bench"),
-        size: wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let target = target.create_view(&Default::default());
-    let coverage = ui.coverage.clone().unwrap_or_default();
-    let vp = [0.0, 0.0, w as f32, h as f32];
-    let frame = |renderer: &mut engine_gpu::WorldRenderer| {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        renderer.render(&device, &queue, &mut encoder, &target, (w as u32, h as u32), vp, &view.camera, &view.shading, &view.scene);
-        renderer.draw_ui(&device, &queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default(), true);
-        queue.submit([encoder.finish()]);
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    };
-    for _ in 0..10 {
-        frame(&mut renderer); // warm up (pipelines, targets)
-    }
-    let start = std::time::Instant::now();
-    for _ in 0..frames {
-        frame(&mut renderer);
-    }
-    Ok(start.elapsed().as_secs_f64() * 1000.0 / frames as f64)
-}
-
 /// Average CPU time (milliseconds) of building one GPU frame: portal walk, scene vertices, the
 /// UI layer (weapon, HUD) and live camera views.
 pub fn bench_scene(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyResult<f64> {
@@ -242,6 +206,67 @@ pub fn bench_scene(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyRe
 /// HD textures for the current level from a pack directory.
 pub fn hd_textures(game: &godd_game::Game, dir: &Path) -> AnyResult<Vec<Option<engine_scene::scene::HdTexture>>> {
     Ok(game.hd_textures(&engine_core::pack::LoadedPack::open(dir)?))
+}
+
+/// Time `frames` GPU frames of the `render-gpu` view (HUD included) with timestamp queries
+/// (plus wall time of submitting and waiting); returns a one-line report.
+pub fn bench_gpu(dir: &Path, level: &str, rest: &[&str], frames: usize) -> AnyResult<String> {
+    let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
+    let (adapter, device, queue) = engine_gpu::headless_adapter().ok_or("no GPU adapter")?;
+    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    renderer.use_adapter(&device, &queue, &adapter);
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
+    let view = game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
+    renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
+    renderer.set_images(&device, &queue, &game.world_images());
+    if let Some(dir) = rest.iter().find_map(|a| a.strip_prefix("pack=")) {
+        renderer.set_hd(&device, &queue, &hd_textures(&game, Path::new(dir))?);
+    }
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target = target.create_view(&Default::default());
+    let coverage = ui.coverage.clone().unwrap_or_default();
+    let list = ui.ui_list.clone().unwrap_or_default();
+    let vp = [0.0, 0.0, w as f32, h as f32];
+    let (mut gpu, mut wall) = (Vec::new(), Vec::new());
+    for i in 0..frames + 10 {
+        let started = std::time::Instant::now();
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &target, (w as u32, h as u32), vp, &view.camera, &view.shading, &view.scene);
+        renderer.draw_ui(&device, &queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, &coverage, &list, true);
+        queue.submit([encoder.finish()]);
+        renderer.submitted();
+        device.poll(wgpu::PollType::wait_indefinitely())?;
+        let g = renderer.gpu_ms(&device);
+        if i >= 10 {
+            wall.push(started.elapsed().as_secs_f32() * 1000.0);
+            gpu.extend(g);
+        }
+    }
+    let stats = |v: &[f32]| {
+        let avg = v.iter().sum::<f32>() / v.len().max(1) as f32;
+        let max = v.iter().copied().fold(0.0, f32::max);
+        format!("avg {avg:.2} ms, max {max:.2} ms")
+    };
+    let m = view.shading.modern;
+    Ok(format!(
+        "{w}x{h} {} msaa {} scale {:.2}{}: gpu {} | submit+wait {}",
+        adapter.get_info().name,
+        m.map_or(1, |m| m.msaa),
+        m.map_or(1.0, |m| m.render_scale),
+        if m.is_some_and(|m| m.fxaa) { " fxaa" } else { "" },
+        if gpu.is_empty() { "n/a (no timestamp queries)".to_string() } else { stats(&gpu) },
+        stats(&wall)
+    ))
 }
 
 /// Render a game module's current view off screen (UI layer included); returns RGB.

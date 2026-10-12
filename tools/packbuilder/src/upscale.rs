@@ -10,8 +10,20 @@ use engine_core::pack::{Rgba, decode_png, encode_png};
 /// Wrapped texels added around tiling images before ESRGAN (at the original size).
 const PAD: usize = 8;
 
+/// The Real-ESRGAN binary: `$REALESRGAN`, `realesrgan-ncnn-vulkan` on the PATH, or the
+/// portable release unpacked in `~/.local/share/exploding-lips/realesrgan/`.
+fn esrgan_binary() -> Option<std::path::PathBuf> {
+    let runs = |p: &std::path::Path| std::process::Command::new(p).arg("-h").output().is_ok();
+    let candidates = [
+        std::env::var_os("REALESRGAN").map(std::path::PathBuf::from),
+        Some("realesrgan-ncnn-vulkan".into()),
+        std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".local/share/exploding-lips/realesrgan/realesrgan-ncnn-vulkan")),
+    ];
+    candidates.into_iter().flatten().find(|p| runs(p))
+}
+
 pub fn esrgan_available() -> bool {
-    std::process::Command::new("realesrgan-ncnn-vulkan").arg("-h").output().is_ok()
+    esrgan_binary().is_some()
 }
 
 pub fn upscale_all(upscaler: &str, images: &[Rgba], classes: &[Class], scale: usize) -> AnyResult<Vec<Rgba>> {
@@ -158,7 +170,13 @@ fn esrgan(images: &[Rgba], classes: &[Class], scale: usize) -> AnyResult<Vec<Rgb
             continue;
         }
         println!("realesrgan-ncnn-vulkan: {} images with {model}", members.len());
-        let status = std::process::Command::new("realesrgan-ncnn-vulkan")
+        let binary = esrgan_binary().ok_or("realesrgan-ncnn-vulkan not found")?;
+        let mut command = std::process::Command::new(&binary);
+        // The portable release keeps its models next to the binary.
+        if let Some(models) = binary.parent().map(|d| d.join("models")).filter(|m| m.is_dir()) {
+            command.arg("-m").arg(models);
+        }
+        let status = command
             .args(["-i", &input.to_string_lossy(), "-o", &output.to_string_lossy(), "-n", model, "-s", &scale.to_string(), "-f", "png"])
             .status()?;
         if !status.success() {
