@@ -43,10 +43,10 @@ impl Presenter {
     }
 
     /// Draw a GPU world view with the UI layer on top. False when this presenter cannot (CPU).
-    pub fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame) -> bool {
+    pub fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame, pack: Option<&engine_core::pack::LoadedPack>) -> bool {
         match self {
             Self::Gpu(p) => {
-                p.present_world(game, view, ui);
+                p.present_world(game, view, ui, pack);
                 true
             }
             Self::Cpu(_) => false,
@@ -121,8 +121,8 @@ pub struct GpuPresenter {
     rgb_pipeline: wgpu::RenderPipeline,
     rgb_layout: wgpu::BindGroupLayout,
     rgb_tex: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
-    /// GPU world renderer and the level epoch whose images it holds.
-    world: Option<(engine_gpu::WorldRenderer, u64)>,
+    /// GPU world renderer, plus the level epoch and pack folder whose images it holds.
+    world: Option<(engine_gpu::WorldRenderer, (u64, Option<std::path::PathBuf>))>,
 }
 
 impl GpuPresenter {
@@ -139,7 +139,7 @@ impl GpuPresenter {
         log::info!("adapter: {:?}", adapter.get_info());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("lips"),
-            required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+            required_limits: engine_gpu::limits_for(&adapter),
             ..Default::default()
         }))
         .map_err(|e| e.to_string())?;
@@ -331,13 +331,21 @@ impl GpuPresenter {
         self.queue.present(output);
     }
 
-    fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame) {
+    fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame, pack: Option<&engine_core::pack::LoadedPack>) {
         let (device, queue) = (&self.device, &self.queue);
-        let (world, epoch) = self.world.get_or_insert_with(|| (engine_gpu::WorldRenderer::new(device, self.config.format), u64::MAX));
-        if *epoch != view.epoch {
+        let (world, loaded) = self.world.get_or_insert_with(|| (engine_gpu::WorldRenderer::new(device, self.config.format), (u64::MAX, None)));
+        let wanted = (view.epoch, pack.map(|p| p.dir.clone()));
+        if *loaded != wanted {
             world.set_palette(device, queue, game.palette(), game.shade_rows());
             world.set_images(device, queue, &game.world_images());
-            *epoch = view.epoch;
+            if let Some(pack) = pack {
+                let started = std::time::Instant::now();
+                let textures = game.hd_textures(pack);
+                let found = textures.iter().filter(|t| t.is_some()).count();
+                world.set_hd(device, queue, &textures);
+                log::info!("texture pack {}: {found} of {} images in {:.1} s", pack.dir.display(), textures.len(), started.elapsed().as_secs_f32());
+            }
+            *loaded = wanted;
         }
         for &i in &view.scene.dirty_images {
             if let Some(image) = game.world_image(i) {

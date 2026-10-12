@@ -656,6 +656,31 @@ impl Game {
         })
     }
 
+    /// Pack keys (name, content hash) of the current level's images, by image index.
+    pub fn world_image_keys(&self) -> Vec<(String, u64)> {
+        let Some(s) = self.session() else { return Vec::new() };
+        s.level
+            .world
+            .images
+            .iter()
+            .enumerate()
+            .map(|(i, img)| {
+                let name = s.level.orb.pics.get(i).map_or_else(|| format!("PIC{i}"), |p| p.name.trim().to_string());
+                (name, engine_core::pack::image_hash(img.width, img.height, &img.pixels))
+            })
+            .collect()
+    }
+
+    /// HD textures for the current level's images from a texture pack (by name and content).
+    pub fn hd_textures(&self, pack: &engine_core::pack::LoadedPack) -> Vec<Option<engine_scene::scene::HdTexture>> {
+        use engine_scene::scene::{HdTexture, RgbaImage};
+        let conv = |r: engine_core::pack::Rgba| RgbaImage { width: r.width, height: r.height, pixels: r.pixels };
+        pack.textures(&self.world_image_keys())
+            .into_iter()
+            .map(|t| t.map(|(a, n)| HdTexture { albedo: conv(a), normal: n.map(conv) }))
+            .collect()
+    }
+
     /// One world image (live camera views change every frame).
     pub fn world_image(&self, index: u32) -> Option<engine_scene::scene::IndexedImage<'_>> {
         let i = self.session()?.level.world.images.get(index as usize)?;

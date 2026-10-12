@@ -9,6 +9,7 @@ pub mod clock;
 pub mod config;
 pub mod cvar;
 pub mod frame;
+pub mod pack;
 pub mod vfs;
 
 pub use audio::{AudioEvent, wav_seconds};

@@ -3,10 +3,16 @@
 //! (shade tables) or continuous true-colour light; the UI pass composites a CPU-drawn indexed
 //! layer by its coverage mask. Works with WebGL2-level limits (no storage buffers).
 
-use engine_scene::scene::{IndexedImage, SceneCamera, SceneFrame, Shading};
+use engine_scene::scene::{HdTexture, IndexedImage, SceneCamera, SceneFrame, Shading};
 
+mod hd;
 mod post;
+use hd::HdSet;
 use post::Post;
+
+/// Vertex flags added by the renderer: sample the HD texture set (and its normal map).
+const FLAG_HD: u32 = 1 << 16;
+const FLAG_HD_NORMAL: u32 = 1 << 17;
 
 /// HDR format for modern lighting.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -112,6 +118,8 @@ pub struct WorldRenderer {
     layout: wgpu::BindGroupLayout,
     lights: wgpu::Buffer,
     post: Post,
+    hd: Option<HdSet>,
+    hd_sampler: wgpu::Sampler,
     clip_layout: wgpu::BindGroupLayout,
     /// Per-batch clip windows (256-byte blocks bound with a dynamic offset).
     clips: Option<(wgpu::Buffer, wgpu::BindGroup, u64)>,
@@ -137,6 +145,7 @@ impl WorldRenderer {
             ty: wgpu::BindingType::Texture { sample_type, view_dimension, multisampled: false },
             count: None,
         };
+        let hd_tex = |binding| tex(binding, wgpu::TextureSampleType::Float { filterable: true }, wgpu::TextureViewDimension::D2Array);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("world"),
             entries: &[
@@ -153,6 +162,22 @@ impl WorldRenderer {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                hd_tex(5),
+                hd_tex(6),
+                hd_tex(7),
+                hd_tex(8),
+                hd_tex(9),
+                hd_tex(10),
+                hd_tex(11),
+                hd_tex(12),
+                hd_tex(13),
+                hd_tex(14),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -196,6 +221,17 @@ impl WorldRenderer {
             layout,
             lights,
             post: Post::new(device, format),
+            hd: None,
+            hd_sampler: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("hd"),
+                address_mode_u: wgpu::AddressMode::Repeat,
+                address_mode_v: wgpu::AddressMode::Repeat,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
+                anisotropy_clamp: 16,
+                ..Default::default()
+            }),
             clip_layout,
             clips: None,
             uniforms,
@@ -265,12 +301,20 @@ impl WorldRenderer {
         write(queue, &self.colormap.as_ref().expect("colormap").0, &data, (0, 0, 0), (256, levels), 1);
     }
 
+    /// HD replacements for the images (same indices as [`WorldRenderer::set_images`]); used
+    /// with modern lighting. Call after `set_images` for each level.
+    pub fn set_hd(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, textures: &[Option<HdTexture>]) {
+        self.hd = Some(HdSet::new(device, queue, textures));
+        self.bind_group = None;
+    }
+
     /// Upload all images (a new level). Vertices refer to them by index.
     pub fn set_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &[IndexedImage]) {
         let (slots, layers) = pack(&images.iter().map(|i| (i.width, i.height)).collect::<Vec<_>>());
         let atlas = texture(device, "atlas", LAYER, LAYER, layers, wgpu::TextureFormat::R8Uint);
         self.atlas = Some(atlas);
         self.slots = slots;
+        self.hd = None; // the previous level's pack textures no longer match
         self.bind_group = None;
         for (i, &image) in images.iter().enumerate() {
             self.update_image(queue, i as u32, image);
@@ -307,9 +351,14 @@ impl WorldRenderer {
         scene: &SceneFrame,
     ) {
         let original_viewport = viewport;
+        if self.hd.is_none() {
+            self.hd = Some(HdSet::empty(device, queue));
+            self.bind_group = None;
+        }
         let pipeline = self.pipeline(device, if shading.modern.is_some() { HDR_FORMAT } else { self.format }, shading.modern.map_or(1, |m| m.msaa.clamp(1, 8)));
         let (Some(atlas), Some((colormap, levels))) = (&self.atlas, &self.colormap) else { return };
         if self.bind_group.is_none() {
+            let hd = self.hd.as_ref().expect("hd set");
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
             self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("world"),
@@ -326,6 +375,17 @@ impl WorldRenderer {
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&self.palette)) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(colormap)) },
                     wgpu::BindGroupEntry { binding: 4, resource: self.lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&hd.albedo[0]) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&hd.albedo[1]) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&hd.albedo[2]) },
+                    wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hd.albedo[3]) },
+                    wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&hd.albedo[4]) },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(&hd.normal[0]) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::TextureView(&hd.normal[1]) },
+                    wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&hd.normal[2]) },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&hd.normal[3]) },
+                    wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&hd.normal[4]) },
+                    wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::Sampler(&self.hd_sampler) },
                 ],
             }));
         }
@@ -395,9 +455,22 @@ impl WorldRenderer {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         // Vertices with their images' atlas slots.
         self.staging.clear();
+        let hd_slots = self.hd.as_ref().map_or(&[][..], |h| &h.slots[..]);
+        let use_hd = modern.is_some();
         self.staging.extend(scene.vertices.iter().map(|v| {
             let s = self.slots.get(v.image as usize).copied().unwrap_or(Slot { w: 1, h: 1, ..Default::default() });
-            GpuVertex { pos: v.pos, uv: v.uv, rect: [s.x, s.y, s.w, s.h], layer_flags: [s.layer, v.flags], light: v.light, normal: v.normal }
+            match hd_slots.get(v.image as usize).copied().flatten().filter(|_| use_hd && v.flags & engine_scene::scene::SKY == 0) {
+                // HD: class and layer replace the atlas position; the logical size stays.
+                Some(h) => GpuVertex {
+                    pos: v.pos,
+                    uv: v.uv,
+                    rect: [h.class as u16, h.layer, s.w, s.h],
+                    layer_flags: [h.layer as u32, v.flags | FLAG_HD | if h.normal { FLAG_HD_NORMAL } else { 0 }],
+                    light: v.light,
+                    normal: v.normal,
+                },
+                None => GpuVertex { pos: v.pos, uv: v.uv, rect: [s.x, s.y, s.w, s.h], layer_flags: [s.layer, v.flags], light: v.light, normal: v.normal },
+            }
         }));
         let bytes = bytemuck::cast_slice::<GpuVertex, u8>(&self.staging);
         if self.vertices.as_ref().is_none_or(|(_, cap)| *cap < bytes.len() as u64) {
@@ -638,6 +711,16 @@ fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, data: &[u8], (x, y, z): (
     );
 }
 
+/// Device limits: WebGL2-level baseline (so everything also runs in browsers), raised to the
+/// adapter's resolution and texture-array sizes (HD texture packs need many layers).
+pub fn limits_for(adapter: &wgpu::Adapter) -> wgpu::Limits {
+    let a = adapter.limits();
+    let mut l = wgpu::Limits::downlevel_webgl2_defaults().using_resolution(a.clone());
+    l.max_texture_array_layers = a.max_texture_array_layers;
+    l.max_sampled_textures_per_shader_stage = a.max_sampled_textures_per_shader_stage.min(32);
+    l
+}
+
 /// A device without a window, for tools and tests. `None` when no adapter is available.
 pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
@@ -650,7 +733,7 @@ pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
     .ok()?;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("headless"),
-        required_limits: wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+        required_limits: limits_for(&adapter),
         ..Default::default()
     }))
     .ok()

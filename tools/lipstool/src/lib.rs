@@ -73,6 +73,16 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
 
 /// Render the view of `lipstool render` through the GPU renderer; returns RGB.
 pub fn render_gpu(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(usize, usize, Vec<u8>)> {
+    render_gpu_with(dir, level, rest, |_| None)
+}
+
+/// As [`render_gpu`], with HD textures supplied by `hd` (overrides a `pack=` argument).
+pub fn render_gpu_with(
+    dir: &Path,
+    level: &str,
+    rest: &[&str],
+    hd: impl Fn(&godd_game::Game) -> Option<Vec<Option<engine_scene::scene::HdTexture>>>,
+) -> AnyResult<(usize, usize, Vec<u8>)> {
     let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
     let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
     let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
@@ -86,6 +96,11 @@ pub fn render_gpu(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(usize, u
     let view = view.ok_or("no level running")?;
     renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
     renderer.set_images(&device, &queue, &game.world_images());
+    if let Some(textures) = hd(&game) {
+        renderer.set_hd(&device, &queue, &textures);
+    } else if let Some(dir) = rest.iter().find_map(|a| a.strip_prefix("pack=")) {
+        renderer.set_hd(&device, &queue, &hd_textures(&game, Path::new(dir))?);
+    }
     let coverage = ui.coverage.clone().unwrap_or_default();
     let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage)));
     Ok((w, h, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()))
@@ -211,4 +226,9 @@ pub fn bench_scene(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyRe
         game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
     }
     Ok(start.elapsed().as_secs_f64() * 1000.0 / frames as f64)
+}
+
+/// HD textures for the current level from a pack directory.
+pub fn hd_textures(game: &godd_game::Game, dir: &Path) -> AnyResult<Vec<Option<engine_scene::scene::HdTexture>>> {
+    Ok(game.hd_textures(&engine_core::pack::LoadedPack::open(dir)?))
 }

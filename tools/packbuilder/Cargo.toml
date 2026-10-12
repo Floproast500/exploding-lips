@@ -1,0 +1,11 @@
+[package]
+name = "packbuilder"
+description = "Build an HD texture pack from your own Exploding Lips files (upscaled albedo + normal maps)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+engine-core.workspace = true
+godd-formats.workspace = true
+godd-game.workspace = true

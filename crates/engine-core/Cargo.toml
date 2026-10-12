@@ -7,3 +7,4 @@ version.workspace = true
 
 [dependencies]
 log.workspace = true
+png = "0.17"

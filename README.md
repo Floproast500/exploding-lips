@@ -15,6 +15,7 @@ the engine reads them from your install folder at runtime.
 | File formats: XRB levels, XPG pixels, PAL, PIC, BMP, INI scripts, GAM saves | parsed; tested on every shipped file; byte-identical save rewrite; damaged-input robustness tests |
 | Renderer: portals, stacked (room-over-room) regions, floors/ceilings, sky, sprites with rotations, masked walls, original lighting | software renderer matches the original (golden test: RMSE 0.04 view / 0.06 full screen vs. `lips.exe`) |
 | GPU renderer (wgpu): triangulated regions, portal visibility with exact screen windows, original shade tables or true colour, true-3D freelook | matches the software renderer (parity test: 110 views over 9 levels, worst RMSE 0.03); default on desktop (`r_renderer`) |
+| HD texture packs (`tools/packbuilder`, `r_texpack`): 4x upscaled textures with normal maps, mipmaps, anisotropic filtering | texture coordinates verified unchanged (test: 4x copies render within RMSE 0.02 of the originals) |
 | Modern lighting (`r_lighting modern`, default with the GPU renderer): smooth light fitted to the original shade tables, coloured dynamic lights (shots, projectiles, explosions), HDR, 4x MSAA, bloom, soft/filmic tonemapping, exposure | 3440x1440 in ~0.8 ms GPU + 0.3 ms CPU per frame on an RX 9070 XT (`lipstool bench-gpu`) |
 | Movement & collision (walk/run/turn/jump/fall/step, see-through floors) | constants from the original; golden-tested against memory probes of `lips.exe` |
 | Script VM (`ONTAG`, tags, OS states with thresholds, `XM`/`XT`/`OTEXT`/`XCHANGE`/…) | complete for the shipped INIs, original quirks included |
@@ -36,7 +37,8 @@ Engine code is written from those specs, not from decompiler output.
 ```
 crates/engine-core    game-agnostic core: frame, VFS, clock, cvars, bindings, config, audio requests
 crates/engine-scene   scene data for GPU renderers: sector outlines, triangulation, per-frame scenes
-crates/engine-gpu     wgpu renderer: palette-indexed world pass, portal clip windows, UI overlay
+crates/engine-gpu     wgpu renderer: palette-indexed world pass, portal clip windows, HDR/bloom, HD packs, UI
+tools/packbuilder     build HD texture packs (Real-ESRGAN or scale2x, normal maps) from your own files
 crates/godd-formats   parsers for the data files (no platform dependencies)
 crates/godd-game      engine core: world, renderer, physics, scripts, effects, objects, UI
 crates/godd-net       netplay protocol, UDP/WebSocket server, client glue (feature "game")
@@ -73,6 +75,20 @@ quicksave. The file is plain `set` / `bind` lines, the same commands the console
 `set r_fov 90`, `toggle cl_autorun`, `cvarlist`, `bind mouse:Right Jump`, `unbind key:KeyF`. An old
 `settings.ini` is imported once. On a Steam Deck the game defaults to 1280x800 fullscreen. The web
 build keeps the same config in browser storage.
+
+**HD texture packs** (modern lighting): build one from your own files, then point the game at it.
+Packs are generated locally and must not be shared.
+
+```sh
+cargo run --release -p packbuilder -- /path/to/ExplodingLips packs/lips-hd
+#   uses Real-ESRGAN (realesrgan-ncnn-vulkan, AUR) when installed, else the built-in scale2x
+#   --upscaler esrgan|scale2x   --levels LIPS00,LIPS01   --normal-strength 2.0
+cargo run --release -p lips-desktop -- --set r_texpack packs/lips-hd    # or `set r_texpack ...` in the console
+```
+
+Every image is upscaled 4x (tiling textures with wrap-around padding so edges stay seamless,
+sprites with clean alpha) and gets a normal map; the renderer keeps the original texture
+coordinates, filters with mipmaps and anisotropy, and lights the normal maps.
 
 **Music** needs a General MIDI SoundFont (e.g. `soundfont-fluid` on Arch); sound effects play
 without one.

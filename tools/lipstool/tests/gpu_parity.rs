@@ -46,3 +46,43 @@ fn gpu_matches_software() {
     assert!(views.len() > 60, "enough viewpoints");
     assert!(worst.0 < 0.05, "worst view {} RMSE {:.4}", worst.1, worst.0);
 }
+
+/// HD textures keep the original texture coordinates: replacing every image by a 4x
+/// nearest-neighbour copy (as a pack) changes the modern render only by filtering.
+#[test]
+fn hd_textures_keep_texture_coordinates() {
+    use engine_scene::scene::{HdTexture, RgbaImage};
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../original");
+    if !dir.join("LIPS00.XRB").exists() || engine_gpu::headless().is_none() {
+        eprintln!("skipped: needs original/ and a GPU adapter");
+        return;
+    }
+    let upscaled = |game: &godd_game::Game| {
+        let pal = *game.palette();
+        Some(
+            game.world_images()
+                .iter()
+                .map(|img| {
+                    let (w, h) = (img.width * 4, img.height * 4);
+                    let pixels = (0..h)
+                        .flat_map(|y| (0..w).map(move |x| (x, y)))
+                        .flat_map(|(x, y)| {
+                            let i = img.pixels[(y / 4) * img.width + x / 4];
+                            let [r, g, b] = pal[i as usize];
+                            [r, g, b, if i == 0 { 0 } else { 255 }]
+                        })
+                        .collect();
+                    Some(HdTexture { albedo: RgbaImage { width: w, height: h, pixels }, normal: None })
+                })
+                .collect(),
+        )
+    };
+    for (level, region) in [("LIPS00", "r126"), ("LIPS09", "r93")] {
+        let args = ["640x400", "135", region, "-", "0", "modern"];
+        let (_, _, plain) = lipstool::render_gpu(&dir, level, &args).unwrap();
+        let (_, _, hd) = lipstool::render_gpu_with(&dir, level, &args, upscaled).unwrap();
+        let e = rmse(&plain, &hd);
+        println!("{level}: HD vs indexed RMSE {e:.4}");
+        assert!(e < 0.04, "{level}: HD textures moved or stretched (RMSE {e:.4})");
+    }
+}

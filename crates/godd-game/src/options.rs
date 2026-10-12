@@ -22,6 +22,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.choice("r_msaa", "Anti-aliasing", Video, &["off", "4x"], 1);
     c.choice("r_tonemap", "Tonemapping", Video, &["clamp", "soft", "filmic"], 1);
     c.float("r_exposure", "Exposure", Video, (0.25, 4.0, 0.05), 1.0);
+    // HD texture pack folder (built with tools/packbuilder from your own files); "" = none.
+    c.string("r_texpack", "Texture pack", Video, "");
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);

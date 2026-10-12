@@ -27,6 +27,18 @@ struct Lights {
 @group(0) @binding(2) var palette: texture_2d<f32>;      // 256 x 1
 @group(0) @binding(3) var colormap: texture_2d<u32>;     // 256 x levels
 @group(0) @binding(4) var<uniform> lights: Lights;
+// HD texture packs: colour and normal-map arrays per size class (64 .. 1024).
+@group(0) @binding(5) var hd0: texture_2d_array<f32>;
+@group(0) @binding(6) var hd1: texture_2d_array<f32>;
+@group(0) @binding(7) var hd2: texture_2d_array<f32>;
+@group(0) @binding(8) var hd3: texture_2d_array<f32>;
+@group(0) @binding(9) var hd4: texture_2d_array<f32>;
+@group(0) @binding(10) var nm0: texture_2d_array<f32>;
+@group(0) @binding(11) var nm1: texture_2d_array<f32>;
+@group(0) @binding(12) var nm2: texture_2d_array<f32>;
+@group(0) @binding(13) var nm3: texture_2d_array<f32>;
+@group(0) @binding(14) var nm4: texture_2d_array<f32>;
+@group(0) @binding(15) var hd_smp: sampler;
 
 // Portal window of the current batch: inside where every edge equation is >= 0 (NDC).
 struct Clip {
@@ -42,6 +54,8 @@ const DISCARD_OUTSIDE_V: u32 = 8u;
 const CLAMP: u32 = 16u;
 const OBJECT: u32 = 32u;
 const VOID: u32 = 64u;
+const HD: u32 = 65536u;
+const HD_NORMAL: u32 = 131072u;
 const TAU: f32 = 6.28318530718;
 
 struct VsIn {
@@ -103,11 +117,37 @@ fn brightness(shade: f32) -> f32 {
 }
 
 fn modern_color(index: u32, shade: f32, world: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
-    let albedo = to_linear(color_of(index).rgb);
     var b = brightness(shade);
     if (((u.emissive[index / 128u][(index / 32u) % 4u] >> (index % 32u)) & 1u) != 0u) {
         b = max(b, 1.5);
     }
+    return lit(to_linear(color_of(index).rgb), b, world, normal);
+}
+
+fn hd_color(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec4<f32> {
+    switch cls {
+        case 0u: { return textureSampleGrad(hd0, hd_smp, uv, layer, gx, gy); }
+        case 1u: { return textureSampleGrad(hd1, hd_smp, uv, layer, gx, gy); }
+        case 2u: { return textureSampleGrad(hd2, hd_smp, uv, layer, gx, gy); }
+        case 3u: { return textureSampleGrad(hd3, hd_smp, uv, layer, gx, gy); }
+        default: { return textureSampleGrad(hd4, hd_smp, uv, layer, gx, gy); }
+    }
+}
+
+fn hd_normal(cls: u32, layer: i32, uv: vec2<f32>, gx: vec2<f32>, gy: vec2<f32>) -> vec3<f32> {
+    var n: vec4<f32>;
+    switch cls {
+        case 0u: { n = textureSampleGrad(nm0, hd_smp, uv, layer, gx, gy); }
+        case 1u: { n = textureSampleGrad(nm1, hd_smp, uv, layer, gx, gy); }
+        case 2u: { n = textureSampleGrad(nm2, hd_smp, uv, layer, gx, gy); }
+        case 3u: { n = textureSampleGrad(nm3, hd_smp, uv, layer, gx, gy); }
+        default: { n = textureSampleGrad(nm4, hd_smp, uv, layer, gx, gy); }
+    }
+    return n.xyz * 2.0 - 1.0;
+}
+
+// Linear colour lit by the sector brightness and the dynamic lights.
+fn lit(albedo: vec3<f32>, b: f32, world: vec3<f32>, normal: vec3<f32>) -> vec4<f32> {
     var light = vec3<f32>(b);
     if (u.modern.y > 0.5) {
         let n = normalize(normal);
@@ -159,6 +199,11 @@ fn sky_index(frag: vec2<f32>) -> u32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Derivatives first, while control flow is still uniform (HD sampling and normal maps).
+    let duv_dx = dpdx(in.uv);
+    let duv_dy = dpdy(in.uv);
+    let dp_dx = dpdx(in.world);
+    let dp_dy = dpdy(in.world);
     let px = in.clip.xy - u.viewport.xy;
     let ndc = vec2<f32>(px.x / u.viewport.z * 2.0 - 1.0, 1.0 - px.y / u.viewport.w * 2.0);
     for (var i = 0u; i < clip.count.x; i = i + 1u) {
@@ -176,6 +221,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             return vec4<f32>(to_linear(color_of(0u).rgb), 1.0);
         }
         return color_of(0u);
+    }
+    if ((flags & HD) != 0u) {
+        return hd_main(in, flags, duv_dx, duv_dy, dp_dx, dp_dy);
     }
     let w = i32(in.rect.z);
     let h = i32(in.rect.w);
@@ -224,4 +272,57 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         lit = u32(u.shading2.y);
     }
     return color_of(lit);
+}
+
+// Shade value (darkness level) of a fragment, as for indexed textures.
+fn shade_of(in: VsOut, flags: u32) -> f32 {
+    var shade = in.light + u.shading.y;
+    if ((flags & NO_DISTANCE) == 0u) {
+        shade = shade + in.depth / u.shading.x;
+    }
+    if ((flags & OBJECT) != 0u) {
+        shade = min(shade, u.shading2.x);
+    }
+    if (u.shading.w > 0.5) {
+        shade = 0.0;
+    }
+    return shade;
+}
+
+// HD texture from a pack (modern lighting): filtered colour, alpha test, normal map.
+fn hd_main(in: VsOut, flags: u32, duv_dx: vec2<f32>, duv_dy: vec2<f32>, dp_dx: vec3<f32>, dp_dy: vec3<f32>) -> vec4<f32> {
+    let size = vec2<f32>(f32(in.rect.z), f32(in.rect.w));
+    if ((flags & DISCARD_OUTSIDE_V) != 0u && (in.uv.y < 0.0 || in.uv.y >= size.y)) {
+        discard;
+    }
+    var uv = in.uv / size;
+    if ((flags & CLAMP) != 0u) {
+        uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));
+    }
+    let gx = duv_dx / size;
+    let gy = duv_dy / size;
+    let cls = in.rect.x;
+    let layer = i32(in.rect.y);
+    let c = hd_color(cls, layer, uv, gx, gy);
+    if ((flags & TRANSPARENT) != 0u && c.a < 0.5) {
+        discard;
+    }
+    let n = normalize(in.normal);
+    var shading_normal = n;
+    var relief = 1.0;
+    if ((flags & HD_NORMAL) != 0u) {
+        // Cotangent frame from screen-space derivatives (no tangent attributes needed).
+        let dp2perp = cross(dp_dy, n);
+        let dp1perp = cross(n, dp_dx);
+        let t = dp2perp * duv_dx.x + dp1perp * duv_dy.x;
+        let b = dp2perp * duv_dx.y + dp1perp * duv_dy.y;
+        let inv = inverseSqrt(max(max(dot(t, t), dot(b, b)), 1e-12));
+        let tn = hd_normal(cls, layer, uv, gx, gy);
+        shading_normal = normalize(t * inv * tn.x + b * inv * tn.y + n * tn.z);
+        // Relief under sector light: surfaces facing away from the viewer darken slightly.
+        let v = normalize(u.cam.xyz - in.world);
+        relief = clamp(dot(shading_normal, v) / max(dot(n, v), 0.25), 0.7, 1.15);
+    }
+    let b = brightness(shade_of(in, flags)) * mix(1.0, relief, 0.6);
+    return lit(c.rgb, b, in.world, shading_normal);
 }

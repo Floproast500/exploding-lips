@@ -105,6 +105,8 @@ struct App {
     frame: Frame,
     /// UI layer composited over the GPU world view.
     ui: Frame,
+    /// HD texture pack (r_texpack).
+    pack: Option<engine_core::pack::LoadedPack>,
     last: Instant,
     window: Option<Arc<Window>>,
     mouse_captured: bool,
@@ -173,13 +175,14 @@ impl App {
         // GPU world renderer (r_renderer gpu) when the presenter has a GPU; the software
         // renderer for classic 320x200, the title screen and CPU presentation.
         let want_gpu = self.game.cvars.get_str("r_renderer") == "gpu" && self.presenter.as_ref().is_some_and(present::Presenter::is_gpu);
+        self.update_pack();
         if want_gpu {
             let (uw, uh) = self.game.ui_layer_size(w, h);
             self.ui.resize(uw, uh);
             self.ui.pixel_aspect = 1.0;
             if let Some(view) = self.game.gpu_frame(&mut self.ui, self.clock.alpha())
                 && let Some(p) = &mut self.presenter
-                && p.present_world(&self.game, &view, &self.ui)
+                && p.present_world(&self.game, &view, &self.ui, self.pack.as_ref())
             {
                 return;
             }
@@ -191,6 +194,17 @@ impl App {
         if let Some(p) = &mut self.presenter {
             p.present(&self.frame, self.game.palette());
         }
+    }
+
+    /// Follow r_texpack: open the pack folder when it changes (textures load with the level).
+    fn update_pack(&mut self) {
+        let want = self.game.cvars.get_str("r_texpack");
+        if self.pack.as_ref().map(|p| p.dir.display().to_string()) == Some(want.clone()).filter(|w| !w.is_empty()) || (want.is_empty() && self.pack.is_none()) {
+            return;
+        }
+        self.pack = (!want.is_empty())
+            .then(|| engine_core::pack::LoadedPack::open(std::path::Path::new(&want)).map_err(|e| log::warn!("texture pack: {e}")).ok())
+            .flatten();
     }
 
     fn key(&mut self, event: &KeyEvent) {
@@ -387,6 +401,7 @@ fn main() {
         clock: FixedClock::new(TICK_RATE),
         frame: Frame::new(640, 480),
         ui: Frame::new(640, 480),
+        pack: None,
         last: Instant::now(),
         window: None,
         mouse_captured: false,

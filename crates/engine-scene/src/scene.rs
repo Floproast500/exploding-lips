@@ -107,6 +107,22 @@ pub struct Batch {
     pub clip: Option<Vec<[f32; 2]>>,
 }
 
+/// An RGBA8 image (sRGB colour, straight alpha).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RgbaImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
+}
+
+/// A high-resolution replacement for one image (texture packs): colour with alpha and an
+/// optional tangent-space normal map. Texture coordinates keep the original's texel units.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HdTexture {
+    pub albedo: RgbaImage,
+    pub normal: Option<RgbaImage>,
+}
+
 /// One frame's scene.
 #[derive(Debug, Clone, Default)]
 pub struct SceneFrame {

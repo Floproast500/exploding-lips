@@ -9,3 +9,4 @@ crates/lips-web/www/pkg/
 tools/pilot/launcher/*.exe
 tools/pilot/node_modules/
 re/*.log
+packs/
