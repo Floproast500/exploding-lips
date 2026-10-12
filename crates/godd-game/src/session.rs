@@ -31,8 +31,11 @@ pub struct Session {
     /// The level's BSP world (`[startup] loadbspfilename`), and whether the player is in it.
     pub bsp: Option<Box<crate::bsp_world::BspWorld>>,
     pub in_bsp: bool,
-    /// Background sound now playing (region sounds, the BSP stay).
+    /// The background now playing: the level's own (its music, MIDI or a recording) until a
+    /// region or the BSP stay names another; one at a time, as in the original.
     background: Option<String>,
+    /// The level's default background (restored by a region sound of `BACKSND`).
+    default_background: Option<String>,
     /// Sound names that exist only as MIDI (background "sounds" such as TOCATTA are music).
     midi_only: std::collections::HashSet<String>,
     pub level: Level,
@@ -71,7 +74,7 @@ pub struct Session {
     pub quit_requested: bool,
     /// Currently selected tool (HUD "Tool").
     pub tool: usize,
-    audio: Vec<AudioEvent>,
+    pub audio: Vec<AudioEvent>,
 }
 
 /// A secondary view shown on walls (WTV): rendered from its camera object into an image.
@@ -143,6 +146,7 @@ impl Session {
             bsp,
             in_bsp: false,
             background: None,
+            default_background: None,
             midi_only: midi_only_names(vfs),
             menus,
             save,
@@ -191,20 +195,12 @@ impl Session {
                 session.script.activate_tag(STARTUP_TAG);
             }
         }
-        // A new level: the previous one's recorded music and background sound stop.
-        session.audio.push(AudioEvent::Stop { channel: MUSIC_CHANNEL });
+        // A new level: its own background (music) replaces whatever played before.
         session.audio.push(AudioEvent::Stop { channel: BACKGROUND_CHANNEL });
-        if let Some(music) = session.level.music_name() {
-            // Level music is MIDI, except where the game ships it as a recording (LIPS00's
-            // DUNGN10 exists only as snd/dungn10.wav): loop that instead.
-            let midi = vfs.read(&crate::music_path(&music)).is_ok();
-            if !midi && vfs.read(&crate::sound_path(&music)).is_ok() {
-                session.audio.push(AudioEvent::Music { name: None, looped: false });
-                session.audio.push(AudioEvent::Loop { channel: MUSIC_CHANNEL, name: music, volume: 1.0, pan: 0.0, pos: None });
-            } else {
-                session.audio.push(AudioEvent::Music { name: Some(music), looped: true });
-            }
-        }
+        session.audio.push(AudioEvent::Music { name: None, looped: false });
+        session.default_background = session.level.music_name();
+        let default = session.default_background.clone();
+        session.play_background(default);
         session.process_script_events();
         session.apply_tv_textures();
         let available = session.script.available_tools;
@@ -627,7 +623,7 @@ impl Session {
     }
 
     /// The background sound of `region` (region record +0x100), as on entering it.
-    fn region_background(&mut self, region: usize) {
+    pub fn region_background(&mut self, region: usize) {
         let sound = self
             .level
             .orb
@@ -642,24 +638,41 @@ impl Session {
         }
     }
 
-    /// Switch the background sound: BSNDOFF / BACKSND stop it, other names loop.
+    /// A region's (or the BSP stay's) background sound: `BACKSND` goes back to the level's
+    /// own, `BSNDOFF` silences it, any other name replaces it.
     fn set_background(&mut self, name: Option<String>) {
         let Some(name) = name else { return };
-        if self.background.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&name)) {
+        let target = if name.eq_ignore_ascii_case("BACKSND") {
+            self.default_background.clone()
+        } else if name.eq_ignore_ascii_case("BSNDOFF") {
+            None
+        } else {
+            Some(name)
+        };
+        self.play_background(target);
+    }
+
+    /// Make `target` the one background playing (MIDI pieces through the music player,
+    /// recordings looped), stopping the previous one.
+    fn play_background(&mut self, target: Option<String>) {
+        let same = match (&self.background, &target) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
             return;
         }
         self.audio.push(AudioEvent::Stop { channel: BACKGROUND_CHANNEL });
-        if name.eq_ignore_ascii_case("BSNDOFF") || name.eq_ignore_ascii_case("BACKSND") {
-            self.background = None;
-        } else if self.midi_only.contains(&name.to_ascii_uppercase()) {
-            // A MIDI piece: it replaces the music.
-            self.audio.push(AudioEvent::Stop { channel: MUSIC_CHANNEL });
-            self.audio.push(AudioEvent::Music { name: Some(name.clone()), looped: true });
-            self.background = Some(name);
-        } else {
-            self.audio.push(AudioEvent::Loop { channel: BACKGROUND_CHANNEL, name: name.clone(), volume: 1.0, pan: 0.0, pos: None });
-            self.background = Some(name);
+        self.audio.push(AudioEvent::Music { name: None, looped: false });
+        if let Some(name) = &target {
+            if self.midi_only.contains(&name.to_ascii_uppercase()) {
+                self.audio.push(AudioEvent::Music { name: Some(name.clone()), looped: true });
+            } else {
+                self.audio.push(AudioEvent::Loop { channel: BACKGROUND_CHANNEL, name: name.clone(), volume: 1.0, pan: 0.0, pos: None });
+            }
         }
+        self.background = target;
     }
 
     fn teleport(&mut self, x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize>) {
@@ -976,8 +989,6 @@ fn seed_from(name: &str) -> u64 {
 
 /// Audio channel of the background sound (object loops use 1000 and up).
 const BACKGROUND_CHANNEL: u32 = 999;
-/// Audio channel of level music shipped as a WAV recording.
-const MUSIC_CHANNEL: u32 = 998;
 
 /// Load the level's BSP world (`[startup] loadbspfilename`) with the level's ORORB exit cubes and
 /// OPTAGSW tag cubes.

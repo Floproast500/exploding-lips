@@ -132,6 +132,8 @@ pub struct Obj {
     pub sprite: Option<usize>,
     pub hidden: bool,
     pub destroyed: bool,
+    /// Distance to the player at the last bump (OSOUND reach).
+    bump_distance: f32,
     /// In contact with the player this frame / last frame (first-contact edge).
     contact: bool,
     cooldown: f32,
@@ -170,6 +172,8 @@ struct SoundState {
     slot: usize,
     reps: i32,
     looping: bool,
+    /// Positional sounds started by a bump stop when the player gets farther than this.
+    reach: Option<f32>,
 }
 
 impl Obj {
@@ -192,6 +196,7 @@ impl Obj {
             sprite: None,
             hidden: false,
             destroyed: false,
+            bump_distance: 0.0,
             contact: false,
             cooldown: 0.0,
             mover: None,
@@ -781,7 +786,14 @@ impl Objects {
                     self.requests.push(ObjRequest::TriggerNamed(format!("@setheight:{i}:{region}")));
                 }
             }
-            fx::OSOUND => self.start_sound(i, now),
+            fx::OSOUND => {
+                self.start_sound(i, now);
+                // Bumped positional sounds play while the player stays within the distance
+                // they were bumped from (+2).
+                if matches!(how, Trigger::Bump) && aux.as_ref().is_some_and(|a| a.ints[2] % 10 > 0) {
+                    self.list[i].sound.reach = Some(self.list[i].bump_distance + 2.0);
+                }
+            }
             fx::OSNDSEQ => {
                 if self.list[i].sound.active {
                     self.stop_sound(i);
@@ -958,6 +970,10 @@ impl Objects {
             if o.sound.looping {
                 if aux.ints[2] % 10 > 0 {
                     let d = ((o.x - player.x).powi(2) + (o.y - player.y).powi(2)).sqrt();
+                    if o.sound.reach.is_some_and(|r| d > r) {
+                        self.stop_sound(i); // walked away from where it was started
+                        continue;
+                    }
                     let falloff = aux.ints[3].max(1) as f32;
                     let vol = (aux.ints[1].clamp(1, 1000) as f32 - d / falloff).max(0.0) / 1000.0;
                     let pan = ((o.y - player.y).atan2(o.x - player.x) - player.angle).sin() * -0.8;
@@ -1203,9 +1219,11 @@ impl Objects {
                 && o.z <= player.z + player.height
                 && player.z <= o.z + o.height;
             let was = o.contact;
+            let distance = (o.x - player.x).hypot(o.y - player.y);
             self.list[i].contact = touching;
             self.list[i].cooldown = (self.list[i].cooldown - frame_dt).max(0.0);
             if touching && !was {
+                self.list[i].bump_distance = distance;
                 self.bump(i, false, now);
             }
         }

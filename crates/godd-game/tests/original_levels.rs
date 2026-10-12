@@ -961,3 +961,32 @@ fn lips00_recorded_music_plays() {
     assert!(events.iter().any(|e| matches!(e, AudioEvent::Loop { name, .. } if name.eq_ignore_ascii_case("DUNGN10"))), "{events:?}");
     assert!(events.iter().any(|e| matches!(e, AudioEvent::Stop { .. })));
 }
+
+/// One background at a time, as in the original: the level's own (LIPS00: the DUNGN10
+/// recording) until a region names another (FIRE01), and `BACKSND` regions bring it back.
+#[test]
+fn lips00_region_backgrounds_replace_each_other() {
+    use godd_formats::xrb::{RecordExt, Section};
+    use godd_game::AudioEvent;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.1);
+    let s = game.session().unwrap();
+    let named = |want: &str| {
+        let sounds = s.level.orb.records(Section::Sounds);
+        s.level.orb.records(Section::Regions).iter().position(|r| {
+            usize::try_from(r.le_i32(0x100)).ok().and_then(|k| sounds.get(k)).is_some_and(|rec| String::from_utf8_lossy(&rec[0x0c..0x18]).trim_end_matches('\0').eq_ignore_ascii_case(want))
+        })
+    };
+    let (fire, back) = (named("FIRE01").unwrap(), named("BACKSND").unwrap());
+    let _ = game.drain_audio();
+    let s = game.session_mut().unwrap();
+    s.region_background(fire);
+    let events = std::mem::take(&mut s.audio);
+    assert!(events.iter().any(|e| matches!(e, AudioEvent::Stop { channel: 999 })), "the level's background stops: {events:?}");
+    assert!(events.iter().any(|e| matches!(e, AudioEvent::Loop { name, .. } if name == "FIRE01")));
+    s.region_background(fire);
+    assert!(s.audio.is_empty(), "the same background is not restarted");
+    s.region_background(back);
+    let events = std::mem::take(&mut s.audio);
+    assert!(events.iter().any(|e| matches!(e, AudioEvent::Loop { name, .. } if name.eq_ignore_ascii_case("DUNGN10"))), "BACKSND restores the level's own: {events:?}");
+}
