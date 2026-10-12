@@ -6,9 +6,9 @@
 
 pub mod anim;
 mod audio;
-mod clock;
+pub use engine_core::clock;
 pub mod effects;
-mod frame;
+pub use engine_core::frame;
 pub mod hud;
 mod input;
 pub mod level;
@@ -21,14 +21,13 @@ pub mod render;
 pub mod script;
 pub mod session;
 pub mod text;
-mod vfs;
+pub use engine_core::vfs;
 pub mod world;
 
 pub use audio::{AudioEvent, music_path, sound_path, wav_seconds};
-pub use clock::FixedClock;
-pub use frame::Frame;
+pub use engine_core::{FixedClock, Frame};
 pub use input::{Action, Input};
-pub use vfs::Vfs;
+pub use engine_core::Vfs;
 
 use godd_formats::bmp::Bmp;
 use godd_formats::pal::Palette;
@@ -417,6 +416,13 @@ impl Game {
 
     /// Render into `frame`. `alpha` (0..1) interpolates between the last two ticks.
     pub fn render(&mut self, frame: &mut Frame, alpha: f32) {
+        self.render_view(frame, alpha);
+        self.render_ui(frame);
+    }
+
+    /// The world: title picture or 3D view with the first-person weapon and overlays. A GPU
+    /// renderer replaces this part and keeps [`Game::render_ui`] on top.
+    pub fn render_view(&mut self, frame: &mut Frame, alpha: f32) {
         self.fps.frames += 1;
         frame.palette = *self.palette();
         frame.clear(0);
@@ -433,13 +439,19 @@ impl Game {
                 self.renderer.render(&session.level.world, &cam, &shading, &self.settings, frame, vp);
                 draw_weapon(frame, session, &self.shade_rows);
                 draw_overlays(frame, session);
-                if self.show_map {
-                    draw_automap(frame, session, self.ui_colors);
-                }
-                let uptime = self.uptime_ticks / TICK_RATE as u64;
-                self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast);
-                session.menus.draw(frame, &session.save);
             }
+        }
+    }
+
+    /// Everything drawn over the view: automap, HUD, menus, options, console and FPS counter.
+    pub fn render_ui(&mut self, frame: &mut Frame) {
+        if let State::Playing(session) = &self.state {
+            if self.show_map {
+                draw_automap(frame, session, self.ui_colors);
+            }
+            let uptime = self.uptime_ticks / TICK_RATE as u64;
+            self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast);
+            session.menus.draw(frame, &session.save);
         }
         self.options_menu.draw(frame, &self.options, self.ui_colors);
         if self.console.open {

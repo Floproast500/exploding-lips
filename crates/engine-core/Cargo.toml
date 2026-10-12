@@ -1,0 +1,9 @@
+[package]
+name = "engine-core"
+description = "Game-agnostic engine core: frames, virtual file system, fixed clock, audio requests"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+log.workspace = true

@@ -13,11 +13,14 @@ pub struct Frame {
     pub palette: [[u8; 3]; 256],
     /// Displayed height of one pixel relative to its width (1.2 for 320x200 on a 4:3 screen).
     pub pixel_aspect: f32,
+    /// When tracked: 255 where something was drawn since the last clear, 0 elsewhere. Lets a UI
+    /// layer be composited over another renderer's view (index 0 is a real colour, not "empty").
+    pub coverage: Option<Vec<u8>>,
 }
 
 impl Frame {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, pixels: vec![0; width * height], rgb: None, palette: [[0; 3]; 256], pixel_aspect: 1.0 }
+        Self { width, height, pixels: vec![0; width * height], rgb: None, palette: [[0; 3]; 256], pixel_aspect: 1.0, coverage: None }
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {
@@ -28,7 +31,15 @@ impl Frame {
             if self.rgb.is_some() {
                 self.rgb = Some(vec![0; width * height]);
             }
+            if self.coverage.is_some() {
+                self.coverage = Some(vec![0; width * height]);
+            }
         }
+    }
+
+    /// Start or stop recording which pixels are drawn (see [`Frame::coverage`]).
+    pub fn track_coverage(&mut self, enabled: bool) {
+        self.coverage = enabled.then(|| vec![0; self.width * self.height]);
     }
 
     pub fn set_true_color(&mut self, enabled: bool) {
@@ -50,6 +61,9 @@ impl Frame {
         if let Some(buf) = &mut self.rgb {
             buf.fill(rgb);
         }
+        if let Some(c) = &mut self.coverage {
+            c.fill(0);
+        }
     }
 
     /// Write a palette index (and its colour in true-colour mode).
@@ -59,6 +73,9 @@ impl Frame {
         if let Some(buf) = &mut self.rgb {
             buf[offset] = pack(self.palette[index as usize]);
         }
+        if let Some(c) = &mut self.coverage {
+            c[offset] = 255;
+        }
     }
 
     /// Write a colour directly (true-colour mode only).
@@ -66,6 +83,9 @@ impl Frame {
     pub fn put_rgb(&mut self, offset: usize, rgb: [u8; 3]) {
         if let Some(buf) = &mut self.rgb {
             buf[offset] = pack(rgb);
+        }
+        if let Some(c) = &mut self.coverage {
+            c[offset] = 255;
         }
     }
 
@@ -92,4 +112,25 @@ impl Frame {
 #[inline]
 pub fn pack([r, g, b]: [u8; 3]) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coverage_marks_drawn_pixels_and_clears() {
+        let mut f = Frame::new(4, 2);
+        f.track_coverage(true);
+        f.clear(0);
+        f.put(1, 0); // index 0 drawn on purpose still counts as covered
+        f.put(6, 9);
+        assert_eq!(f.coverage.as_deref(), Some(&[0, 255, 0, 0, 0, 0, 255, 0][..]));
+        f.clear(3);
+        assert!(f.coverage.as_ref().unwrap().iter().all(|&c| c == 0));
+        f.resize(2, 2);
+        assert_eq!(f.coverage.as_ref().map(Vec::len), Some(4));
+        f.track_coverage(false);
+        assert!(f.coverage.is_none());
+    }
 }

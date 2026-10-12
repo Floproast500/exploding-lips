@@ -6,6 +6,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+engine-core.workspace = true
 godd-formats.workspace = true
 font8x8 = "0.3"
 log.workspace = true

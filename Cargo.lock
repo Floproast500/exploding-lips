@@ -717,6 +717,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
+name = "engine-core"
+version = "0.1.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -991,6 +998,7 @@ dependencies = [
 name = "godd-game"
 version = "0.1.0"
 dependencies = [
+ "engine-core",
  "font8x8",
  "godd-formats",
  "log",
