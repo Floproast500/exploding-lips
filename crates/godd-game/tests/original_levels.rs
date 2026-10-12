@@ -868,8 +868,12 @@ fn lips00_bsp_world_round_trip() {
         let s = game.session().unwrap();
         s.level.world.regions[26].floor
     };
+    let entering = game.drain_audio();
+    assert!(entering.iter().any(|e| matches!(e, godd_game::AudioEvent::Loop { name, .. } if name.eq_ignore_ascii_case("DUNGEON6"))), "catacombs background");
     game.session_mut().unwrap().bsp.as_mut().unwrap().player.pos = [-2384.0, -1120.0, 424.0];
     run(&mut game, &vfs, 0.1);
+    let back = game.drain_audio();
+    assert!(back.iter().any(|e| matches!(e, godd_game::AudioEvent::Music { name: Some(n), .. } if n.eq_ignore_ascii_case("TOCATTA"))), "COFFIN1's region music: {back:?}");
     let s = game.session().unwrap();
     assert!(!s.in_bsp, "back in the orb");
     assert_eq!((s.player.x, s.player.y, s.player.region), (17272.0, 16784.0, 26));

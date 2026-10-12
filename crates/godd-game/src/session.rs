@@ -33,6 +33,8 @@ pub struct Session {
     pub in_bsp: bool,
     /// Background sound now playing (region sounds, the BSP stay).
     background: Option<String>,
+    /// Sound names that exist only as MIDI (background "sounds" such as TOCATTA are music).
+    midi_only: std::collections::HashSet<String>,
     pub level: Level,
     pub player: Player,
     /// Player state at the previous tick, for render interpolation.
@@ -141,6 +143,7 @@ impl Session {
             bsp,
             in_bsp: false,
             background: None,
+            midi_only: midi_only_names(vfs),
             menus,
             save,
             save_dirty: false,
@@ -648,6 +651,11 @@ impl Session {
         self.audio.push(AudioEvent::Stop { channel: BACKGROUND_CHANNEL });
         if name.eq_ignore_ascii_case("BSNDOFF") || name.eq_ignore_ascii_case("BACKSND") {
             self.background = None;
+        } else if self.midi_only.contains(&name.to_ascii_uppercase()) {
+            // A MIDI piece: it replaces the music.
+            self.audio.push(AudioEvent::Stop { channel: MUSIC_CHANNEL });
+            self.audio.push(AudioEvent::Music { name: Some(name.clone()), looped: true });
+            self.background = Some(name);
         } else {
             self.audio.push(AudioEvent::Loop { channel: BACKGROUND_CHANNEL, name: name.clone(), volume: 1.0, pan: 0.0, pos: None });
             self.background = Some(name);
@@ -995,4 +1003,12 @@ fn load_bsp(vfs: &Vfs, file: &str, objects: &Objects) -> Option<Box<crate::bsp_w
     let mut world = BspWorld::new(bsp, goddpoly_palette(vfs), cubes(fx::ORORB), cubes(fx::OPTAGSW));
     world.colormap = crate::bsp_world::goddpoly_colormap(vfs);
     Some(Box::new(world))
+}
+
+/// Upper-case names of `snd/*.mid` files that have no `.wav` of the same name.
+fn midi_only_names(vfs: &Vfs) -> std::collections::HashSet<String> {
+    let upper: Vec<String> = vfs.names().map(str::to_ascii_uppercase).collect();
+    let stem = |n: &str, ext: &str| n.strip_prefix("SND/").and_then(|r| r.strip_suffix(ext)).map(str::to_string);
+    let wavs: std::collections::HashSet<String> = upper.iter().filter_map(|n| stem(n, ".WAV")).collect();
+    upper.iter().filter_map(|n| stem(n, ".MID")).filter(|n| !wavs.contains(n)).collect()
 }
