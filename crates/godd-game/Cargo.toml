@@ -1,0 +1,11 @@
+[package]
+name = "godd-game"
+description = "Platform-independent Exploding Lips engine: world, simulation and software renderer"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+godd-formats.workspace = true
+font8x8 = "0.3"
+log.workspace = true

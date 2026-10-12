@@ -1,0 +1,10 @@
+wait 3
+key F10
+wait 0.5
+key Down Down
+wait 0.3
+shot options
+key Escape
+wait 0.3
+hold Up 0.6
+shot walked

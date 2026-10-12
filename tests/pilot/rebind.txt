@@ -1,0 +1,17 @@
+wait 3
+key F10
+key Down Down Down Down Down Down Down Down
+key Return
+wait 0.3
+key Return
+wait 0.3
+key i
+wait 0.3
+shot 00_controls
+key Escape
+key Escape
+wait 0.3
+shot 01_before
+hold i 0.6
+wait 1
+shot 02_after_i

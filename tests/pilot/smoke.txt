@@ -1,0 +1,2 @@
+wait 3
+shot 00_title

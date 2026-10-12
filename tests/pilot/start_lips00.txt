@@ -1,0 +1,25 @@
+# Original: New Game -> name "tester" -> "Begin game now!" -> LIPS00 start view, then probe
+# turning and walking. Menus select the hotspot under the hand cursor; Return activates it.
+# Mouse coordinates are window-relative (the Wine window sits ~26 px below the screen top).
+wait 6
+move 240 105
+wait 0.5
+key Return
+wait 3
+shot 00_name_prompt
+type tester
+key Return
+wait 3
+shot 01_menu2
+move 300 104
+wait 0.5
+key Return
+wait 12
+shot 02_lips00
+probe start
+hold Up 0.5
+wait 0.5
+probe walked
+hold Left 0.4
+wait 0.3
+probe turned

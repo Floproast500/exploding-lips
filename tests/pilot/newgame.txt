@@ -1,0 +1,16 @@
+# Original: New Game -> name -> start.
+wait 6
+shot 00_menu
+key Return
+wait 1.5
+shot 01_after_newgame
+type tester
+key Return
+wait 1.5
+shot 02_after_name
+key Return
+wait 4
+shot 03_after_start
+key Return
+wait 4
+shot 04_more

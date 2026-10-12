@@ -1,0 +1,4 @@
+wait 3
+key F2
+wait 0.5
+shot map

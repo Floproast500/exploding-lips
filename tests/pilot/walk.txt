@@ -1,0 +1,6 @@
+wait 3
+shot view
+hold Left 0.6
+shot turned
+hold Up 1.0
+shot walked

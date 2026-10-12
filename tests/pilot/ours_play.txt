@@ -1,0 +1,11 @@
+wait 3
+shot 00_start
+key 5
+wait 0.5
+shot 01_tool5
+hold Control_L 0.15
+wait 0.4
+shot 02_fired
+hold Up 0.6
+wait 1
+shot 03_below

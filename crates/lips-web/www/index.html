@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Exploding Lips</title>
+  <style>
+    :root { color-scheme: dark; --bg: #0b0b0d; --fg: #e8e2dc; --muted: #9a928b; --accent: #d8263a; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+    #setup { max-width: 34rem; margin: 10vh auto; padding: 0 16px; }
+    h1 { color: var(--accent); margin: 0 0 .5rem; }
+    p { color: var(--muted); }
+    label.button { display: inline-block; padding: .6rem 1rem; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; }
+    input[type=file] { display: none; }
+    canvas { display: none; position: fixed; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; background: #000; }
+    #status { margin-top: 1rem; min-height: 1.5em; }
+  </style>
+</head>
+<body>
+  <div id="setup">
+    <h1>Exploding Lips</h1>
+    <p>Reimplementation of the 1999 G.O.D.D. engine game. Choose the folder containing your copy of
+      the game (it must include <code>lips.bmp</code> and the <code>LIPS*.XRB</code> files). Files stay in your browser.</p>
+    <label class="button">Choose game folder<input id="folder" type="file" webkitdirectory multiple></label>
+    <div id="status"></div>
+  </div>
+  <canvas id="screen"></canvas>
+  <script type="module">
+    import init, { Loader } from "./pkg/lips_web.js";
+    await init();
+
+    const status = document.getElementById("status");
+    const canvas = document.getElementById("screen");
+    const ctx = canvas.getContext("2d");
+
+    // Testing/hosting hook: ?data=<base url> fetches <base>/manifest.json (a list of relative
+    // paths) and the files themselves instead of asking for a folder. Optional &level=LIPS00.
+    const params = new URLSearchParams(location.search);
+    if (params.has("data")) {
+      const base = params.get("data").replace(/\/$/, "");
+      const list = await (await fetch(`${base}/manifest.json`)).json();
+      const loader = new Loader();
+      let done = 0;
+      await Promise.all(list.map(async (path) => {
+        const bytes = new Uint8Array(await (await fetch(`${base}/${path}`)).arrayBuffer());
+        loader.add_file(`game/${path}`, bytes);
+        status.textContent = `Loading ${++done} / ${list.length}`;
+      }));
+      boot(loader, params.get("level"));
+    }
+
+    document.getElementById("folder").addEventListener("change", async (event) => {
+      const files = [...event.target.files];
+      const loader = new Loader();
+      let done = 0;
+      for (const file of files) {
+        loader.add_file(file.webkitRelativePath || file.name, new Uint8Array(await file.arrayBuffer()));
+        status.textContent = `Loading ${++done} / ${files.length}`;
+      }
+      boot(loader, null);
+    });
+
+    function boot(loader, level) {
+      if (!loader.ready()) {
+        status.textContent = "That folder does not look like an Exploding Lips install (lips.bmp / LIPSTART.XRB missing).";
+        return;
+      }
+      try {
+        const stored = localStorage.getItem("lips-save");
+        if (stored) loader.set_save(Uint8Array.from(atob(stored), (c) => c.charCodeAt(0)));
+      } catch { /* storage unavailable: use the folder's save */ }
+      let game;
+      try {
+        game = loader.start(level ?? undefined);
+      } catch (e) {
+        status.textContent = `Could not start: ${e}`;
+        return;
+      }
+      document.getElementById("setup").style.display = "none";
+      canvas.style.display = "block";
+      document.title = "Exploding Lips — running";
+      if (params.has("join")) {
+        try { game.connect(params.get("join"), params.get("name") ?? "browser"); } catch (e) { console.error(e); }
+      }
+      run(game);
+    }
+
+    function run(game) {
+      const keyHandler = (down) => (e) => {
+        if (down) game.type_text(e.key);
+        if (game.key(e.code, down)) e.preventDefault();
+      };
+      addEventListener("keydown", keyHandler(true));
+      addEventListener("keyup", keyHandler(false));
+      canvas.addEventListener("click", () => canvas.requestPointerLock?.());
+      addEventListener("mousemove", (e) => { if (document.pointerLockElement === canvas) game.mouse_move(e.movementX, e.movementY); });
+
+      let last = performance.now();
+      const frame = (now) => {
+        // Render at the canvas's CSS size (Hor+ widescreen), capped for performance.
+        const scale = Math.min(devicePixelRatio || 1, 2);
+        const w = Math.max(1, Math.round(canvas.clientWidth * scale));
+        const h = Math.max(1, Math.round(canvas.clientHeight * scale));
+        if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+        const rgba = game.frame(now - last, w, h);
+        const save = game.take_save();
+        if (save) {
+          try { localStorage.setItem("lips-save", btoa(String.fromCharCode(...save))); } catch { /* ignore */ }
+        }
+        last = now;
+        ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h), 0, 0);
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    }
+  </script>
+</body>
+</html>

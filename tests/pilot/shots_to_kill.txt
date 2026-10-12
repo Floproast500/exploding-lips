@@ -1,0 +1,33 @@
+wait 6
+move 240 105
+wait 0.5
+key Return
+wait 3
+shot 00_name_prompt
+type tester
+key Return
+wait 3
+shot 01_menu2
+move 300 104
+wait 0.5
+key Return
+wait 12
+shot 02_lips00
+wait 0.5
+wait 0.3
+# Teleport 640 units east of DETHBOT1 (LIPS00 object 24, SH(1)) facing it and fire the starting
+# shotgun twice, 1.6 s apart (its use animation ignores presses for 1.44 s). Probes read the bot's
+# mover hit counter and the player's kill count. Result (2026-10-12): shot 1 -> hits_left 0, no
+# kill; shot 2 -> kill. An SH(n) bot dies on the (n+1)-th shot (crates/godd-game/tests/
+# original_levels.rs: lips00_shots_to_kill_match_the_original).
+poke 17808 12928 -128 1024 126 24
+wait 0.5
+probe before
+key Control_L
+wait 0.7
+probe shot1
+wait 0.6
+key Control_L
+wait 0.7
+probe shot2
+shot 03_killed

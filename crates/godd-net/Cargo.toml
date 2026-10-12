@@ -1,0 +1,18 @@
+[package]
+name = "godd-net"
+description = "Netplay protocol and UDP transport for the Exploding Lips reimplementation"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+# Glue between the transport and godd-game (used by the desktop front end and tests).
+game = ["dep:godd-game"]
+
+[dependencies]
+godd-game = { workspace = true, optional = true }
+log.workspace = true
+
+# Sockets are native-only; the web front end uses just the message encoding.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

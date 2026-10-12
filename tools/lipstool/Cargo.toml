@@ -1,0 +1,12 @@
+[package]
+name = "lipstool"
+description = "Inspect and convert Exploding Lips data files"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+godd-formats.workspace = true
+godd-game.workspace = true
+font8x8 = "0.3"
+png = "0.17"

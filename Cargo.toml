@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/lipstool"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+godd-formats = { path = "crates/godd-formats" }
+godd-game = { path = "crates/godd-game" }
+godd-net = { path = "crates/godd-net" }
+log = "0.4"
+thiserror = "2"

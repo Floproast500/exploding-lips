@@ -1,0 +1,9 @@
+[package]
+name = "godd-formats"
+description = "Parsers for G.O.D.D. engine data files (Exploding Lips)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
