@@ -223,6 +223,13 @@ impl Session {
                 self.level.sequences = sequences;
             }
         }
+        for (action, delta) in [(Action::ToolPrev, -1), (Action::ToolNext, 1)] {
+            if input.pressed(action) {
+                let sequences = std::mem::take(&mut self.level.sequences);
+                self.objects.cycle_tool(delta, &sequences);
+                self.level.sequences = sequences;
+            }
+        }
         if input.held(Action::Use) {
             let mut states = self.script.states;
             self.objects.use_tool(&mut states, &self.level);

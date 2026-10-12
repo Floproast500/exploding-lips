@@ -24,6 +24,7 @@ impl Gamepads {
                 EventType::ButtonReleased(b, _) => (b, false),
                 _ => continue,
             };
+            log::debug!("gamepad {} {button:?} {}", event.id, if down { "down" } else { "up" });
             for &action in bindings(button) {
                 input.set(action, down);
             }
@@ -35,6 +36,9 @@ impl Gamepads {
             axes.1 += v(Axis::LeftStickY);
             axes.2 += v(Axis::RightStickX);
             axes.3 += v(Axis::RightStickY);
+        }
+        if axes != (0.0, 0.0, 0.0, 0.0) {
+            log::trace!("gamepad axes {axes:?}");
         }
         apply_axes(input, axes);
     }
@@ -66,6 +70,8 @@ fn bindings(button: Button) -> &'static [Action] {
         Button::Select => &[Options],
         Button::DPadUp => &[MenuUp, LookUp],
         Button::DPadDown => &[MenuDown, LookDown],
+        Button::LeftTrigger | Button::DPadLeft => &[ToolPrev],
+        Button::RightTrigger | Button::DPadRight => &[ToolNext],
         _ => &[],
     }
 }
@@ -103,6 +109,8 @@ mod tests {
         assert_eq!(bindings(Button::Start), &[Action::Menu]);
         assert_eq!(bindings(Button::Select), &[Action::Options]);
         assert!(bindings(Button::DPadDown).contains(&Action::MenuDown));
+        assert_eq!(bindings(Button::RightTrigger), &[Action::ToolNext], "bumpers switch tools");
+        assert_eq!(bindings(Button::DPadLeft), &[Action::ToolPrev]);
         assert!(bindings(Button::Mode).is_empty());
     }
 }

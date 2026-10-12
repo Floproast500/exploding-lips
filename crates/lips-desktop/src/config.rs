@@ -63,7 +63,7 @@ impl Settings {
             let (key, value) = (key.trim(), value.trim());
             let flag = || matches!(value, "1" | "true" | "yes" | "on");
             match key {
-                "data" if !value.is_empty() => s.data = Some(value.into()),
+                "data" => s.data = (!value.is_empty()).then(|| value.into()),
                 "size" => {
                     if let Some((w, h)) = value.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
                         s.size = (w, h);
@@ -76,7 +76,7 @@ impl Settings {
                 "fov" => s.fov = value.parse::<f32>().map_or(s.fov, |v| v.clamp(30.0, 120.0)),
                 "mouse_sensitivity" => s.mouse_sensitivity = value.parse().unwrap_or(s.mouse_sensitivity),
                 "invert_mouse" => s.invert_mouse = flag(),
-                "soundfont" if !value.is_empty() => s.soundfont = Some(value.into()),
+                "soundfont" => s.soundfont = (!value.is_empty()).then(|| value.into()),
                 k if k.starts_with("bind.") => {
                     s.bindings.insert(k["bind.".len()..].to_string(), value.to_string());
                 }

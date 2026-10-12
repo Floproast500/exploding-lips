@@ -75,7 +75,9 @@ Original `keyboard.txt` bindings: arrows move/turn, Alt+arrows strafe, Tab jump,
 W/X look up/down, S centre, Ctrl use tool, 0–9 select tool, F2 map, numpad `*`/`/` brightness,
 Esc game menu, `~` console. Extras: A/D strafe, Shift run, Space jump, mouse look (click to capture),
 F6 quicksave, F7 quickload, F10 options (incl. key rebinding). Gamepad: left stick move, right stick
-look, A jump/select, X/RT use, LT run, Start menu, Select options.
+look, A jump/select, X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu,
+Select options. Steam Controller: launch through Steam with a Gamepad layout; on Wayland, start
+the game as an X11 window (`env -u WAYLAND_DISPLAY`) so Steam can see it has focus.
 
 ## Tools
 

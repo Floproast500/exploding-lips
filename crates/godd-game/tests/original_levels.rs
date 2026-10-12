@@ -493,3 +493,28 @@ fn lips00_shots_to_kill_match_the_original() {
     }
     assert_eq!(fired.1, 1, "second fired shot kills");
 }
+
+/// Gamepad tool switching: ToolNext/ToolPrev step through the selectable tools and wrap.
+#[test]
+fn lips00_tool_cycling_wraps() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.5);
+    let tool = |game: &godd_game::Game| game.session().unwrap().tool;
+    assert_eq!(tool(&game), 5);
+    let press = |game: &mut godd_game::Game, action| {
+        let mut input = Input::default();
+        input.set(action, true);
+        game.tick(&vfs, &input);
+        run(game, &vfs, 0.05);
+    };
+    press(&mut game, Action::ToolNext);
+    assert_eq!(tool(&game), 6);
+    press(&mut game, Action::ToolPrev);
+    press(&mut game, Action::ToolPrev);
+    assert_eq!(tool(&game), 4);
+    for _ in 0..5 {
+        press(&mut game, Action::ToolPrev);
+    }
+    assert_eq!(tool(&game), 9, "wraps from 0 back to 9 (AVAILTOOLS 3FF)");
+}

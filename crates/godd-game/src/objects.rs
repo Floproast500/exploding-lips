@@ -582,6 +582,17 @@ impl Objects {
         });
     }
 
+    /// Step to the previous (`-1`) or next (`+1`) selectable tool among 0–9, wrapping around.
+    pub fn cycle_tool(&mut self, delta: i32, sequences: &[Option<Sequence>]) {
+        for step in 1..10 {
+            let index = (self.tools.current as i32 + delta * step).rem_euclid(10) as usize;
+            if self.tools.available & (1 << index) != 0 && self.tools.defs[index].is_some() {
+                self.select_tool(index, false, sequences);
+                return;
+            }
+        }
+    }
+
     /// Event 0x40: a tag reached every object listening on it.
     pub fn on_tag(&mut self, tag: u32, now: f64) {
         for i in 0..self.list.len() {

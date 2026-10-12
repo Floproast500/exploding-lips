@@ -38,6 +38,9 @@ pub enum Action {
     Tool7,
     Tool8,
     Tool9,
+    /// Previous / next selectable tool (gamepad bumpers and D-pad).
+    ToolPrev,
+    ToolNext,
     /// Engine console (~).
     Console,
     QuickSave,
