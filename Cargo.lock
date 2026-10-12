@@ -1051,6 +1051,7 @@ dependencies = [
  "font8x8",
  "godd-formats",
  "log",
+ "quake-bsp",
 ]
 
 [[package]]
