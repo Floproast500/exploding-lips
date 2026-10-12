@@ -7,5 +7,5 @@
 cd "$(dirname "$0")/.."
 mkdir -p re/run
 unset WAYLAND_DISPLAY
-RUST_LOG=info,lips_desktop::gamepad=trace exec target/release/lips-desktop --data original --level LIPS00 --mute \
+RUST_LOG=info,lips_desktop::gamepad=trace exec target/release/lips-desktop --data original --level LIPS00 \
     > re/run/padtest.log 2>&1

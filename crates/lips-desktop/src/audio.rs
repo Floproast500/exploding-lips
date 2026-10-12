@@ -24,7 +24,12 @@ impl Audio {
         let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
             .map_err(|e| log::warn!("audio disabled: {e}"))
             .ok()?;
-        let soundfont = soundfont.and_then(|path| {
+        let found = soundfont.map(Path::to_path_buf).or_else(find_soundfont);
+        if found.is_none() {
+            log::warn!("music disabled: no SoundFont found (install one, e.g. `soundfont-fluid`, or pass --soundfont FILE.sf2)");
+        }
+        let soundfont = found.as_deref().and_then(|path| {
+            log::info!("music: SoundFont {}", path.display());
             let mut file = std::fs::File::open(path).map_err(|e| log::warn!("soundfont {}: {e}", path.display())).ok()?;
             rustysynth::SoundFont::new(&mut file).map(Arc::new).map_err(|e| log::warn!("soundfont: {e}")).ok()
         });
@@ -108,6 +113,24 @@ impl Audio {
             slice: None,
         })
     }
+}
+
+/// Look for a General MIDI SoundFont in the usual system locations.
+fn find_soundfont() -> Option<std::path::PathBuf> {
+    const CANDIDATES: &[&str] = &[
+        "/usr/share/soundfonts/default.sf2",
+        "/usr/share/soundfonts/FluidR3_GM.sf2",
+        "/usr/share/sounds/sf2/FluidR3_GM.sf2",
+        "/usr/share/sounds/sf2/default-GM.sf2",
+        "/usr/share/soundfonts/GeneralUser-GS.sf2",
+        "/usr/share/sounds/sf2/TimGM6mb.sf2",
+        "/opt/homebrew/share/soundfonts/default.sf2",
+        "C:\\soundfonts\\default.sf2",
+    ];
+    CANDIDATES.iter().map(std::path::PathBuf::from).find(|p| p.is_file()).or_else(|| {
+        let dir = std::fs::read_dir("/usr/share/soundfonts").ok()?;
+        dir.filter_map(Result::ok).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sf2")))
+    })
 }
 
 fn amplitude_to_db(amplitude: f32) -> Decibels {
