@@ -16,7 +16,10 @@ pub struct Audio {
     cache: HashMap<String, Option<StaticSoundData>>,
     soundfont: Option<Arc<rustysynth::SoundFont>>,
     music: Option<StaticSoundHandle>,
-    channels: HashMap<u32, StaticSoundHandle>,
+    /// Looping channels with their unscaled volume, so volume changes can be re-applied.
+    channels: HashMap<u32, (StaticSoundHandle, f32)>,
+    /// Master, effects and music volume (0..=1), from the snd_* cvars.
+    volumes: (f32, f32, f32),
 }
 
 impl Audio {
@@ -33,39 +36,60 @@ impl Audio {
             let mut file = std::fs::File::open(path).map_err(|e| log::warn!("soundfont {}: {e}", path.display())).ok()?;
             rustysynth::SoundFont::new(&mut file).map(Arc::new).map_err(|e| log::warn!("soundfont: {e}")).ok()
         });
-        Some(Self { manager, cache: HashMap::new(), soundfont, music: None, channels: HashMap::new() })
+        Some(Self { manager, cache: HashMap::new(), soundfont, music: None, channels: HashMap::new(), volumes: (1.0, 1.0, 1.0) })
+    }
+
+    /// Apply the volume buses; changes take effect on playing loops and music at once.
+    pub fn set_volumes(&mut self, volumes: (f32, f32, f32)) {
+        if volumes == self.volumes {
+            return;
+        }
+        self.volumes = volumes;
+        let sfx = volumes.0 * volumes.1;
+        for (handle, base) in self.channels.values_mut() {
+            handle.set_volume(amplitude_to_db(*base * sfx), Tween::default());
+        }
+        if let Some(m) = &mut self.music {
+            m.set_volume(amplitude_to_db(volumes.0 * volumes.2), Tween::default());
+        }
+    }
+
+    fn sfx(&self) -> f32 {
+        self.volumes.0 * self.volumes.1
     }
 
     pub fn handle(&mut self, vfs: &Vfs, event: &AudioEvent) {
         match event {
             AudioEvent::Sound { name, volume, pan } => {
                 let Some(data) = self.load_sound(vfs, name) else { return };
-                let data = data.volume(amplitude_to_db(*volume)).panning(Panning(pan.clamp(-1.0, 1.0)));
+                let data = data.volume(amplitude_to_db(*volume * self.sfx())).panning(Panning(pan.clamp(-1.0, 1.0)));
                 if let Err(e) = self.manager.play(data) {
                     log::warn!("play {name}: {e}");
                 }
             }
             AudioEvent::Loop { channel, name, volume, pan } => {
-                if let Some(mut old) = self.channels.remove(channel) {
+                if let Some((mut old, _)) = self.channels.remove(channel) {
                     old.stop(Tween::default());
                 }
                 let Some(data) = self.load_sound(vfs, name) else { return };
-                let data = data.loop_region(..).volume(amplitude_to_db(*volume)).panning(Panning(pan.clamp(-1.0, 1.0)));
+                let data = data.loop_region(..).volume(amplitude_to_db(*volume * self.sfx())).panning(Panning(pan.clamp(-1.0, 1.0)));
                 match self.manager.play(data) {
                     Ok(handle) => {
-                        self.channels.insert(*channel, handle);
+                        self.channels.insert(*channel, (handle, *volume));
                     }
                     Err(e) => log::warn!("loop {name}: {e}"),
                 }
             }
             AudioEvent::ChannelVolume { channel, volume, pan } => {
-                if let Some(h) = self.channels.get_mut(channel) {
-                    h.set_volume(amplitude_to_db(*volume), Tween::default());
+                let sfx = self.sfx();
+                if let Some((h, base)) = self.channels.get_mut(channel) {
+                    *base = *volume;
+                    h.set_volume(amplitude_to_db(*volume * sfx), Tween::default());
                     h.set_panning(Panning(pan.clamp(-1.0, 1.0)), Tween::default());
                 }
             }
             AudioEvent::Stop { channel } => {
-                if let Some(mut h) = self.channels.remove(channel) {
+                if let Some((mut h, _)) = self.channels.remove(channel) {
                     h.stop(Tween::default());
                 }
             }
@@ -78,6 +102,7 @@ impl Audio {
                 if *looped {
                     data = data.loop_region(..);
                 }
+                data = data.volume(amplitude_to_db(self.volumes.0 * self.volumes.2));
                 self.music = self.manager.play(data).map_err(|e| log::warn!("music {name}: {e}")).ok();
             }
         }

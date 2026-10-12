@@ -68,7 +68,9 @@
       try {
         const stored = localStorage.getItem("lips-save");
         if (stored) loader.set_save(Uint8Array.from(atob(stored), (c) => c.charCodeAt(0)));
-      } catch { /* storage unavailable: use the folder's save */ }
+        const config = localStorage.getItem("lips-config");
+        if (config) loader.set_config(config);
+      } catch { /* storage unavailable: use the folder's save and default options */ }
       let game;
       try {
         game = loader.start(level ?? undefined);
@@ -92,8 +94,17 @@
       };
       addEventListener("keydown", keyHandler(true));
       addEventListener("keyup", keyHandler(false));
-      canvas.addEventListener("click", () => canvas.requestPointerLock?.());
-      addEventListener("mousemove", (e) => { if (document.pointerLockElement === canvas) game.mouse_move(e.movementX, e.movementY); });
+      const locked = () => document.pointerLockElement === canvas;
+      canvas.addEventListener("mousedown", (e) => {
+        if (!locked()) { canvas.requestPointerLock?.(); return; } // the first click only captures
+        game.mouse_button(e.button, true);
+        e.preventDefault();
+      });
+      addEventListener("mouseup", (e) => { if (locked()) game.mouse_button(e.button, false); });
+      canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+      canvas.addEventListener("wheel", (e) => { if (locked()) { game.wheel(e.deltaY); e.preventDefault(); } }, { passive: false });
+      addEventListener("mousemove", (e) => { if (locked()) game.mouse_move(e.movementX, e.movementY); });
+      addEventListener("blur", () => game.release_all());
 
       let last = performance.now();
       const frame = (now) => {
@@ -103,6 +114,10 @@
         const h = Math.max(1, Math.round(canvas.clientHeight * scale));
         if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
         const rgba = game.frame(now - last, w, h);
+        const config = game.take_config();
+        if (config) {
+          try { localStorage.setItem("lips-config", config); } catch { /* ignore */ }
+        }
         const save = game.take_save();
         if (save) {
           try { localStorage.setItem("lips-save", btoa(String.fromCharCode(...save))); } catch { /* ignore */ }

@@ -1,46 +1,14 @@
-//! Persistent desktop settings in a small `key = value` file:
-//! `$XDG_CONFIG_HOME/exploding-lips/settings.ini` (or the platform's config directory).
-//! Command-line options override it; F9/F11 toggles are written back on exit.
+//! Desktop settings: `config.cfg` (cvars and bindings as `set` / `bind` lines, the same commands
+//! the console accepts) in `$XDG_CONFIG_HOME/exploding-lips/` or the platform's config
+//! directory. An old `settings.ini` from earlier versions is imported once.
 
+use engine_core::BindTable;
+use engine_core::config::exec_config;
+use engine_core::cvar::{Category, CvarRegistry, HIDDEN};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Settings {
-    pub data: Option<PathBuf>,
-    pub size: (u32, u32),
-    pub fullscreen: bool,
-    pub classic: bool,
-    pub true_color: bool,
-    pub vsync: bool,
-    /// Vertical field of view in degrees (original ≈ 48.9).
-    pub fov: f32,
-    /// Radians per mouse count.
-    pub mouse_sensitivity: f32,
-    pub invert_mouse: bool,
-    pub soundfont: Option<PathBuf>,
-    /// Rebound actions: action name → key name (`bind.Forward = KeyW`).
-    pub bindings: std::collections::BTreeMap<String, String>,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            data: None,
-            size: (1280, 960),
-            fullscreen: false,
-            classic: false,
-            true_color: false,
-            vsync: true,
-            fov: 48.9,
-            mouse_sensitivity: 0.0025,
-            invert_mouse: false,
-            soundfont: None,
-            bindings: Default::default(),
-        }
-    }
-}
-
-pub fn path() -> Option<PathBuf> {
+/// The per-user config directory (saves and the quicksave live here too).
+pub fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
@@ -50,70 +18,85 @@ pub fn path() -> Option<PathBuf> {
                 if cfg!(target_os = "macos") { home.join("Library/Application Support") } else { home.join(".config") }
             })
         })?;
-    Some(base.join("exploding-lips").join("settings.ini"))
+    Some(base.join("exploding-lips"))
 }
 
-impl Settings {
-    pub fn load() -> Self {
-        let mut s = Self::default();
-        let Some(text) = path().and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
-        for line in text.lines() {
-            let line = line.split('#').next().unwrap_or("").trim();
-            let Some((key, value)) = line.split_once('=') else { continue };
-            let (key, value) = (key.trim(), value.trim());
-            let flag = || matches!(value, "1" | "true" | "yes" | "on");
-            match key {
-                "data" => s.data = (!value.is_empty()).then(|| value.into()),
-                "size" => {
-                    if let Some((w, h)) = value.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
-                        s.size = (w, h);
-                    }
-                }
-                "fullscreen" => s.fullscreen = flag(),
-                "classic" => s.classic = flag(),
-                "true_color" => s.true_color = flag(),
-                "vsync" => s.vsync = flag(),
-                "fov" => s.fov = value.parse::<f32>().map_or(s.fov, |v| v.clamp(30.0, 120.0)),
-                "mouse_sensitivity" => s.mouse_sensitivity = value.parse().unwrap_or(s.mouse_sensitivity),
-                "invert_mouse" => s.invert_mouse = flag(),
-                "soundfont" => s.soundfont = (!value.is_empty()).then(|| value.into()),
-                k if k.starts_with("bind.") => {
-                    s.bindings.insert(k["bind.".len()..].to_string(), value.to_string());
-                }
-                _ => log::warn!("settings: unknown key {key:?}"),
-            }
-        }
-        s
-    }
+pub fn path() -> Option<PathBuf> {
+    dir().map(|d| d.join("config.cfg"))
+}
 
-    pub fn save(&self) {
-        let Some(path) = path() else { return };
-        let opt = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        let text = format!(
-            "# Exploding Lips settings\n\
-             data = {}\nsize = {}x{}\nfullscreen = {}\nclassic = {}\ntrue_color = {}\nvsync = {}\n\
-             fov = {}\nmouse_sensitivity = {}\ninvert_mouse = {}\nsoundfont = {}\n",
-            opt(&self.data),
-            self.size.0,
-            self.size.1,
-            self.fullscreen,
-            self.classic,
-            self.true_color,
-            self.vsync,
-            self.fov,
-            self.mouse_sensitivity,
-            self.invert_mouse,
-            opt(&self.soundfont),
-        );
-        let mut text = text;
-        for (action, key) in &self.bindings {
-            text.push_str(&format!("bind.{action} = {key}\n"));
+/// Cvars only the desktop front end uses.
+pub fn register(c: &mut CvarRegistry) {
+    use Category::*;
+    c.bool("vid_fullscreen", "Fullscreen (F11)", Video, false);
+    c.bool("vid_vsync", "VSync (restart)", Video, true);
+    c.int("vid_width", "Window width", Video, (320, 16384, 1), 1280);
+    c.int("vid_height", "Window height", Video, (200, 16384, 1), 960);
+    c.set_flags("vid_width", engine_core::cvar::ARCHIVE | HIDDEN);
+    c.set_flags("vid_height", engine_core::cvar::ARCHIVE | HIDDEN);
+    c.string("fs_data", "Game folder", Game, "");
+    c.string("snd_soundfont", "SoundFont", Audio, "");
+}
+
+/// Load config.cfg (or import settings.ini) into a registry that already has every cvar
+/// registered. Returns false when no config.cfg existed yet.
+pub fn load(cvars: &mut CvarRegistry, binds: &mut BindTable) -> bool {
+    let Some(path) = path() else { return false };
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        for e in exec_config(cvars, binds, &text) {
+            log::warn!("{}: {e}", path.display());
         }
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        return true;
+    }
+    let legacy = path.with_file_name("settings.ini");
+    let Ok(text) = std::fs::read_to_string(&legacy) else { return false };
+    log::info!("importing {}", legacy.display());
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let (key, value) = (key.trim(), value.trim());
+        let set = |name: &str, v: &str| format!("set {name} \"{v}\"");
+        match key {
+            "data" => lines.push(set("fs_data", value)),
+            "size" => {
+                if let Some((w, h)) = value.split_once('x') {
+                    lines.push(set("vid_width", w));
+                    lines.push(set("vid_height", h));
+                }
+            }
+            "fullscreen" => lines.push(set("vid_fullscreen", value)),
+            "classic" => lines.push(set("r_classic", value)),
+            "true_color" => lines.push(set("r_truecolor", value)),
+            "vsync" => lines.push(set("vid_vsync", value)),
+            "fov" => lines.push(set("r_fov", value)),
+            // settings.ini stored radians per count; m_sensitivity is milliradians per count.
+            "mouse_sensitivity" => {
+                if let Ok(v) = value.parse::<f64>() {
+                    lines.push(set("m_sensitivity", &(v * 1000.0).to_string()));
+                }
+            }
+            "invert_mouse" => lines.push(set("m_invert", value)),
+            "soundfont" => lines.push(set("snd_soundfont", value)),
+            k if k.starts_with("bind.") => {
+                // Old rebinds replaced the action's default keys.
+                binds.rebind(&k["bind.".len()..], &format!("key:{value}"), |a| a.starts_with("Menu"));
+            }
+            _ => {}
         }
-        if let Err(e) = std::fs::write(&path, text) {
-            log::warn!("cannot save settings to {}: {e}", path.display());
-        }
+    }
+    for e in exec_config(cvars, binds, &lines.join("\n")) {
+        log::warn!("{}: {e}", legacy.display());
+    }
+    false
+}
+
+pub fn save(text: &str) {
+    let Some(path) = path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&path, text) {
+        log::warn!("cannot save settings to {}: {e}", path.display());
     }
 }

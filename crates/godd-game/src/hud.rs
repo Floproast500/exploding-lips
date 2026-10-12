@@ -42,10 +42,12 @@ impl Hud {
     }
 
     /// `uptime_seconds` is time since the game was launched (the original's HUD clock).
-    pub fn draw(&mut self, frame: &mut Frame, session: &Session, tool: usize, uptime_seconds: u64, high_contrast: bool) {
+    /// `scale` 0 picks the largest whole scale that fits; other values shrink the HUD.
+    pub fn draw(&mut self, frame: &mut Frame, session: &Session, tool: usize, uptime_seconds: u64, high_contrast: bool, scale: usize) {
         // High contrast: white labels, yellow values, each with a black outline.
         let (label, value, state_label) = if high_contrast { (255u8, 230u8, 255u8) } else { (color::LABEL, color::VALUE, color::STATE_LABEL) };
-        let s = (frame.height / CLASSIC_HEIGHT).max(1);
+        let fit = (frame.height / CLASSIC_HEIGHT).max(1);
+        let s = if scale == 0 { fit } else { scale.min(fit) };
         let si = s as i32;
         // Right column origin so that x = 320 lands on the frame's right edge.
         let right0 = frame.width as i32 - (CLASSIC_WIDTH * s) as i32;

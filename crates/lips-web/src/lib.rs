@@ -2,7 +2,7 @@
 //! [`WebGame`], then each animation frame calls [`WebGame::frame`] and draws the returned RGBA
 //! pixels to a canvas. Input arrives as `KeyboardEvent.code` strings.
 
-use godd_game::{Action, FixedClock, Frame, Game, Input, TICK_RATE, Vfs};
+use godd_game::{FixedClock, Frame, Game, Input, TICK_RATE, Vfs};
 use godd_net::{Message, PROTOCOL_VERSION, PlayerState};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -20,6 +20,7 @@ pub fn init() {
 pub struct Loader {
     vfs: Vfs,
     save: Option<Vec<u8>>,
+    config: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -40,6 +41,11 @@ impl Loader {
         self.save = Some(data);
     }
 
+    /// Options and bindings from browser storage (`set`/`bind` lines, see [`WebGame::take_config`]).
+    pub fn set_config(&mut self, text: String) {
+        self.config = Some(text);
+    }
+
     /// True once the files needed to boot are present.
     pub fn ready(&self) -> bool {
         self.vfs.contains("lips.bmp") && self.vfs.contains("lipstart.xrb")
@@ -47,7 +53,12 @@ impl Loader {
 
     /// Start the game; `level` (e.g. "LIPS00") skips the title screen.
     pub fn start(self, level: Option<String>) -> Result<WebGame, JsError> {
-        let game = Game::new(&self.vfs, &godd_game::Options { start_level: level, save: self.save }).map_err(|e| JsError::new(&e.to_string()))?;
+        let mut game = Game::new(&self.vfs, &godd_game::Options { start_level: level, save: self.save }).map_err(|e| JsError::new(&e.to_string()))?;
+        if let Some(text) = &self.config {
+            for e in game.exec_config(text) {
+                web_sys::console::warn_1(&format!("config: {e}").into());
+            }
+        }
         Ok(WebGame {
             game,
             vfs: self.vfs,
@@ -164,6 +175,7 @@ impl WebGame {
         }
         self.frame.resize(width.max(1), height.max(1));
         self.frame.set_true_color(self.game.options.true_color);
+        self.game.preview_look(&self.input);
         self.game.render(&mut self.frame, self.clock.alpha());
         self.frame.to_rgba(self.game.palette(), &mut self.rgba);
         std::mem::take(&mut self.rgba)
@@ -172,11 +184,39 @@ impl WebGame {
     /// Feed a key event using `KeyboardEvent.code`. Returns true if the key is bound (so the
     /// page can call `preventDefault`).
     pub fn key(&mut self, code: &str, down: bool) -> bool {
-        let actions = bindings(code);
-        for &a in actions {
-            self.input.set(a, down);
+        let source = format!("key:{code}");
+        self.input.source(&self.game.binds, &source, down);
+        self.game.binds.actions(&source).next().is_some() || self.game.options_menu.is_capturing()
+    }
+
+    /// Mouse button (`MouseEvent.button`: 0 left, 1 middle, 2 right, 3 back, 4 forward).
+    pub fn mouse_button(&mut self, button: u32, down: bool) {
+        let name = match button {
+            0 => "Left",
+            1 => "Middle",
+            2 => "Right",
+            3 => "Back",
+            4 => "Forward",
+            _ => return,
+        };
+        self.input.source(&self.game.binds, &format!("mouse:{name}"), down);
+    }
+
+    /// Mouse wheel (`WheelEvent.deltaY`: negative = up).
+    pub fn wheel(&mut self, delta_y: f32) {
+        if delta_y != 0.0 {
+            self.input.pulse(&self.game.binds, if delta_y < 0.0 { "wheel:Up" } else { "wheel:Down" });
         }
-        !actions.is_empty()
+    }
+
+    /// Release every held key and button (the page lost focus).
+    pub fn release_all(&mut self) {
+        self.input.release_all();
+    }
+
+    /// Options and bindings as config text when they changed (the page stores it).
+    pub fn take_config(&mut self) -> Option<String> {
+        self.game.take_config()
     }
 
     /// Typed text for name prompts (a single character or "Backspace").
@@ -193,49 +233,9 @@ impl WebGame {
         self.game.take_save()
     }
 
-    /// Mouse-look delta in pixels.
+    /// Mouse-look motion in pixels (the game applies sensitivity and invert).
     pub fn mouse_move(&mut self, dx: f32, dy: f32) {
-        self.input.look_delta.0 += dx * 0.003;
-        self.input.look_delta.1 += dy * 0.003;
-    }
-}
-
-fn bindings(code: &str) -> &'static [Action] {
-    use Action::*;
-    match code {
-        "ArrowUp" => &[Forward, MenuUp],
-        "ArrowDown" => &[Back, MenuDown],
-        "ArrowLeft" => &[TurnLeft],
-        "ArrowRight" => &[TurnRight],
-        "AltLeft" | "AltRight" => &[StrafeModifier],
-        "KeyA" => &[StrafeLeft],
-        "KeyD" => &[StrafeRight],
-        "ShiftLeft" | "ShiftRight" => &[Run],
-        "Tab" | "Insert" | "Space" => &[Jump],
-        "CapsLock" | "Delete" | "KeyC" => &[Crouch],
-        "KeyW" | "PageUp" => &[LookUp],
-        "KeyX" | "PageDown" => &[LookDown],
-        "KeyS" | "End" => &[CenterView],
-        "ControlLeft" | "ControlRight" => &[Use],
-        "Enter" | "NumpadEnter" => &[MenuSelect, Use],
-        "Escape" => &[Menu],
-        "F2" => &[Map],
-        "NumpadMultiply" => &[Brighten],
-        "NumpadDivide" => &[Darken],
-        "F10" => &[Options],
-        "Backquote" => &[Console],
-        "F6" => &[QuickSave],
-        "F7" => &[QuickLoad],
-        "Digit0" => &[Tool0],
-        "Digit1" => &[Tool1],
-        "Digit2" => &[Tool2],
-        "Digit3" => &[Tool3],
-        "Digit4" => &[Tool4],
-        "Digit5" => &[Tool5],
-        "Digit6" => &[Tool6],
-        "Digit7" => &[Tool7],
-        "Digit8" => &[Tool8],
-        "Digit9" => &[Tool9],
-        _ => &[],
+        self.input.mouse.0 += dx;
+        self.input.mouse.1 += dy;
     }
 }

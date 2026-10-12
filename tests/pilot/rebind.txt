@@ -1,13 +1,14 @@
+# Our engine: F10 -> Key bindings -> rebind Forward to I, check that I now walks forward.
 wait 3
 key F10
-key Down Down Down Down Down Down Down Down
+key Down Down Down Down Down
 key Return
 wait 0.3
 key Return
 wait 0.3
 key i
 wait 0.3
-shot 00_controls
+shot 00_bindings
 key Escape
 key Escape
 wait 0.3

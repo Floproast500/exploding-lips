@@ -77,6 +77,11 @@ impl PhysicsParams {
     pub fn look_to_pitch(look: f32) -> f32 {
         look * 200.0 / 256.0 / 220.2
     }
+
+    /// Look units for a pitch change of `radians` (through the shear).
+    pub fn pitch_to_look(radians: f32) -> f32 {
+        radians.tan() * 220.2 * 256.0 / 200.0
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +103,10 @@ pub struct Player {
     pub flying: bool,
     /// Last wall touched; a wall fires once per continuous contact (world-effects.md §1.1).
     last_touched: Option<usize>,
+    /// Yaw (radians) and look (units) the last tick took from mouse/stick look. The camera
+    /// shows that part immediately instead of interpolating it, so look stays 1:1.
+    pub direct_turn: f32,
+    pub direct_look: f32,
 }
 
 /// Contacts the player made during a tick, for wall/region effects.
@@ -125,7 +134,7 @@ impl Player {
 
     pub fn in_region(world: &World, x: f32, y: f32, angle: f32, region: usize) -> Self {
         let z = world.regions.get(region).map_or(0.0, |r| r.floor);
-        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, last_touched: None }
+        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, last_touched: None, direct_turn: 0.0, direct_look: 0.0 }
     }
 
     pub fn eye_z(&self, params: &PhysicsParams) -> f32 {
@@ -221,8 +230,11 @@ impl Player {
             self.look = 0.0;
         }
         // Mouse look delta is in radians of pitch; convert through the shear.
-        self.look -= input.look_delta.1.tan() * 220.2 * 256.0 / 200.0;
+        let before = self.look.clamp(-params.look_limit, params.look_limit);
+        self.look -= PhysicsParams::pitch_to_look(input.look_delta.1);
         self.look = self.look.clamp(-params.look_limit, params.look_limit);
+        self.direct_look = self.look - before;
+        self.direct_turn = -input.look_delta.0;
 
         self.crouching = input.held(Action::Crouch) && !self.flying;
         let speed = PhysicsParams::per_tick(params.walk_speed) * if input.held(Action::Run) { 2.0 } else { 1.0 };

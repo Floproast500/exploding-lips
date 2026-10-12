@@ -518,3 +518,60 @@ fn lips00_tool_cycling_wraps() {
     }
     assert_eq!(tool(&game), 9, "wraps from 0 back to 9 (AVAILTOOLS 3FF)");
 }
+
+/// Mouse look is 1:1: motion shows in the camera before the tick consumes it, and the view
+/// doesn't move again when the tick applies it (no interpolation lag, no double turn).
+#[test]
+fn lips00_mouse_look_is_one_to_one() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let a0 = game.view_camera(1.0).unwrap().angle;
+    let mut input = godd_game::Input::default();
+    input.mouse = (200.0, -80.0);
+    game.preview_look(&input);
+    let shown = game.view_camera(0.3).unwrap();
+    let yaw = 200.0 * game.options.mouse_sensitivity;
+    let wrap = |a: f32| (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    assert!(wrap(shown.angle - (a0 - yaw)).abs() < 1e-4, "pending motion shown at once");
+    game.tick(&vfs, &input);
+    input.end_tick();
+    game.preview_look(&input);
+    for alpha in [0.0, 0.5, 1.0] {
+        let c = game.view_camera(alpha).unwrap();
+        assert!(wrap(c.angle - shown.angle).abs() < 1e-4, "no jump after the tick at alpha {alpha}");
+        assert!((c.pitch - shown.pitch).abs() < 1e-4);
+    }
+    assert!(shown.pitch > 0.0, "mouse up looks up");
+}
+
+/// Autorun inverts Run, toggle crouch latches Crouch on each press.
+#[test]
+fn lips00_autorun_and_toggle_crouch() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let walk = |game: &mut godd_game::Game| {
+        let y0 = game.session().unwrap().player.y;
+        let mut i = Input::default();
+        i.set(Action::Forward, true);
+        for _ in 0..10 {
+            game.tick(&vfs, &i);
+        }
+        game.session().unwrap().player.y - y0
+    };
+    let slow = walk(&mut game);
+    game.cvars.set("cl_autorun", "1").unwrap();
+    let fast = walk(&mut game);
+    assert!((fast / slow - 2.0).abs() < 0.05, "autorun doubles speed: {slow} vs {fast}");
+    game.cvars.set("cl_togglecrouch", "1").unwrap();
+    let mut press = Input::default();
+    press.set(Action::Crouch, true);
+    game.tick(&vfs, &press);
+    run(&mut game, &vfs, 0.1);
+    assert!(game.session().unwrap().player.crouching, "stays crouched after release");
+    let mut press = Input::default();
+    press.set(Action::Crouch, true);
+    game.tick(&vfs, &press);
+    run(&mut game, &vfs, 0.1);
+    assert!(!game.session().unwrap().player.crouching);
+}

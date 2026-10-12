@@ -47,6 +47,9 @@ const SHADE_LEVELS: usize = 16;
 
 pub type BoxError = Box<dyn std::error::Error>;
 
+/// Radians per tick at full right-stick deflection (yaw, pitch) before `joy_sensitivity`.
+const STICK_LOOK: (f32, f32) = (0.06, 0.035);
+
 #[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Skip the title and load this level (e.g. "LIPS00").
@@ -72,8 +75,18 @@ pub struct Game {
     audio: Vec<AudioEvent>,
     hud: hud::Hud,
     quit: bool,
+    /// Snapshot of the option cvars (refreshed every tick).
     pub options: options::GameOptions,
     pub options_menu: options::OptionsMenu,
+    /// Console variables (the game's options plus whatever the front end registers).
+    pub cvars: engine_core::CvarRegistry,
+    pub binds: engine_core::BindTable,
+    /// Config state last handed to the front end by [`Game::take_config`].
+    saved_config: (u64, engine_core::BindTable),
+    /// Toggle-crouch state.
+    crouch_latched: bool,
+    /// Mouse look not yet consumed by a tick (yaw radians, look units), shown by the camera.
+    pending_look: (f32, f32),
     ui_colors: (u8, u8, u8, u8),
     fps: FpsCounter,
     /// Ticks since the game was created (the original HUD clock is time since launch).
@@ -123,6 +136,15 @@ impl Game {
             quit: false,
             options: options::GameOptions::default(),
             options_menu: options::OptionsMenu::default(),
+            cvars: {
+                let mut c = engine_core::CvarRegistry::default();
+                options::register_cvars(&mut c);
+                c
+            },
+            binds: options::default_binds(options::Profile::Modern),
+            saved_config: (0, engine_core::BindTable::default()),
+            crouch_latched: false,
+            pending_look: (0.0, 0.0),
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
                 text::nearest_color(&palette.rgb, [24, 24, 252]),
@@ -144,10 +166,83 @@ impl Game {
             quicksave_dirty: false,
             show_map: false,
         };
+        game.saved_config = (game.cvars.generation(), game.binds.clone());
         if let Some(name) = &options.start_level {
             game.start_level(vfs, name, Entry::Fresh)?;
         }
         Ok(game)
+    }
+
+    /// Take over a registry and bind table a front end prepared (its own cvars registered and
+    /// its config file loaded) before the game existed.
+    pub fn adopt_config(&mut self, cvars: engine_core::CvarRegistry, binds: engine_core::BindTable) {
+        self.cvars = cvars;
+        options::register_cvars(&mut self.cvars); // no-op for known names; adds any missing
+        self.binds = binds;
+        self.options = options::GameOptions::from_cvars(&self.cvars);
+        self.saved_config = (self.cvars.generation(), self.binds.clone());
+    }
+
+    /// Apply a config file (`set`/`bind` lines). Returns its errors for logging.
+    pub fn exec_config(&mut self, text: &str) -> Vec<String> {
+        let errors = engine_core::config::exec_config(&mut self.cvars, &mut self.binds, text);
+        self.options = options::GameOptions::from_cvars(&self.cvars);
+        self.saved_config = (self.cvars.generation(), self.binds.clone());
+        errors
+    }
+
+    /// The config file text when options or bindings changed since the last call.
+    pub fn take_config(&mut self) -> Option<String> {
+        if self.saved_config.0 == self.cvars.generation() && self.saved_config.1 == self.binds {
+            return None;
+        }
+        self.saved_config = (self.cvars.generation(), self.binds.clone());
+        Some(self.config_text())
+    }
+
+    pub fn config_text(&self) -> String {
+        engine_core::config::write_config(&self.cvars, &self.binds, "Exploding Lips config (written by the game; `set` and `bind` lines)")
+    }
+
+    /// The camera the view would be rendered from at `alpha` (between the last two ticks).
+    pub fn view_camera(&self, alpha: f32) -> Option<render::Camera> {
+        self.session().map(|s| camera(s, &self.physics, alpha, self.pending_look))
+    }
+
+    /// Show mouse motion that the next tick will consume, so looking is 1:1 at any frame rate.
+    pub fn preview_look(&mut self, input: &Input) {
+        let (yaw, pitch) = self.mouse_radians(input.mouse);
+        self.pending_look = (-yaw, -PhysicsParams::pitch_to_look(pitch));
+    }
+
+    /// Mouse counts to (yaw, pitch) radians with the sensitivity, vertical scale and invert.
+    fn mouse_radians(&self, (dx, dy): (f32, f32)) -> (f32, f32) {
+        let o = &self.options;
+        let invert = if o.invert_mouse { -1.0 } else { 1.0 };
+        (dx * o.mouse_sensitivity, dy * o.mouse_sensitivity * o.mouse_yscale * invert)
+    }
+
+    /// The input the simulation sees: options applied (autorun, toggle crouch, look scaling).
+    fn effective_input(&mut self, input: &Input) -> Input {
+        let mut eff = input.clone();
+        let o = self.options;
+        if o.autorun {
+            eff.set(Action::Run, !input.held(Action::Run));
+        }
+        if o.toggle_crouch {
+            if input.pressed(Action::Crouch) {
+                self.crouch_latched = !self.crouch_latched;
+            }
+            eff.set(Action::Crouch, self.crouch_latched);
+        } else {
+            self.crouch_latched = false;
+        }
+        let (yaw, pitch) = self.mouse_radians(input.mouse);
+        let stick_invert = if o.invert_stick { -1.0 } else { 1.0 };
+        eff.look_delta.0 += yaw + input.look_axis.0 * STICK_LOOK.0 * o.stick_speed;
+        eff.look_delta.1 += pitch - input.look_axis.1 * STICK_LOOK.1 * o.stick_speed * stick_invert;
+        eff.mouse = (0.0, 0.0);
+        eff
     }
 
     /// Load a level. `Entry::Continue` carries the player's states over from the current one.
@@ -186,6 +281,23 @@ impl Game {
         }
         let line = std::mem::take(&mut self.console.line);
         self.console.output.push(format!("> {line}"));
+        use engine_core::config::{Outcome, exec_line};
+        match exec_line(&mut self.cvars, &mut self.binds, &line) {
+            Outcome::Unknown => {}
+            outcome => {
+                let reply = match outcome {
+                    Outcome::Done(Some(text)) => text,
+                    Outcome::Done(None) => "ok".into(),
+                    Outcome::Error(e) => e,
+                    Outcome::Unknown => unreachable!(),
+                };
+                self.console.output.extend(reply.lines().map(str::to_string));
+                self.options = options::GameOptions::from_cvars(&self.cvars);
+                let excess = self.console.output.len().saturating_sub(6);
+                self.console.output.drain(..excess);
+                return;
+            }
+        }
         let mut words = line.split_whitespace();
         let reply = match words.next().map(str::to_ascii_lowercase).as_deref() {
             Some("warp") => match words.next() {
@@ -195,7 +307,7 @@ impl Game {
                 },
                 None => "usage: warp LIPSnn".into(),
             },
-            Some("help") => "warp LEVEL | any INI command, e.g. INCOS(LIFE=50) or TAG=500".into(),
+            Some("help") => "warp LEVEL | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500".into(),
             _ => match self.session_mut() {
                 Some(s) => {
                     s.run_command(&line);
@@ -349,9 +461,13 @@ impl Game {
             self.fps.frames = 0;
             self.fps.ticks = 0;
         }
-        if self.options_menu.update(input, &mut self.options) {
+        let paused = self.options_menu.update(input, &mut self.cvars, &mut self.binds);
+        self.options = options::GameOptions::from_cvars(&self.cvars);
+        if paused {
             return; // the overlay pauses the game
         }
+        let effective = self.effective_input(input);
+        let input = &effective;
         if input.pressed(Action::Console) {
             self.console.open = !self.console.open;
             self.console.line.clear();
@@ -433,7 +549,7 @@ impl Game {
         match &self.state {
             State::Title => blit_fit(frame, self.title.width, self.title.height, &self.title.pixels),
             State::Playing(session) => {
-                let cam = camera(session, &self.physics, alpha);
+                let cam = camera(session, &self.physics, alpha, self.pending_look);
                 let shading = Shading { rows: &self.shade_rows };
                 let vp = Viewport { x: 0, y: 0, width: frame.width, height: frame.height };
                 self.renderer.render(&session.level.world, &cam, &shading, &self.settings, frame, vp);
@@ -450,10 +566,11 @@ impl Game {
                 draw_automap(frame, session, self.ui_colors);
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
-            self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast);
+            self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);
+            draw_crosshair(frame, self.options.crosshair, self.ui_colors.3);
             session.menus.draw(frame, &session.save);
         }
-        self.options_menu.draw(frame, &self.options, self.ui_colors);
+        self.options_menu.draw(frame, &self.cvars, &self.binds, self.ui_colors);
         if self.console.open {
             let s = (frame.height / CLASSIC_HEIGHT).max(1);
             let line_h = (text::GLYPH + 2) * s;
@@ -472,20 +589,44 @@ impl Game {
     }
 }
 
-fn camera(session: &Session, physics: &PhysicsParams, alpha: f32) -> Camera {
+/// Interpolated view between the last two ticks. Mouse/stick look (`direct_*`) is not
+/// interpolated: the last tick's part is shown in full and `pending` (motion the next tick will
+/// consume) is added, so the view follows the mouse 1:1 at any frame rate.
+fn camera(session: &Session, physics: &PhysicsParams, alpha: f32, pending: (f32, f32)) -> Camera {
     let (p, q) = (&session.previous, &session.player);
     let lerp = |a: f32, b: f32| a + (b - a) * alpha;
-    let mut angle_delta = (q.angle - p.angle).rem_euclid(std::f32::consts::TAU);
+    let mut angle_delta = (q.angle - q.direct_turn - p.angle).rem_euclid(std::f32::consts::TAU);
     if angle_delta > std::f32::consts::PI {
         angle_delta -= std::f32::consts::TAU;
     }
+    let look = (lerp(p.look, q.look - q.direct_look) + q.direct_look + pending.1).clamp(-physics.look_limit, physics.look_limit);
     Camera {
         x: lerp(p.x, q.x),
         y: lerp(p.y, q.y),
         z: lerp(p.eye_z(physics), q.eye_z(physics)),
-        angle: p.angle + angle_delta * alpha,
-        pitch: lerp(p.pitch(), q.pitch()),
+        angle: (p.angle + angle_delta * alpha + q.direct_turn + pending.0).rem_euclid(std::f32::consts::TAU),
+        pitch: PhysicsParams::look_to_pitch(look),
         region: q.region,
+    }
+}
+
+/// Crosshair styles: 1 dot, 2 cross, 3 circle.
+fn draw_crosshair(frame: &mut Frame, style: u8, color: u8) {
+    if style == 0 {
+        return;
+    }
+    let s = (frame.height / CLASSIC_HEIGHT).max(1) as i32;
+    let (cx, cy) = (frame.width as i32 / 2, frame.height as i32 / 2);
+    let dots: Vec<(i32, i32)> = match style {
+        1 => vec![(0, 0)],
+        2 => [-3, -2, 2, 3].iter().flat_map(|&d| [(d, 0), (0, d)]).collect(),
+        _ => (0..16).map(|i| {
+            let a = i as f32 / 16.0 * std::f32::consts::TAU;
+            ((a.cos() * 3.0).round() as i32, (a.sin() * 3.0).round() as i32)
+        }).collect(),
+    };
+    for (dx, dy) in dots {
+        text::fill_rect(frame, cx + dx * s - s / 2, cy + dy * s - s / 2, s as usize, s as usize, color);
     }
 }
 

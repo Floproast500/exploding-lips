@@ -1,0 +1,28 @@
+# Our engine: screenshot every options page (F10 -> each category).
+wait 3
+key F10
+wait 0.3
+shot 00_main
+key Return
+wait 0.3
+shot 01_video
+key Escape
+key Down Return
+wait 0.3
+shot 02_audio
+key Escape
+key Down Return
+wait 0.3
+shot 03_controls
+key Escape
+key Down Return
+wait 0.3
+shot 04_hud
+key Escape
+key Down Return
+wait 0.3
+shot 05_accessibility
+key Escape
+key Down Return
+wait 0.3
+shot 06_bindings

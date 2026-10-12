@@ -1364,6 +1364,7 @@ name = "lips-desktop"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "engine-core",
  "env_logger",
  "gilrs",
  "godd-game",

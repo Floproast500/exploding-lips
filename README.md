@@ -52,18 +52,25 @@ cargo run --release -p lips-desktop -- --data /path/to/ExplodingLips
 #   --classic            the original 320x200 screen shown at 4:3
 #   --size WxH           window size (default 1280x960); F11 toggles fullscreen
 #   --fullscreen         borderless fullscreen
-#   --true-color         smooth RGB lighting (F9 toggles)
+#   --true-color         smooth RGB lighting
 #   --fov DEG            vertical field of view (original 48.9)
+#   --set NAME VALUE     set any console variable (repeatable)
 #   --level LIPSnn       skip the menus
-#   --soundfont F.sf2    play the MIDI music through a SoundFont
+#   --soundfont F.sf2    MIDI SoundFont (default: the first one found in /usr/share/soundfonts)
 #   --software           present on the CPU (no GPU required)
 #   --mod DIR            overlay replacement files (repeatable)
 #   --host [--port N] [--ws-port N] / --join HOST[:PORT] / --name NAME   netplay
 ```
 
-Settings, key bindings, saves and the quicksave live in `~/.config/exploding-lips/`
-(`%APPDATA%` on Windows, `~/Library/Application Support` on macOS). On a Steam Deck the game
-defaults to 1280x800 fullscreen.
+Options and bindings are console variables saved to `config.cfg` in `~/.config/exploding-lips/`
+(`%APPDATA%` on Windows, `~/Library/Application Support` on macOS), next to the saves and the
+quicksave. The file is plain `set` / `bind` lines, the same commands the console (`~`) accepts:
+`set r_fov 90`, `toggle cl_autorun`, `cvarlist`, `bind mouse:Right Jump`, `unbind key:KeyF`. An old
+`settings.ini` is imported once. On a Steam Deck the game defaults to 1280x800 fullscreen. The web
+build keeps the same config in browser storage.
+
+**Music** needs a General MIDI SoundFont (e.g. `soundfont-fluid` on Arch); sound effects play
+without one.
 
 **Web:** `./scripts/build-web.sh`, then `python3 -m http.server -d crates/lips-web/www 8080` and
 open `http://localhost:8080`; choose your game folder. Add `?join=ws://HOST:PORT&name=you` to join
@@ -71,13 +78,20 @@ a desktop host started with `--host --ws-port PORT`.
 
 ### Controls
 
-Original `keyboard.txt` bindings: arrows move/turn, Alt+arrows strafe, Tab jump, Caps Lock crouch,
-W/X look up/down, S centre, Ctrl use tool, 0–9 select tool, F2 map, numpad `*`/`/` brightness,
-Esc game menu, `~` console. Extras: A/D strafe, Shift run, Space jump, mouse look (click to capture),
-F6 quicksave, F7 quickload, F10 options (incl. key rebinding). Gamepad: left stick move, right stick
-look, A jump/select, X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu,
-Select options. Steam Controller: launch through Steam with a Gamepad layout; on Wayland, start
-the game as an X11 window (`env -u WAYLAND_DISPLAY`) so Steam can see it has focus.
+F10 opens the options (Video, Audio, Controls, HUD, Accessibility, Key bindings). The bindings page
+rebinds any action to a key, mouse button, wheel direction or pad button and has two presets:
+
+- **Modern** (default): WASD move, mouse look (click to capture), Mouse1/F use tool, wheel or Q/E
+  switch tools, Space jump, Ctrl/C crouch, Shift run, Tab map, 0–9 tools.
+- **Classic**: the original `keyboard.txt` (arrows, Alt+arrows strafe, Tab jump, Caps Lock crouch,
+  W/X look, S centre, Ctrl use, F2 map).
+
+Both: Esc menu, `~` console, F6 quicksave, F7 quickload, F11 fullscreen, numpad `*`/`/` brightness.
+Options include always run, toggle crouch, mouse speed / vertical scale / invert, stick speed /
+invert, crosshair, HUD scale and volume. Gamepad: left stick move, right stick look, A jump/select,
+X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu, Select options. Steam
+Controller: launch through Steam with a Gamepad layout; on Wayland, start the game as an X11 window
+(`env -u WAYLAND_DISPLAY`, as `scripts/steam-padtest.sh` does) so Steam can see it has focus.
 
 ## Tools
 
