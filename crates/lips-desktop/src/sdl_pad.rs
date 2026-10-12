@@ -7,6 +7,7 @@ use engine_core::{BindTable, HapticEvent};
 use godd_game::Input;
 use sdl3_sys::gamepad::*;
 use sdl3_sys::joystick::SDL_JoystickID;
+use sdl3_sys::hints::{SDL_HINT_NO_SIGNAL_HANDLERS, SDL_SetHint};
 use sdl3_sys::init::{SDL_INIT_GAMEPAD, SDL_Init};
 use sdl3_sys::sensor::SDL_SENSOR_GYRO;
 
@@ -50,8 +51,13 @@ fn deadzone(v: f32) -> f32 {
 
 impl SdlPads {
     pub fn new() -> Option<Self> {
-        // SAFETY: plain SDL calls on the main thread; SDL owns no Rust memory here.
-        if !unsafe { SDL_Init(SDL_INIT_GAMEPAD) } {
+        // SAFETY: plain SDL calls on the main thread; SDL owns no Rust memory here. SDL would
+        // otherwise turn SIGINT/SIGTERM into quit events nobody reads, so the game would
+        // ignore Ctrl+C and `kill`.
+        if !unsafe {
+            SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, c"1".as_ptr());
+            SDL_Init(SDL_INIT_GAMEPAD)
+        } {
             log::warn!("SDL gamepads unavailable");
             return None;
         }
