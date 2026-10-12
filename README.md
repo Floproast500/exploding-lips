@@ -30,6 +30,7 @@ the engine reads them from your install folder at runtime.
 | Web (WASM): folder picker, GPU renderer on WebGPU or WebGL2 (software canvas fallback), positional audio with streamed music, options/bindings/saves in localStorage | working; headless-tested on WebGL2 and software (headless Chromium cannot show WebGPU canvases) |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
 | Modern extras: Hor+ widescreen, FOV, true colour, quicksave, key rebinding, high-contrast HUD, long messages | working |
+| Progression guides (`hud_guides`): walk-in teleporters glow blue, switches amber, the level's exit switch green, with matching automap symbols and a one-time tip (the original shows none of them) | data-tested (LIPS00's start switch and exit found, inert objects skipped) |
 | HD HUD, menus and automap: on the GPU renderer, text, boxes, menu images, map walls and markers are drawn at display resolution with smooth, anti-aliased edges (`hud_hd`, `hud_smooth`) | GPU-tested (headless draw of boxes, glyphs, images) and data-tested (HUD recorded for the GPU) |
 | Automap (F2/Tab): explored regions only, textured floors, zoom (+/-, wheel), north-up or rotating, markers (M), other players | working |
 | Save slots (F10 > Save/Load game): 8 slots with view thumbnails, stored in the config folder / browser storage | data-tested round trip |
@@ -140,7 +141,10 @@ Options include always run, toggle crouch, mouse speed / vertical scale / invert
 invert, crosshair, HUD scale and volume. Gamepad: left stick move, right stick look, A jump/select,
 X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu, Select options. Steam
 Controller: launch through Steam with a Gamepad layout; on Wayland, start the game as an X11 window
-(`env -u WAYLAND_DISPLAY`, as `scripts/steam-padtest.sh` does) so Steam can see it has focus.
+(`env -u WAYLAND_DISPLAY`) so Steam can see it has focus; the game does this by itself when Steam
+starts it. `scripts/play.sh` starts the remaster (GPU renderer, HD pack when built, controllers);
+add it to Steam as a non-Steam game for the Steam Controller (`scripts/steam-padtest.sh` does the
+same with controller logging).
 
 Rumble is on by default (`joy_rumble`). For gyro aiming (Steam Deck, Steam Controller,
 DualShock/DualSense, Switch Pro) build with the SDL3 backend and switch it on:

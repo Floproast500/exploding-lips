@@ -9,7 +9,7 @@ use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
@@ -207,7 +207,7 @@ impl ApplicationHandler for ModuleApp {
 
 /// Run `module` in its own window until it is closed.
 pub fn run(module: Box<dyn GameModule>) {
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = crate::new_event_loop();
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = ModuleApp {
         module,

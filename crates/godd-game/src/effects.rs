@@ -183,7 +183,46 @@ pub struct Effects {
     frame_accum: f32,
 }
 
+/// A switch wall: touching it fires `tags` (while `usable`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchInfo {
+    pub wall: usize,
+    pub tags: std::ops::RangeInclusive<i32>,
+    pub usable: bool,
+}
+
 impl Effects {
+    /// Every switch wall of the level.
+    pub fn switches(&self) -> Vec<SwitchInfo> {
+        self.walls
+            .iter()
+            .filter_map(|w| match &w.kind {
+                WallKind::Switch { tag, tag_end, uses, .. } => Some(SwitchInfo { wall: w.wall, tags: *tag..=(*tag_end).max(*tag), usable: uses.is_none_or(|n| n > 0) }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Doors (and rotating doors): (region, tag that opens it).
+    pub fn doors(&self) -> Vec<(usize, i32)> {
+        self.regions.iter().filter(|r| matches!(r.kind, RegionKind::Door { .. } | RegionKind::Rotate(_))).map(|r| (r.region, r.tag)).collect()
+    }
+
+    /// Regions that fire tags when entered, left, landed on or bumped (ceiling): (region,
+    /// the tags, 0 = none).
+    pub fn triggers(&self) -> Vec<(usize, [i32; 4])> {
+        self.regions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RegionKind::Trigger { aux, .. } | RegionKind::Animated { aux } => {
+                    let a = aux.as_ref()?;
+                    Some((r.region, [a.p88(), a.p8c(), a.p90(), a.p94()]))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn new(level: &Level) -> Self {
         let mut fx = Effects {
             by_region: vec![None; level.world.regions.len()],

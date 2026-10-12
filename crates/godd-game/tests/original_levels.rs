@@ -810,3 +810,26 @@ fn lips00_automap_lines_are_recorded() {
     assert!(list.iter().any(|c| matches!(c, UiCmd::Triangle { .. })), "player arrow");
     assert!(ui.coverage.as_ref().unwrap().iter().all(|&c| c != 0), "backdrop covers the view");
 }
+
+/// Progression guides in LIPS00: the start room's way out is the switch at the end of its
+/// north corridor; it is a guide (the ledge's two inert teleporter objects are not), the exit
+/// switch is green, guides glow in the GPU view and the first level explains the colours.
+#[test]
+fn lips00_guides_show_the_way_out() {
+    use godd_game::guides::{self, GuideKind};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let s = game.session().unwrap();
+    let found = guides::find(s);
+    let near = |kind: GuideKind, x: f32, y: f32| found.iter().any(|g| g.kind == kind && (g.pos[0] - x).abs() < 40.0 && (g.pos[1] - y).abs() < 40.0);
+    assert!(near(GuideKind::Switch, 11712.0, 16768.0), "start corridor switch");
+    assert!(!found.iter().any(|g| g.kind == GuideKind::Teleport && (g.pos[1] - 16496.0).abs() < 40.0), "inert ledge objects are not guides");
+    assert_eq!(found.iter().filter(|g| g.kind == GuideKind::Exit).count(), 1, "one exit switch");
+    assert!(s.messages.iter().any(|m| m.text.contains("AMBER")), "tip shown");
+    let (w, h) = game.ui_layer_size(1280, 720);
+    let mut ui = godd_game::Frame::new(w, h);
+    let lights = game.gpu_frame(&mut ui, 1.0).unwrap().scene.lights.len();
+    assert!(lights >= 1, "{lights} lights");
+    game.cvars.set("hud_guides", "0").unwrap();
+    assert_eq!(game.gpu_frame(&mut ui, 1.0).unwrap().scene.lights.len(), 0);
+}

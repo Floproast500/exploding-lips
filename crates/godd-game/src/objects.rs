@@ -89,7 +89,7 @@ impl ObjAux {
         Some(Self { ints: std::array::from_fn(|k| record.le_i32(0x88 + 4 * k)), slots, sounds })
     }
 
-    fn slot(&self, k: usize) -> Option<&str> {
+    pub fn slot(&self, k: usize) -> Option<&str> {
         let s = self.slots[k].as_str();
         (!s.is_empty() && !s.eq_ignore_ascii_case("NO_NAME")).then_some(s)
     }

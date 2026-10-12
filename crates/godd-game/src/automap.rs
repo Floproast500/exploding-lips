@@ -24,6 +24,8 @@ pub struct Style {
     pub floor_row: usize,
     /// UI colours: background, border, text, highlight.
     pub colors: (u8, u8, u8, u8),
+    /// Progression guides (x, y, region, colour): shown once their region has been seen.
+    pub guides: Vec<(f32, f32, Option<usize>, u8)>,
 }
 
 impl Automap {
@@ -118,6 +120,21 @@ impl Automap {
         for (i, &(mx, my)) in self.marks.iter().enumerate() {
             let (x, y) = to_screen(mx, my);
             crate::text::draw_text(frame, x as i32 - 3 * s, y as i32 - 4 * s, s as usize, portal, &(i + 1).to_string());
+        }
+        // Guides: a diamond each.
+        for &(gx, gy, region, color) in &style.guides {
+            if region.is_some_and(|r| !seen(r)) {
+                continue;
+            }
+            let (x, y) = to_screen(gx, gy);
+            let r = 3.0 * s as f32;
+            for pts in [[(x, y - r), (x + r, y), (x - r, y)], [(x - r, y), (x + r, y), (x, y + r)]] {
+                if let Some(list) = &mut frame.ui_list {
+                    list.push(engine_core::UiCmd::Triangle { points: pts, color });
+                } else {
+                    fill_triangle(frame, pts, |_, _| color);
+                }
+            }
         }
         for &(ox, oy, oa) in others {
             arrow(frame, to_screen(ox, oy), oa - turn, s, portal);

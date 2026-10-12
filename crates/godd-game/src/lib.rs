@@ -9,6 +9,7 @@ pub mod automap;
 mod audio;
 pub use engine_core::clock;
 pub mod effects;
+pub mod guides;
 pub use engine_core::frame;
 pub mod hud;
 mod input;
@@ -109,6 +110,8 @@ pub struct Game {
     fps: FpsCounter,
     /// GPU time of a recent frame (milliseconds), reported by the front end for `r_stats`.
     pub gpu_ms: Option<f32>,
+    /// The guide colours were explained this run.
+    guide_tip_shown: bool,
     /// Ticks since the game was created (the original HUD clock is time since launch).
     uptime_ticks: u64,
     /// Character save slots, carried across levels.
@@ -188,6 +191,7 @@ impl Game {
             ),
             fps: FpsCounter::default(),
             gpu_ms: None,
+            guide_tip_shown: false,
             uptime_ticks: 0,
             save: options
                 .save
@@ -301,6 +305,16 @@ impl Game {
         self.epoch += 1;
         let regions = self.session().map_or(0, |s| s.level.world.regions.len());
         self.automap.reset(regions);
+        // Once per run, in the first real level: what the guide colours mean.
+        if !self.guide_tip_shown && self.cvars.get_bool("hud_guides") {
+            let color = text::nearest_color(self.palette(), [255, 200, 60]);
+            if let State::Playing(s) = &mut self.state
+                && guides::find(s).iter().any(|g| g.kind != guides::GuideKind::Switch)
+            {
+                s.show_message(color, "Way forward: BLUE glow = teleporter (walk into it), AMBER = switch (walk into it), GREEN = level exit. They show on the map too.");
+                self.guide_tip_shown = true;
+            }
+        }
         Ok(())
     }
 
@@ -788,6 +802,17 @@ impl Game {
         });
         if modern.is_some_and(|m| m.dynamic_lights) {
             frame.lights = scene_lights(session, &self.physics);
+            if c.get_bool("hud_guides") {
+                // Pulsing markers on the way forward, nearest first, after the combat lights.
+                let p = &session.player;
+                let t = self.uptime_ticks as f32 / TICK_RATE as f32;
+                let pulse = 1.0 + 0.35 * (t * std::f32::consts::TAU * 0.8).sin();
+                let room = 64usize.saturating_sub(frame.lights.len()).min(12);
+                for g in guides::nearest(&guides::find(session), [p.x, p.y, p.z], 2048.0, room) {
+                    let radius = if g.kind == guides::GuideKind::Switch { 96.0 } else { 128.0 };
+                    frame.lights.push(engine_scene::scene::SceneLight { pos: g.pos, radius, color: g.kind.light().map(|v| v * pulse) });
+                }
+            }
         }
         let s = &self.settings;
         let view = GpuView {
@@ -874,6 +899,12 @@ impl Game {
                     zoom: self.cvars.get_float("am_zoom") as f32,
                     floor_row: 7,
                     colors: self.ui_colors,
+                    guides: if self.cvars.get_bool("hud_guides") {
+                        let pal = self.palette();
+                        guides::find(session).iter().map(|g| (g.pos[0], g.pos[1], g.region, text::nearest_color(pal, g.kind.rgb()))).collect()
+                    } else {
+                        Vec::new()
+                    },
                 };
                 let others: Vec<(f32, f32, f32)> = session.remote_positions();
                 self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);

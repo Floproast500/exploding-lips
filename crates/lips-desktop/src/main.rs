@@ -439,6 +439,23 @@ impl ApplicationHandler for App {
     }
 }
 
+/// The window event loop. Under Steam on Linux the window goes through X11 (XWayland): Steam
+/// cannot see the focus of native Wayland windows and would keep the controller on its desktop
+/// (mouse and keyboard) layout instead of the game's gamepad layout.
+pub fn new_event_loop() -> EventLoop<()> {
+    let mut builder = EventLoop::builder();
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        let under_steam = std::env::var_os("SteamGameId").is_some() || std::env::var_os("SteamAppId").is_some();
+        if under_steam && std::env::var_os("DISPLAY").is_some() {
+            log::info!("launched by Steam: using X11 so Steam Input sees the window's focus");
+            builder.with_x11();
+        }
+    }
+    builder.build().expect("event loop")
+}
+
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     // `--bsp <PAK|BSP> <MAP> [palette=FILE]`: fly through a Quake-family map (Quake, Hexen II)
@@ -536,7 +553,7 @@ fn main() {
     let gamepads = if sdl_pads.is_none() { gamepad::Gamepads::new() } else { None };
     #[cfg(not(feature = "sdl"))]
     let gamepads = gamepad::Gamepads::new();
-    let event_loop = EventLoop::new().expect("event loop");
+    let event_loop = new_event_loop();
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
         opts,
