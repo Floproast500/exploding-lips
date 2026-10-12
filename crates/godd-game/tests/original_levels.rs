@@ -790,3 +790,23 @@ fn lips00_hud_is_recorded_for_the_gpu() {
     assert!(ui.ui_list.is_none());
     assert!(drawn(&ui) > hd_pixels + 1000, "the HUD is in the pixel layer: {} vs {hd_pixels}", drawn(&ui));
 }
+
+/// The automap on the GPU path: walls as recorded lines and the player as a triangle over the
+/// pixel backdrop and floors.
+#[test]
+fn lips00_automap_lines_are_recorded() {
+    use engine_core::UiCmd;
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let mut open = Input::default();
+    open.set(Action::Map, true);
+    game.tick(&vfs, &open);
+    let (w, h) = game.ui_layer_size(1920, 1080);
+    let mut ui = godd_game::Frame::new(w, h);
+    game.gpu_frame(&mut ui, 1.0).unwrap();
+    let list = ui.ui_list.as_ref().unwrap();
+    assert!(list.iter().filter(|c| matches!(c, UiCmd::Line { .. })).count() > 10, "walls");
+    assert!(list.iter().any(|c| matches!(c, UiCmd::Triangle { .. })), "player arrow");
+    assert!(ui.coverage.as_ref().unwrap().iter().all(|&c| c != 0), "backdrop covers the view");
+}

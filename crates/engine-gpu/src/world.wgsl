@@ -14,13 +14,43 @@ struct Uniforms {
     sky_layer: vec4<u32>,  // layer
     look: vec4<f32>,       // freelook (0/1), sin(pitch), cos(pitch)
     modern: vec4<f32>,     // modern lighting (0/1), dynamic lights (0/1), light count
+    shadow: vec4<f32>,     // shadowed light index (-1 none), cube depth a, b
     brightness: array<vec4<f32>, 4>,
     emissive: array<vec4<u32>, 2>,
 };
 
 struct Lights {
-    data: array<vec4<f32>, 128>, // per light: pos.xyz + radius, colour.rgb
+    data: array<vec4<f32>, 128>,      // per light: pos.xyz + radius, colour.rgb
+    clusters: array<vec4<u32>, 288>,  // per cluster two words of light bits (16x9 tiles x 4 slices)
 };
+
+// Cluster of a world point: screen tile from the projection (as in vs_main) and depth slice
+// from the horizontal distance ahead; must match clusters.rs.
+fn cluster_of(world: vec3<f32>) -> u32 {
+    let rel = world - u.cam.xyz;
+    let forward = dot(rel.xy, u.basis.xy);
+    let right = dot(rel.xy, u.basis.zw);
+    var w = forward;
+    var up = rel.z - u.proj.z * forward;
+    if (u.look.x > 0.5) {
+        w = forward * u.look.z + rel.z * u.look.y;
+        up = rel.z * u.look.z - forward * u.look.y;
+    }
+    let ndc = vec2<f32>(right * u.proj.x, up * u.proj.y) / max(w, 1e-3);
+    let tx = u32(clamp(floor((ndc.x + 1.0) * 0.5 * 16.0), 0.0, 15.0));
+    let ty = u32(clamp(floor((1.0 - ndc.y) * 0.5 * 9.0), 0.0, 8.0));
+    var slice = 3u;
+    if (forward < 256.0) { slice = 0u; } else if (forward < 640.0) { slice = 1u; } else if (forward < 1536.0) { slice = 2u; }
+    return (slice * 9u + ty) * 16u + tx;
+}
+
+fn light_bit(cluster: u32, i: u32) -> bool {
+    let words = lights.clusters[cluster / 2u];
+    let k = (cluster % 2u) * 2u + i / 32u;
+    var word = words.x;
+    if (k == 1u) { word = words.y; } else if (k == 2u) { word = words.z; } else if (k == 3u) { word = words.w; }
+    return (word & (1u << (i % 32u))) != 0u;
+}
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas: texture_2d_array<u32>;
@@ -39,6 +69,16 @@ struct Lights {
 @group(0) @binding(13) var nm3: texture_2d_array<f32>;
 @group(0) @binding(14) var nm4: texture_2d_array<f32>;
 @group(0) @binding(15) var hd_smp: sampler;
+@group(0) @binding(16) var shadow_cube: texture_depth_cube;
+@group(0) @binding(17) var shadow_smp: sampler_comparison;
+
+// Fraction of light `p` reaching `world` (offset along `n` against self-shadowing).
+fn shadow_of(p: vec3<f32>, world: vec3<f32>, n: vec3<f32>) -> f32 {
+    let v = world + n * 1.5 - p;
+    let z = max(abs(v.x), max(abs(v.y), abs(v.z)));
+    let depth = u.shadow.y + u.shadow.z / max(z, 1e-3);
+    return textureSampleCompareLevel(shadow_cube, shadow_smp, v, depth);
+}
 
 // Portal window of the current batch: inside where every edge equation is >= 0 (NDC).
 struct Clip {
@@ -170,14 +210,21 @@ fn lit_spec(albedo: vec3<f32>, b: f32, world: vec3<f32>, normal: vec3<f32>, spec
     var light = vec3<f32>(b);
     var shine = vec3<f32>(0.0);
     let view = normalize(u.cam.xyz - world);
+    let cluster = cluster_of(world);
     if (u.modern.y > 0.5) {
         let n = normalize(normal);
         for (var i = 0u; i < u32(u.modern.z); i = i + 1u) {
+            if (!light_bit(cluster, i)) {
+                continue;
+            }
             let p = lights.data[i * 2u];
             let c = lights.data[i * 2u + 1u].rgb;
             let to = p.xyz - world;
             let d = length(to);
-            let att = pow(clamp(1.0 - d / p.w, 0.0, 1.0), 2.0);
+            var att = pow(clamp(1.0 - d / p.w, 0.0, 1.0), 2.0);
+            if (f32(i) == u.shadow.x && att > 0.0) {
+                att = att * shadow_of(p.xyz, world, n);
+            }
             let facing = max(dot(n, to / max(d, 1e-3)), 0.0);
             light = light + c * att * mix(facing, 1.0, 0.25);
             let h = normalize(to / max(d, 1e-3) + view);

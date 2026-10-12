@@ -17,7 +17,7 @@ struct Vertex {
     /// Atlas texels.
     uv: [f32; 2],
     color: u32,
-    /// 0 box, 1 glyph, 2 image.
+    /// 0 box / triangle, 1 glyph, 2 image, 3 anti-aliased line (uv.y across, -1..1).
     kind: u32,
 }
 
@@ -145,6 +145,28 @@ impl UiList {
         let mut blits: Vec<Blit> = Vec::new();
         for cmd in cmds {
             let (x, y, w, h, uv, color, kind) = match cmd {
+                UiCmd::Triangle { points, color } => {
+                    let c = *color as u32;
+                    self.verts.extend(points.iter().map(|&(x, y)| Vertex { pos: [x, y], uv: [0.0; 2], color: c, kind: 0 }));
+                    continue;
+                }
+                UiCmd::Line { from, to, width, color } => {
+                    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+                    let len = (dx * dx + dy * dy).sqrt();
+                    if len < 1e-4 {
+                        continue;
+                    }
+                    // Half a pixel more on each side for the anti-aliased edge.
+                    let half = width / 2.0 + 0.5;
+                    let (nx, ny) = (-dy / len * half, dx / len * half);
+                    let (ex, ey) = (dx / len * 0.5, dy / len * 0.5);
+                    let c = *color as u32;
+                    let v = |x: f32, y: f32, across: f32| Vertex { pos: [x, y], uv: [0.0, across], color: c, kind: 3 };
+                    let (a0, a1) = ((from.0 - ex, from.1 - ey), (to.0 + ex, to.1 + ey));
+                    let quad = [v(a0.0 + nx, a0.1 + ny, 1.0), v(a1.0 + nx, a1.1 + ny, 1.0), v(a1.0 - nx, a1.1 - ny, -1.0), v(a0.0 - nx, a0.1 - ny, -1.0)];
+                    self.verts.extend_from_slice(&[quad[0], quad[1], quad[2], quad[0], quad[2], quad[3]]);
+                    continue;
+                }
                 UiCmd::Rect { x, y, w, h, color } => (*x, *y, *w, *h, [0.0; 4], *color, 0),
                 UiCmd::Glyph { x, y, scale, color, rows } => {
                     let at = match glyphs.get(rows) {

@@ -90,6 +90,8 @@ pub struct Modern {
     pub render_scale: f32,
     /// Fast approximate anti-aliasing on the tonemapped image.
     pub fxaa: bool,
+    /// The strongest dynamic light casts shadows from the visible world geometry.
+    pub shadows: bool,
 }
 
 /// A coloured point light (projectiles, explosions, muzzle flashes).

@@ -134,6 +134,10 @@ fn text_fill(frame: &mut Frame, color: u8) {
 }
 
 fn line(frame: &mut Frame, (x0, y0): (f32, f32), (x1, y1): (f32, f32), color: u8) {
+    if let Some(list) = &mut frame.ui_list {
+        list.push(engine_core::UiCmd::Line { from: (x0, y0), to: (x1, y1), width: 0.5, color });
+        return;
+    }
     let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil().max(1.0) as usize;
     if steps > 8000 {
         return;
@@ -176,5 +180,10 @@ fn arrow(frame: &mut Frame, (cx, cy): (f32, f32), angle: f32, s: i32, color: u8)
     let tip = (cx + dx * len, cy + dy * len);
     let back = (cx - dx * len * 0.6, cy - dy * len * 0.6);
     let side = (-dy * len * 0.5, dx * len * 0.5);
-    fill_triangle(frame, [tip, (back.0 + side.0, back.1 + side.1), (back.0 - side.0, back.1 - side.1)], |_, _| color);
+    let points = [tip, (back.0 + side.0, back.1 + side.1), (back.0 - side.0, back.1 - side.1)];
+    if let Some(list) = &mut frame.ui_list {
+        list.push(engine_core::UiCmd::Triangle { points, color });
+        return;
+    }
+    fill_triangle(frame, points, |_, _| color);
 }

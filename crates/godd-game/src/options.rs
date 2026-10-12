@@ -19,6 +19,7 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.choice("r_lighting", "Lighting (GPU)", Video, &["classic", "modern"], 1);
     c.bool("r_dynlights", "Dynamic lights", Video, true);
     c.bool("r_bloom", "Bloom", Video, true);
+    c.bool("r_shadows", "Dynamic light shadows", Video, true);
     c.choice("r_msaa", "Multisampling", Video, &["off", "2x", "4x", "8x"], 2);
     c.bool("r_fxaa", "FXAA", Video, false);
     c.float("r_scale", "Render scale", Video, (0.25, 2.0, 0.05), 1.0);

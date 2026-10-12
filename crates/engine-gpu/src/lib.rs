@@ -7,7 +7,9 @@ use engine_scene::scene::{HdTexture, IndexedImage, SceneCamera, SceneFrame, Shad
 
 mod frame;
 mod hd;
+mod clusters;
 mod post;
+mod shadow;
 mod timer;
 mod ui_list;
 pub use frame::{CpuFrame, FramePresenter, letterbox};
@@ -18,6 +20,8 @@ use post::Post;
 /// Vertex flags added by the renderer: sample the HD texture set (and its normal map).
 const FLAG_HD: u32 = 1 << 16;
 const FLAG_HD_NORMAL: u32 = 1 << 17;
+
+const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint16x4, 3 => Uint32x2, 4 => Float32, 5 => Float32x3];
 
 /// HDR format for modern lighting.
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -73,6 +77,8 @@ struct Uniforms {
     sky_layer: [u32; 4],
     look: [f32; 4],
     modern: [f32; 4],
+    /// Shadowed light index (-1: none), cube depth parameters a and b.
+    shadow: [f32; 4],
     brightness: [[f32; 4]; 4],
     emissive: [[u32; 4]; 2],
 }
@@ -139,6 +145,7 @@ pub struct WorldRenderer {
     /// Sample counts usable for the HDR and depth targets (bit n = 2^n samples).
     sample_support: u32,
     timer: Option<GpuTimer>,
+    shadow: shadow::ShadowMap,
     vertices: Option<(wgpu::Buffer, u64)>,
     staging: Vec<GpuVertex>,
     ui: UiOverlay,
@@ -189,6 +196,18 @@ impl WorldRenderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 16,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::Cube, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
             ],
         });
         let clip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -217,7 +236,7 @@ impl WorldRenderer {
         });
         let lights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("world-lights"),
-            size: (MAX_LIGHTS * 32) as u64,
+            size: (MAX_LIGHTS * 32 + clusters::CLUSTERS * 8) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -256,6 +275,11 @@ impl WorldRenderer {
             // 1x and 4x are guaranteed everywhere (WebGPU and WebGL2 included).
             sample_support: 1 | 4,
             timer: None,
+            shadow: shadow::ShadowMap::new(device, wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &VERTEX_ATTRIBUTES,
+            }),
             vertices: None,
             staging: Vec::new(),
         }
@@ -265,7 +289,7 @@ impl WorldRenderer {
         if let Some(i) = self.pipelines.iter().position(|(f, n, _)| *f == format && *n == samples) {
             return i;
         }
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint16x4, 3 => Uint32x2, 4 => Float32, 5 => Float32x3];
+        let attributes = VERTEX_ATTRIBUTES;
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("world"),
             layout: Some(&self.pipeline_layout),
@@ -428,6 +452,8 @@ impl WorldRenderer {
                     wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::TextureView(&hd.normal[3]) },
                     wgpu::BindGroupEntry { binding: 14, resource: wgpu::BindingResource::TextureView(&hd.normal[4]) },
                     wgpu::BindGroupEntry { binding: 15, resource: wgpu::BindingResource::Sampler(&self.hd_sampler) },
+                    wgpu::BindGroupEntry { binding: 16, resource: wgpu::BindingResource::TextureView(&self.shadow.cube) },
+                    wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::Sampler(&self.shadow.sampler) },
                 ],
             }));
         }
@@ -463,6 +489,15 @@ impl WorldRenderer {
         let focal = vh / 2.0 / (camera.vfov_degrees.to_radians() / 2.0).tan();
         let (sin, cos) = camera.angle.sin_cos();
         let sky = scene.sky.and_then(|i| self.slots.get(i as usize)).copied();
+        // The strongest dynamic light (brightness times reach) casts shadows.
+        let shadowed = modern.filter(|m| m.shadows && m.dynamic_lights).and_then(|_| {
+            scene.lights.iter().take(MAX_LIGHTS).enumerate().max_by(|(_, a), (_, b)| {
+                let weight = |l: &engine_scene::scene::SceneLight| (l.color[0] + l.color[1] + l.color[2]) * l.radius;
+                weight(a).total_cmp(&weight(b))
+            })
+        });
+        let shadowed = shadowed.map(|(i, l)| (i, l.pos, l.radius));
+        let shadow_depth = shadowed.map_or((0.0, 0.0), |(.., far)| shadow::depth_params(far));
         let uniforms = Uniforms {
             cam: [camera.pos[0], camera.pos[1], camera.pos[2], NEAR],
             basis: [cos, sin, sin, -cos],
@@ -476,6 +511,7 @@ impl WorldRenderer {
                 let a = camera.pitch.atan();
                 [camera.freelook as u32 as f32, a.sin(), a.cos(), 0.0]
             },
+            shadow: [shadowed.map_or(-1.0, |(i, ..)| i as f32), shadow_depth.0, shadow_depth.1, 0.0],
             modern: [
                 modern.is_some() as u32 as f32,
                 modern.is_some_and(|m| m.dynamic_lights) as u32 as f32,
@@ -494,6 +530,20 @@ impl WorldRenderer {
         if !scene.lights.is_empty() {
             let data: Vec<f32> = scene.lights.iter().take(MAX_LIGHTS).flat_map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect();
             queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&data));
+            // Which lights reach each cluster of the view (same projection as the shader).
+            let view = clusters::View {
+                eye: camera.pos,
+                dir: [uniforms.basis[0], uniforms.basis[1]],
+                right: [uniforms.basis[2], uniforms.basis[3]],
+                fx: uniforms.proj[0],
+                fy: uniforms.proj[1],
+                pitch: camera.pitch,
+                freelook: camera.freelook,
+                near: NEAR,
+            };
+            let spheres: Vec<([f32; 3], f32)> = scene.lights.iter().map(|l| (l.pos, l.radius)).collect();
+            let masks = clusters::assign(&view, &spheres);
+            queue.write_buffer(&self.lights, (MAX_LIGHTS * 32) as u64, bytemuck::cast_slice(&masks));
         }
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         // Vertices with their images' atlas slots.
@@ -529,6 +579,11 @@ impl WorldRenderer {
         let (buffer, _) = self.vertices.as_ref().expect("vertex buffer");
         if !bytes.is_empty() {
             queue.write_buffer(buffer, 0, bytes);
+        }
+        if let Some((_, pos, far)) = shadowed
+            && !bytes.is_empty()
+        {
+            self.shadow.render(queue, encoder, buffer.slice(..bytes.len() as u64), self.staging.len() as u32, pos, far);
         }
         // Clip windows, one block per batch (block 0 doubles as "no clip" when there are none).
         let blocks = scene.batches.len().max(1) as u64;
@@ -869,6 +924,61 @@ pub fn render_offscreen(
 mod tests {
     use super::*;
 
+    /// Shadows: a light above a small square occluder leaves the floor straight below it
+    /// dark while the floor beside it stays lit; with shadows off both are lit.
+    #[test]
+    fn point_light_casts_shadows() {
+        use engine_scene::scene::{IndexedImage, Modern, SceneLight, SceneVertex};
+        let Some((device, queue)) = headless() else { return };
+        let mut r = WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut palette = [[0u8; 3]; 256];
+        palette[1] = [200, 200, 200];
+        r.set_palette(&device, &queue, &palette, &[[1; 256]; 16]);
+        r.set_images(&device, &queue, &[IndexedImage { width: 1, height: 1, pixels: &[1] }]);
+        let quad = |c: [[f32; 3]; 4], normal: [f32; 3]| {
+            let v = |pos: [f32; 3]| SceneVertex { pos, uv: [0.0; 2], image: 0, light: 0.0, flags: 0, normal };
+            [v(c[0]), v(c[1]), v(c[2]), v(c[0]), v(c[2]), v(c[3])]
+        };
+        let mut scene = SceneFrame::default();
+        scene.vertices.extend(quad([[-400.0, -400.0, 0.0], [400.0, -400.0, 0.0], [400.0, 400.0, 0.0], [-400.0, 400.0, 0.0]], [0.0, 0.0, 1.0]));
+        scene.vertices.extend(quad([[-20.0, -20.0, 25.0], [20.0, -20.0, 25.0], [20.0, 20.0, 25.0], [-20.0, 20.0, 25.0]], [0.0, 0.0, 1.0]));
+        scene.lights.push(SceneLight { pos: [0.0, 0.0, 50.0], radius: 400.0, color: [2.0, 2.0, 2.0] });
+        // Looking along +X from behind and above, pitched down.
+        let pitch: f32 = -0.5;
+        let camera = SceneCamera { pos: [-300.0, 0.0, 150.0], angle: 0.0, pitch, vfov_degrees: 60.0, freelook: true };
+        let modern = |shadows| Modern {
+            brightness: [0.0; 16],
+            emissive: [0; 8],
+            dynamic_lights: true,
+            bloom: false,
+            tonemap: 0,
+            exposure: 1.0,
+            msaa: 1,
+            render_scale: 1.0,
+            fxaa: false,
+            shadows,
+        };
+        let shading = |shadows| Shading { visibility: 1.0e9, fade_bias: 0.0, true_color: true, fullbright: false, max_object_shade: 15.0, zero_substitute: 0, modern: Some(modern(shadows)) };
+        // Where a floor point lands on the 320x200 screen (the shader's freelook projection).
+        let screen = |p: [f32; 3]| {
+            let rel = [p[0] - camera.pos[0], p[1] - camera.pos[1], p[2] - camera.pos[2]];
+            let (sin, cos) = pitch.atan().sin_cos();
+            let (f, up, right) = (rel[0] * cos + rel[2] * sin, rel[2] * cos - rel[0] * sin, -rel[1]);
+            let focal = 100.0 / (30.0f32.to_radians()).tan();
+            ((160.0 + right / f * focal) as usize, (100.0 - up / f * focal) as usize)
+        };
+        let lum = |rgba: &[u8], (x, y): (usize, usize)| rgba[(y * 320 + x) * 4] as u32;
+        // The occluder hides the floor right below it from the camera, so look at the shadow's
+        // far side: the floor just beyond the square (still inside its shadow) and well beside it.
+        let (under, beside) = ([30.0, 0.0, 0.0], [30.0, 120.0, 0.0]);
+        let on = render_offscreen(&device, &queue, &mut r, (320, 200), &camera, &shading(true), &scene, None);
+        let off = render_offscreen(&device, &queue, &mut r, (320, 200), &camera, &shading(false), &scene, None);
+        let (u_on, b_on, u_off) = (lum(&on, screen(under)), lum(&on, screen(beside)), lum(&off, screen(under)));
+        assert!(u_off > 60, "lit without shadows: {u_off}");
+        assert!(b_on > 40, "beside the occluder stays lit: {b_on}");
+        assert!(u_on * 3 < u_off, "in the shadow: {u_on} vs {u_off}");
+    }
+
     /// The recorded UI list draws at display resolution: a box, a solid glyph and an image with
     /// a transparent texel land on the right pixels in their palette colours.
     #[test]
@@ -888,6 +998,8 @@ mod tests {
             UiCmd::Rect { x: 2, y: 2, w: 4, h: 4, color: 5 },
             UiCmd::Glyph { x: 12, y: 4, scale: 1, color: 7, rows: [0xFF; 8] },
             UiCmd::Image { x: 24, y: 4, scale: 2, width: 2, height: 1, pixels: vec![9, 0] },
+            UiCmd::Line { from: (2.0, 15.0), to: (12.0, 15.0), width: 1.0, color: 7 },
+            UiCmd::Triangle { points: [(20.0, 12.0), (30.0, 12.0), (20.0, 19.0)], color: 9 },
         ];
         let (indices, coverage) = (vec![0u8; 32 * 20], vec![0u8; 32 * 20]);
         let rgba = render_offscreen(&device, &queue, &mut r, (64, 40), &camera, &shading, &SceneFrame::default(), Some(((32, 20), &indices, &coverage, &list)));
@@ -897,6 +1009,10 @@ mod tests {
         assert_ne!(at(32, 30), [0, 255, 0], "below the glyph");
         assert_eq!(at(50, 10), [0, 0, 255], "image texel");
         assert_ne!(at(54, 10), [0, 0, 255], "transparent texel");
+        assert_eq!(at(14, 30), [0, 255, 0], "line centre");
+        assert_eq!(at(14, 36), [0, 0, 0], "beside the line");
+        assert_eq!(at(42, 26), [0, 0, 255], "inside the triangle");
+        assert_eq!(at(58, 36), [0, 0, 0], "outside the triangle");
     }
 
     #[test]

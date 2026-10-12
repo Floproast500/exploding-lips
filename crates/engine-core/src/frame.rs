@@ -29,6 +29,10 @@ pub enum UiCmd {
     Glyph { x: i32, y: i32, scale: u32, color: u8, rows: [u8; 8] },
     /// Palette indices (0 transparent) enlarged `scale` times.
     Image { x: i32, y: i32, scale: u32, width: u32, height: u32, pixels: Vec<u8> },
+    /// A line `width` pixels wide (anti-aliased on the GPU).
+    Line { from: (f32, f32), to: (f32, f32), width: f32, color: u8 },
+    /// A filled triangle.
+    Triangle { points: [(f32, f32); 3], color: u8 },
 }
 
 impl Frame {

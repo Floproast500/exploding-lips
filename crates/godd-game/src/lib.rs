@@ -784,6 +784,7 @@ impl Game {
             msaa: 1 << c.get_int("r_msaa").clamp(0, 3),
             render_scale: c.get_float("r_scale") as f32,
             fxaa: c.get_bool("r_fxaa"),
+            shadows: c.get_bool("r_shadows"),
         });
         if modern.is_some_and(|m| m.dynamic_lights) {
             frame.lights = scene_lights(session, &self.physics);
@@ -863,8 +864,7 @@ impl Game {
     pub fn render_ui(&mut self, frame: &mut Frame) {
         if let State::Playing(session) = &self.state {
             if self.show_map {
-                // The automap draws pixel by pixel: keep it (and its labels) in the pixel layer.
-                let recording = frame.ui_list.take();
+                // The backdrop and floors are pixels; walls, markers and arrows are recorded.
                 if self.scene_cache.as_ref().is_none_or(|(e, _)| *e != self.epoch) {
                     self.scene_cache = Some((self.epoch, scene::build(&session.level.world)));
                 }
@@ -877,7 +877,6 @@ impl Game {
                 };
                 let others: Vec<(f32, f32, f32)> = session.remote_positions();
                 self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);
-                frame.ui_list = recording;
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
             self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);

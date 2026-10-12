@@ -45,6 +45,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let bottom = mix(texel(i + vec2<f32>(0.0, 1.0)), texel(i + vec2<f32>(1.0, 1.0)), f.x);
     let coverage = mix(top, bottom, f.y);
     let edge = max(fwidth(coverage), 1e-3);
+    // Lines: pixels from the quad's long edge, from the across coordinate's rate of change.
+    let edge_px = (1.0 - abs(in.uv.y)) / max(fwidth(in.uv.y), 1e-4);
     var alpha = 1.0;
     var index = in.color;
     if (in.kind == 1u) {
@@ -53,6 +55,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         } else {
             alpha = step(0.5, texel(in.uv));
         }
+    } else if (in.kind == 3u) {
+        // Opaque core, fading over the last pixel.
+        alpha = clamp(edge_px, 0.0, 1.0);
     } else if (in.kind == 2u) {
         index = u32(round(texel(in.uv) * 255.0));
         alpha = select(1.0, 0.0, index == 0u);
