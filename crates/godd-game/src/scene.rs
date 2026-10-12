@@ -21,7 +21,7 @@ pub fn region_edges(world: &World, region: usize, weld: &[u32]) -> Vec<(u32, u32
         .filter_map(|&w| world.walls.get(w))
         .filter(|w| w.back != Some(w.front))
         .filter_map(|w| {
-            let (a, b) = (weld[w.a] as u32, weld[w.b] as u32);
+            let (a, b) = (weld[w.a], weld[w.b]);
             if w.front == region {
                 Some((a, b))
             } else if w.back == Some(region) {

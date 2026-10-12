@@ -171,7 +171,9 @@ pub fn triangulate(points: &[[f64; 2]], part: &Part, earcut: &mut earcut::Earcut
     }
     let mut tris: Vec<u32> = Vec::new();
     earcut.earcut(ids.iter().map(|&i| points[i as usize]), &hole_starts, &mut tris);
-    tris.chunks_exact(3)
+    tris.as_chunks::<3>()
+        .0
+        .iter()
         .map(|t| {
             let tri = [ids[t[0] as usize], ids[t[1] as usize], ids[t[2] as usize]];
             if signed_area(points, &tri) < 0.0 { [tri[0], tri[2], tri[1]] } else { tri }
