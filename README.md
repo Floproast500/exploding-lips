@@ -143,7 +143,8 @@ Controller: launch through Steam with a Gamepad layout; on Wayland, start the ga
 Rumble is on by default (`joy_rumble`). For gyro aiming (Steam Deck, Steam Controller,
 DualShock/DualSense, Switch Pro) build with the SDL3 backend and switch it on:
 `cargo run --release -p lips-desktop --features sdl -- --set joy_gyro 1` (`joy_gyro_sensitivity`
-scales it). The SDL3 build needs SDL3 installed (`sdl3` on Arch).
+scales it). The SDL3 build needs SDL3 installed (`sdl3` on Arch). `--pad-test [SECONDS]` checks
+controllers in that build: it rumbles each one and reports the gyro motion it reads.
 
 ## Tools
 

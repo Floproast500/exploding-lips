@@ -384,6 +384,23 @@ fn main() {
     // `--bsp <PAK|BSP> <MAP> [palette=FILE]`: fly through a Quake-family map (Quake, Hexen II)
     // with the engine's renderer instead of starting Exploding Lips.
     let args: Vec<String> = std::env::args().collect();
+    // `--pad-test [SECONDS]`: rumble every controller, then report gyro motion (SDL builds).
+    if let Some(i) = args.iter().position(|a| a == "--pad-test") {
+        let seconds = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5.0);
+        #[cfg(feature = "sdl")]
+        match sdl_pad::SdlPads::new() {
+            Some(mut pads) => {
+                println!("rumbling, then reading the gyro for {seconds} s: move the controller");
+                for line in pads.pad_test(seconds) {
+                    println!("{line}");
+                }
+            }
+            None => eprintln!("SDL gamepads unavailable"),
+        }
+        #[cfg(not(feature = "sdl"))]
+        eprintln!("--pad-test needs the SDL build (--features sdl), not {seconds} s of gilrs");
+        return;
+    }
     if let Some(i) = args.iter().position(|a| a == "--bsp") {
         let (Some(source), Some(map)) = (args.get(i + 1), args.get(i + 2)) else {
             eprintln!("usage: lips-desktop --bsp <PAK|BSP> <MAP> [palette=FILE]");

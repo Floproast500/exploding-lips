@@ -142,6 +142,41 @@ impl SdlPads {
         input.look_axis = (c(axes.2), c(axes.3));
     }
 
+    /// Controller check (`--pad-test`): rumble each pad, then report gyro motion for
+    /// `seconds` (move the controller). Returns one line per finding.
+    pub fn pad_test(&mut self, seconds: f32) -> Vec<String> {
+        let mut report = Vec::new();
+        // SAFETY: open handles; SDL calls on this thread only.
+        unsafe {
+            for pad in &self.pads {
+                let name = SDL_GetGamepadName(pad.handle);
+                let name = if name.is_null() { "?".into() } else { std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned() };
+                let rumble = SDL_RumbleGamepad(pad.handle, 0xC000, 0x8000, 400);
+                report.push(format!("pad {} ({name}): rumble {}, gyro {}", pad.id.0, if rumble { "sent" } else { "not supported" }, if pad.gyro { "present" } else { "absent" }));
+            }
+            let started = std::time::Instant::now();
+            let mut peak = vec![[0.0f32; 3]; self.pads.len()];
+            while started.elapsed().as_secs_f32() < seconds {
+                SDL_UpdateGamepads();
+                for (k, pad) in self.pads.iter().enumerate().filter(|(_, p)| p.gyro) {
+                    let mut g = [0.0f32; 3];
+                    if SDL_GetGamepadSensorData(pad.handle, SDL_SENSOR_GYRO, g.as_mut_ptr(), 3) {
+                        for (p, v) in peak[k].iter_mut().zip(g) {
+                            *p = p.max(v.abs());
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for (k, pad) in self.pads.iter().enumerate().filter(|(_, p)| p.gyro) {
+                let [x, y, z] = peak[k];
+                let moved = x.max(y).max(z) > 0.5;
+                report.push(format!("pad {}: peak gyro pitch {x:.2} yaw {y:.2} roll {z:.2} rad/s ({})", pad.id.0, if moved { "motion seen" } else { "no motion seen" }));
+            }
+        }
+        report
+    }
+
     pub fn rumble(&mut self, h: &HapticEvent) {
         let (low, high) = ((h.low.clamp(0.0, 1.0) * 65535.0) as u16, (h.high.clamp(0.0, 1.0) * 65535.0) as u16);
         for pad in &self.pads {
