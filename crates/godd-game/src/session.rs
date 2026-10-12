@@ -188,8 +188,19 @@ impl Session {
                 session.script.activate_tag(STARTUP_TAG);
             }
         }
+        // A new level: the previous one's recorded music and background sound stop.
+        session.audio.push(AudioEvent::Stop { channel: MUSIC_CHANNEL });
+        session.audio.push(AudioEvent::Stop { channel: BACKGROUND_CHANNEL });
         if let Some(music) = session.level.music_name() {
-            session.audio.push(AudioEvent::Music { name: Some(music), looped: true });
+            // Level music is MIDI, except where the game ships it as a recording (LIPS00's
+            // DUNGN10 exists only as snd/dungn10.wav): loop that instead.
+            let midi = vfs.read(&crate::music_path(&music)).is_ok();
+            if !midi && vfs.read(&crate::sound_path(&music)).is_ok() {
+                session.audio.push(AudioEvent::Music { name: None, looped: false });
+                session.audio.push(AudioEvent::Loop { channel: MUSIC_CHANNEL, name: music, volume: 1.0, pan: 0.0, pos: None });
+            } else {
+                session.audio.push(AudioEvent::Music { name: Some(music), looped: true });
+            }
         }
         session.process_script_events();
         session.apply_tv_textures();
@@ -957,6 +968,8 @@ fn seed_from(name: &str) -> u64 {
 
 /// Audio channel of the background sound (object loops use 1000 and up).
 const BACKGROUND_CHANNEL: u32 = 999;
+/// Audio channel of level music shipped as a WAV recording.
+const MUSIC_CHANNEL: u32 = 998;
 
 /// Load the level's BSP world (`[startup] loadbspfilename`) with the level's ORORB exit cubes and
 /// OPTAGSW tag cubes.

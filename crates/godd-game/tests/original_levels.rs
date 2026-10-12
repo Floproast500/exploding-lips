@@ -945,3 +945,15 @@ fn lips00_score_panel_only_on_the_automap() {
     let classic = texts(&mut game);
     assert!(classic > plain + 40, "classic HUD shows the stats: {classic}");
 }
+
+/// LIPS00's music DUNGN10 ships only as a WAV recording: it loops as a sound instead of the
+/// (missing) MIDI; a level start first stops the previous level's recorded music.
+#[test]
+fn lips00_recorded_music_plays() {
+    use godd_game::AudioEvent;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.1);
+    let events = game.drain_audio();
+    assert!(events.iter().any(|e| matches!(e, AudioEvent::Loop { name, .. } if name.eq_ignore_ascii_case("DUNGN10"))), "{events:?}");
+    assert!(events.iter().any(|e| matches!(e, AudioEvent::Stop { .. })));
+}

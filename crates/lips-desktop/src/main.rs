@@ -182,12 +182,18 @@ impl App {
             self.auto_shot = true;
         }
         let elapsed = (now - self.last).as_secs_f64();
+        #[allow(unused_mut)]
+        let mut sdl_has_pads = false;
         #[cfg(feature = "sdl")]
         if let Some(pads) = &mut self.sdl_pads {
             let gyro = self.game.cvars.get_bool("joy_gyro").then(|| self.game.cvars.get_float("joy_gyro_sensitivity") as f32);
             pads.update(&mut self.input, &self.game.binds, gyro, elapsed as f32);
+            sdl_has_pads = pads.connected() > 0;
         }
-        if let Some(pads) = &mut self.gamepads {
+        // gilrs reads the pads SDL does not have (or all of them without SDL).
+        if let Some(pads) = &mut self.gamepads
+            && !sdl_has_pads
+        {
             pads.update(&mut self.input, &self.game.binds);
         }
         if let Some(net) = &mut self.net {
@@ -559,13 +565,10 @@ fn main() {
             game.set_slot(n, &text);
         }
     }
-    // With SDL (feature "sdl") pads are read through SDL (gyro); otherwise, or if SDL can't
-    // start, through gilrs.
+    // With SDL (feature "sdl") pads are read through SDL (gyro); gilrs reads them when SDL
+    // has none (or without SDL).
     #[cfg(feature = "sdl")]
     let sdl_pads = sdl_pad::SdlPads::new();
-    #[cfg(feature = "sdl")]
-    let gamepads = if sdl_pads.is_none() { gamepad::Gamepads::new() } else { None };
-    #[cfg(not(feature = "sdl"))]
     let gamepads = gamepad::Gamepads::new();
     let event_loop = new_event_loop();
     event_loop.set_control_flow(ControlFlow::Poll);

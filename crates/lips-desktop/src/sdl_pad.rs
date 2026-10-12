@@ -7,6 +7,7 @@ use engine_core::{BindTable, HapticEvent};
 use godd_game::Input;
 use sdl3_sys::gamepad::*;
 use sdl3_sys::joystick::SDL_JoystickID;
+use sdl3_sys::events::{SDL_EVENT_FIRST, SDL_EVENT_LAST, SDL_FlushEvents, SDL_PumpEvents};
 use sdl3_sys::hints::{SDL_HINT_NO_SIGNAL_HANDLERS, SDL_SetHint};
 use sdl3_sys::init::{SDL_INIT_GAMEPAD, SDL_Init};
 use sdl3_sys::sensor::SDL_SENSOR_GYRO;
@@ -74,10 +75,19 @@ impl SdlPads {
         Some(s)
     }
 
+    /// Pads open now.
+    pub fn connected(&self) -> usize {
+        self.pads.len()
+    }
+
     /// Open newly connected pads, forget disconnected ones.
     fn rescan(&mut self) {
         // SAFETY: SDL returns a malloc'd id array we free; handles stay valid until closed.
         unsafe {
+            // Device arrival (udev hotplug, Steam's virtual pad) is only seen while pumping
+            // events; nothing reads SDL's queue here, so drop what was queued.
+            SDL_PumpEvents();
+            SDL_FlushEvents(SDL_EVENT_FIRST.into(), SDL_EVENT_LAST.into());
             self.pads.retain(|p| SDL_GamepadConnected(p.handle));
             let mut count = 0;
             let ids = SDL_GetGamepads(&mut count);
