@@ -95,6 +95,12 @@ pub struct Game {
     epoch: u64,
     /// Triangulated regions of the current level, for the GPU scene.
     scene_cache: Option<(u64, Vec<scene::RegionMesh>)>,
+    /// Rumble requests for the front end, and what they react to.
+    haptics: Vec<engine_core::HapticEvent>,
+    last_vitals: (i32, i32, f32),
+    last_objects: usize,
+    /// Portal hops from the listener's region to every region, cached per (level, region).
+    hops_cache: ((u64, usize), Vec<u8>),
     /// Reverb of the listener's surroundings, cached per (level, region).
     reverb_cache: ((u64, usize), f32),
     /// Modern lighting fitted from the palette: brightness per shade level, emissive colours.
@@ -167,6 +173,10 @@ impl Game {
             epoch: 0,
             scene_cache: None,
             reverb_cache: ((u64::MAX, 0), 0.0),
+            hops_cache: ((u64::MAX, 0), Vec::new()),
+            haptics: Vec::new(),
+            last_vitals: (0, 0, 0.0),
+            last_objects: usize::MAX,
             light_fit: engine_scene::module::fit_light(&palette.rgb, &palette.colormaps[..SHADE_LEVELS.min(palette.colormaps.len())]),
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
@@ -501,6 +511,11 @@ impl Game {
         }
     }
 
+    /// Rumble requests since the last call.
+    pub fn drain_haptics(&mut self) -> Vec<engine_core::HapticEvent> {
+        std::mem::take(&mut self.haptics)
+    }
+
     /// Audio requests produced since the last call.
     pub fn drain_audio(&mut self) -> Vec<AudioEvent> {
         if let State::Playing(session) = &mut self.state {
@@ -510,6 +525,19 @@ impl Game {
                 self.reverb_cache = ((self.epoch, p.region), session.reverb_at(p.region));
             }
             let reverb = if self.cvars.get_bool("snd_reverb") { self.reverb_cache.1 } else { 0.0 };
+            // Occlusion: open portals between the listener and each positional sound.
+            if self.hops_cache.0 != (self.epoch, p.region) {
+                self.hops_cache = ((self.epoch, p.region), session.portal_hops(p.region));
+            }
+            let world = &session.level.world;
+            for e in &mut self.audio {
+                if let AudioEvent::Sound { pos: Some(at), muffle, .. } = e
+                    && let Some(r) = world.region_at_z(at[0], at[1], Some(at[2]))
+                {
+                    let hops = self.hops_cache.1.get(r).copied().unwrap_or(u8::MAX);
+                    *muffle = ((hops.saturating_sub(1)) as f32 / 3.0).min(1.0);
+                }
+            }
             self.audio.push(AudioEvent::Listener { pos: [p.x, p.y, p.eye_z(&self.physics)], angle: p.angle, reverb });
         }
         std::mem::take(&mut self.audio)
@@ -630,6 +658,30 @@ impl Game {
             }
             State::Playing(session) => {
                 session.tick(input, &self.physics);
+                // Rumble: a light kick per shot, a heavy one when hurt, a thud for nearby blasts.
+                let (life, armor) = (session.script.states[script::LIFE], session.script.states[script::ARMOR]);
+                let flash = session.objects.muzzle_flash;
+                let (pl, pa, pf) = self.last_vitals;
+                if self.cvars.get_bool("joy_rumble") {
+                    use engine_core::HapticEvent;
+                    if flash > pf {
+                        self.haptics.push(HapticEvent { low: 0.2, high: 0.6, seconds: 0.08 });
+                    }
+                    let hurt = (pl - life).max(0) + (pa - armor).max(0);
+                    if hurt > 0 && pl > 0 {
+                        self.haptics.push(HapticEvent { low: (hurt as f32 / 40.0).clamp(0.3, 1.0), high: 0.3, seconds: 0.25 });
+                    }
+                    let p = session.player;
+                    // Objects are appended, so explosions past last tick's list length are new.
+                    let near_blast = session.objects.list.iter().skip(self.last_objects).any(|o| {
+                        matches!(o.kind, objects::Kind::Explosion { .. }) && !o.destroyed && (o.x - p.x).hypot(o.y - p.y) < 320.0
+                    });
+                    if near_blast {
+                        self.haptics.push(HapticEvent { low: 0.7, high: 0.2, seconds: 0.2 });
+                    }
+                }
+                self.last_vitals = (life, armor, flash);
+                self.last_objects = session.objects.list.len();
                 if session.quit_requested {
                     self.quit = true;
                 }

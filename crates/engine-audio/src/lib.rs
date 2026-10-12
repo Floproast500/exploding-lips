@@ -7,6 +7,7 @@
 pub mod sf2;
 
 use engine_core::AudioEvent;
+use kira::effect::filter::FilterBuilder;
 use kira::effect::reverb::{ReverbBuilder, ReverbHandle};
 use kira::info::Info;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
@@ -58,6 +59,8 @@ struct Channel {
 pub struct Audio {
     _manager: AudioManager,
     effects: TrackHandle,
+    /// Effects heard through walls: low-passed, same reverb send.
+    muffled: TrackHandle,
     music_track: TrackHandle,
     reverb_send: SendTrackHandle,
     _reverb: ReverbHandle,
@@ -81,6 +84,9 @@ impl Audio {
         let reverb = send.add_effect(ReverbBuilder::new().feedback(0.82).damping(0.45).mix(Mix::WET));
         let reverb_send = manager.add_send_track(send).map_err(|e| log::warn!("audio: {e}")).ok()?;
         let effects = manager.add_sub_track(TrackBuilder::new().with_send(&reverb_send, Decibels::SILENCE)).map_err(|e| log::warn!("audio: {e}")).ok()?;
+        let mut muffled_track = TrackBuilder::new().with_send(&reverb_send, Decibels::SILENCE);
+        muffled_track.add_effect(FilterBuilder::new().cutoff(700.0));
+        let muffled = manager.add_sub_track(muffled_track).map_err(|e| log::warn!("audio: {e}")).ok()?;
         let music_track = manager.add_sub_track(TrackBuilder::new()).map_err(|e| log::warn!("audio: {e}")).ok()?;
         let bytes = soundfont.unwrap_or_else(|| {
             log::info!("music: built-in fallback SoundFont");
@@ -90,6 +96,7 @@ impl Audio {
         Some(Self {
             _manager: manager,
             effects,
+            muffled,
             music_track,
             reverb_send,
             _reverb: reverb,
@@ -111,6 +118,7 @@ impl Audio {
         }
         self.volumes = volumes;
         self.effects.set_volume(amplitude_to_db(volumes.0 * volumes.1), Tween::default());
+        self.muffled.set_volume(amplitude_to_db(volumes.0 * volumes.1), Tween::default());
         self.music_track.set_volume(amplitude_to_db(volumes.0 * volumes.2), Tween::default());
     }
 
@@ -126,14 +134,17 @@ impl Audio {
 
     pub fn handle(&mut self, load: &dyn Fn(Asset) -> Option<Vec<u8>>, event: &AudioEvent) {
         match event {
-            AudioEvent::Sound { name, volume, pan, pos } => {
+            AudioEvent::Sound { name, volume, pan, pos, muffle } => {
                 let (volume, pan) = self.placed(*volume, *pan, *pos);
+                let muffle = if self.spatial { muffle.clamp(0.0, 1.0) } else { 0.0 };
+                let volume = volume * (1.0 - 0.5 * muffle);
                 if volume < 0.01 {
                     return;
                 }
                 let Some(data) = self.load_sound(load, name) else { return };
                 let data = data.volume(amplitude_to_db(volume)).panning(Panning(pan.clamp(-1.0, 1.0)));
-                if let Err(e) = self.effects.play(data) {
+                let track = if muffle >= 0.5 { &mut self.muffled } else { &mut self.effects };
+                if let Err(e) = track.play(data) {
                     log::warn!("play {name}: {e}");
                 }
             }
@@ -174,7 +185,9 @@ impl Audio {
                 }
                 if (reverb - self.reverb).abs() > 0.01 {
                     self.reverb = *reverb;
-                    let _ = self.effects.set_send(&self.reverb_send, amplitude_to_db(*reverb), Tween { duration: std::time::Duration::from_millis(400), ..Default::default() });
+                    let tween = Tween { duration: std::time::Duration::from_millis(400), ..Default::default() };
+                    let _ = self.effects.set_send(&self.reverb_send, amplitude_to_db(*reverb), tween);
+                    let _ = self.muffled.set_send(&self.reverb_send, amplitude_to_db(*reverb), tween);
                 }
             }
             AudioEvent::Music { name, looped } => {

@@ -36,6 +36,9 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.bool("m_invert", "Invert mouse", Controls, false);
     c.float("joy_sensitivity", "Stick look speed", Controls, (0.2, 4.0, 0.1), 1.0);
     c.bool("joy_invert", "Invert stick", Controls, false);
+    c.bool("joy_rumble", "Controller rumble", Controls, true);
+    c.bool("joy_gyro", "Gyro aiming (SDL builds)", Controls, false);
+    c.float("joy_gyro_sensitivity", "Gyro speed", Controls, (0.2, 4.0, 0.1), 1.0);
     c.bool("cl_autorun", "Always run", Controls, false);
     c.bool("cl_togglecrouch", "Toggle crouch", Controls, false);
     c.int("hud_scale", "HUD scale (0 = auto)", Hud, (0, 8, 1), 0);

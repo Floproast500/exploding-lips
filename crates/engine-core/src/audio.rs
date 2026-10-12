@@ -12,6 +12,9 @@ pub enum AudioEvent {
         pan: f32,
         /// World position for positional (3D) playback; `None` plays as-is (UI, the player).
         pos: Option<[f32; 3]>,
+        /// How much walls stand between the sound and the listener (0 clear .. 1 far behind
+        /// walls): muffled with a low-pass filter.
+        muffle: f32,
     },
     /// Start a looping sound on a channel (replacing whatever plays there).
     Loop { channel: u32, name: String, volume: f32, pan: f32, pos: Option<[f32; 3]> },
@@ -28,12 +31,12 @@ pub enum AudioEvent {
 
 impl AudioEvent {
     pub fn sound(name: impl Into<String>) -> Self {
-        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: None }
+        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: None, muffle: 0.0 }
     }
 
     /// A one-shot sound at a world position.
     pub fn sound_at(name: impl Into<String>, pos: [f32; 3]) -> Self {
-        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: Some(pos) }
+        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: Some(pos), muffle: 0.0 }
     }
 }
 
@@ -72,4 +75,14 @@ mod tests {
         wav.extend(vec![0u8; 22050]);
         assert_eq!(super::wav_seconds(&wav), Some(0.5));
     }
+}
+
+/// Controller rumble requested by a game (front ends with force-feedback devices play it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HapticEvent {
+    /// Low-frequency (heavy) motor, 0..=1.
+    pub low: f32,
+    /// High-frequency (light) motor, 0..=1.
+    pub high: f32,
+    pub seconds: f32,
 }

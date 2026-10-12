@@ -9,6 +9,8 @@ mod config;
 mod gamepad;
 mod module_app;
 mod present;
+#[cfg(feature = "sdl")]
+mod sdl_pad;
 
 use engine_core::{BindTable, CvarRegistry};
 use godd_game::{CLASSIC_HEIGHT, CLASSIC_PIXEL_ASPECT, CLASSIC_WIDTH, FixedClock, Frame, Game, Input, TICK_RATE, Vfs};
@@ -98,6 +100,8 @@ struct App {
     vfs: Vfs,
     audio: Option<audio::Audio>,
     gamepads: Option<gamepad::Gamepads>,
+    #[cfg(feature = "sdl")]
+    sdl_pads: Option<sdl_pad::SdlPads>,
     input: Input,
     /// Where character saves are written (the game folder may be read-only).
     save_path: Option<PathBuf>,
@@ -127,10 +131,15 @@ impl App {
 
     fn redraw(&mut self) {
         let now = Instant::now();
+        let elapsed = (now - self.last).as_secs_f64();
+        #[cfg(feature = "sdl")]
+        if let Some(pads) = &mut self.sdl_pads {
+            let gyro = self.game.cvars.get_bool("joy_gyro").then(|| self.game.cvars.get_float("joy_gyro_sensitivity") as f32);
+            pads.update(&mut self.input, &self.game.binds, gyro, elapsed as f32);
+        }
         if let Some(pads) = &mut self.gamepads {
             pads.update(&mut self.input, &self.game.binds);
         }
-        let elapsed = (now - self.last).as_secs_f64();
         if let Some(net) = &mut self.net {
             net.update(&mut self.game, &self.vfs, elapsed);
         }
@@ -166,6 +175,18 @@ impl App {
         if self.game.quit_requested() {
             self.save_settings();
             std::process::exit(0);
+        }
+        let haptics = self.game.drain_haptics();
+        if let Some(pads) = &mut self.gamepads {
+            for h in &haptics {
+                pads.rumble(h);
+            }
+        }
+        #[cfg(feature = "sdl")]
+        if let Some(pads) = &mut self.sdl_pads {
+            for h in &haptics {
+                pads.rumble(h);
+            }
         }
         let events = self.game.drain_audio();
         if let Some(audio) = &mut self.audio {
@@ -427,6 +448,14 @@ fn main() {
             game.set_slot(n, &text);
         }
     }
+    // With SDL (feature "sdl") pads are read through SDL (gyro); otherwise, or if SDL can't
+    // start, through gilrs.
+    #[cfg(feature = "sdl")]
+    let sdl_pads = sdl_pad::SdlPads::new();
+    #[cfg(feature = "sdl")]
+    let gamepads = if sdl_pads.is_none() { gamepad::Gamepads::new() } else { None };
+    #[cfg(not(feature = "sdl"))]
+    let gamepads = gamepad::Gamepads::new();
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -434,7 +463,9 @@ fn main() {
         game,
         vfs,
         audio,
-        gamepads: gamepad::Gamepads::new(),
+        #[cfg(feature = "sdl")]
+        sdl_pads,
+        gamepads,
         input: Input::default(),
         save_path,
         net: None,

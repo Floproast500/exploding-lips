@@ -25,8 +25,8 @@ the engine reads them from your install folder at runtime.
 | Objects: bots (mover scripts), pickups, text, looping/positional sounds and sound sequences, wall/object morphs, flying, TV views, overlays, lightning, switches, timers, counters, teleports, level exits | implemented; data-driven tests |
 | Combat: tools 0–9, projectiles, explosions (bomb multi-hit), bot attacks, first-person weapon | implemented; shots-to-kill and fire rate confirmed against `lips.exe` |
 | HUD, status messages, menus (LIPSTART), character save slots (LIPSTART.GAM) | exact original layout |
-| Audio: positional 3D sound (bots, doors, lifts, shots, explosions), room reverb sized from the surrounding space, effects/music/master volume, streamed MIDI with a built-in fallback SoundFont (`snd_spatial`, `snd_reverb`) | unit-tested (gain/pan, SoundFont parses and plays, streaming and stop) and data-tested (door sounds come from the door) |
-| Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput) |
+| Audio: positional 3D sound (bots, doors, lifts, shots, explosions), room reverb sized from the surrounding space, occlusion (sounds more than a room away through open portals are low-passed and quieter; shut doors block them), effects/music/master volume, streamed MIDI with a built-in fallback SoundFont (`snd_spatial`, `snd_reverb`) | unit-tested (gain/pan, SoundFont parses and plays, streaming and stop) and data-tested (door sounds come from the door, shut doors cut rooms off) |
+| Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput); rumble on shots, damage and nearby blasts (data-tested); optional SDL3 backend with gyro aiming |
 | Web (WASM): folder picker, GPU renderer on WebGPU or WebGL2 (software canvas fallback), positional audio with streamed music, options/bindings/saves in localStorage | working; headless-tested on WebGL2 and software (headless Chromium cannot show WebGPU canvases) |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
 | Modern extras: Hor+ widescreen, FOV, true colour, quicksave, key rebinding, high-contrast HUD, long messages | working |
@@ -62,7 +62,7 @@ crates/quake-bsp      Quake-family BSP v29 module: PAK, palette/colormap, textur
 crates/godd-formats   parsers for the data files (no platform dependencies)
 crates/godd-game      engine core: world, renderer, physics, scripts, effects, objects, UI
 crates/godd-net       netplay protocol, UDP/WebSocket server, client glue (feature "game")
-crates/lips-desktop   native front end (winit + wgpu, kira audio, gilrs gamepads)
+crates/lips-desktop   native front end (winit + wgpu, kira audio, gilrs gamepads; SDL3 gamepads with --features sdl)
 crates/lips-web       WebAssembly front end
 tools/lipstool        inspect/convert data files (info, pics, map, render, biosfont)
 tools/pilot           drive the original (Wine) and this engine headlessly; compare screenshots
@@ -136,6 +136,11 @@ invert, crosshair, HUD scale and volume. Gamepad: left stick move, right stick l
 X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu, Select options. Steam
 Controller: launch through Steam with a Gamepad layout; on Wayland, start the game as an X11 window
 (`env -u WAYLAND_DISPLAY`, as `scripts/steam-padtest.sh` does) so Steam can see it has focus.
+
+Rumble is on by default (`joy_rumble`). For gyro aiming (Steam Deck, Steam Controller,
+DualShock/DualSense, Switch Pro) build with the SDL3 backend and switch it on:
+`cargo run --release -p lips-desktop --features sdl -- --set joy_gyro 1` (`joy_gyro_sensitivity`
+scales it). The SDL3 build needs SDL3 installed (`sdl3` on Arch).
 
 ## Tools
 

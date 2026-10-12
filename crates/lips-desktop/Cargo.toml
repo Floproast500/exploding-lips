@@ -6,6 +6,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+sdl3-sys = { version = "0.7", optional = true }
 engine-core.workspace = true
 engine-gpu.workspace = true
 engine-audio.workspace = true
@@ -21,3 +22,7 @@ pollster = "1"
 softbuffer = "0.4"
 wgpu = "30"
 winit = "0.30"
+
+[features]
+# SDL3 gamepads: gyro aiming and rumble (needs the system SDL3 library).
+sdl = ["dep:sdl3-sys"]

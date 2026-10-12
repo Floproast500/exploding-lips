@@ -13,7 +13,7 @@ pub mod frame;
 pub mod pack;
 pub mod vfs;
 
-pub use audio::{AudioEvent, wav_seconds};
+pub use audio::{AudioEvent, HapticEvent, wav_seconds};
 pub use bind::BindTable;
 pub use cvar::{Category, CvarRegistry};
 pub use clock::FixedClock;

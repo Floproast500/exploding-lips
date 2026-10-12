@@ -237,6 +237,42 @@ impl Session {
         size * (1.0 - 0.8 * sky / area)
     }
 
+    /// Open portals (walls with room to pass sound) from `region` to every region: 0 for the
+    /// region itself, 255 when unreachable.
+    pub fn portal_hops(&self, region: usize) -> Vec<u8> {
+        let w = &self.level.world;
+        let mut hops = vec![u8::MAX; w.regions.len()];
+        let Some(slot) = hops.get_mut(region) else { return hops };
+        *slot = 0;
+        // Portals are listed by the region in front only, so link both sides from every wall;
+        // stacked regions are open to each other too.
+        let mut links = vec![Vec::new(); w.regions.len()];
+        for wall in &w.walls {
+            let Some(b) = wall.back.filter(|&b| b != wall.front && b < w.regions.len()) else { continue };
+            let (f, k) = (&w.regions[wall.front], &w.regions[b]);
+            if f.ceiling.min(k.ceiling) - f.floor.max(k.floor) > 8.0 {
+                links[wall.front].push(b);
+                links[b].push(wall.front);
+            }
+        }
+        for (r, reg) in w.regions.iter().enumerate() {
+            for o in [reg.above, reg.below].into_iter().flatten().filter(|&o| o < w.regions.len()) {
+                links[r].push(o);
+                links[o].push(r);
+            }
+        }
+        let mut queue = std::collections::VecDeque::from([region]);
+        while let Some(r) = queue.pop_front() {
+            for &o in &links[r] {
+                if hops[o] == u8::MAX {
+                    hops[o] = hops[r].saturating_add(1);
+                    queue.push_back(o);
+                }
+            }
+        }
+        hops
+    }
+
     /// Positions and facings of other players (netplay), for the automap.
     pub fn remote_positions(&self) -> Vec<(f32, f32, f32)> {
         self.remote_players.values().filter_map(|&i| self.level.world.sprites.get(i)).map(|s| (s.x, s.y, s.angle)).collect()

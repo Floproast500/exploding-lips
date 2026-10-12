@@ -8,11 +8,39 @@ const DEADZONE: f32 = 0.15;
 
 pub struct Gamepads {
     gilrs: Gilrs,
+    effects: Vec<gilrs::ff::Effect>,
 }
 
 impl Gamepads {
     pub fn new() -> Option<Self> {
-        Gilrs::new().map(|gilrs| Self { gilrs }).map_err(|e| log::warn!("gamepads disabled: {e}")).ok()
+        Gilrs::new().map(|gilrs| Self { gilrs, effects: Vec::new() }).map_err(|e| log::warn!("gamepads disabled: {e}")).ok()
+    }
+
+    /// Play a rumble on every pad that supports force feedback.
+    pub fn rumble(&mut self, h: &engine_core::HapticEvent) {
+        use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay, Ticks};
+        let ids: Vec<_> = self.gilrs.gamepads().filter(|(_, p)| p.is_ff_supported()).map(|(id, _)| id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let ms = (h.seconds * 1000.0) as u32;
+        let effect = |kind| BaseEffect { kind, scheduling: Replay { play_for: Ticks::from_ms(ms), ..Default::default() }, ..Default::default() };
+        let built = EffectBuilder::new()
+            .add_effect(effect(BaseEffectType::Strong { magnitude: (h.low.clamp(0.0, 1.0) * 65535.0) as u16 }))
+            .add_effect(effect(BaseEffectType::Weak { magnitude: (h.high.clamp(0.0, 1.0) * 65535.0) as u16 }))
+            .gamepads(&ids)
+            .finish(&mut self.gilrs);
+        match built {
+            Ok(e) => {
+                let _ = e.play();
+                // Keep effects alive until they have played (dropping one stops it).
+                self.effects.push(e);
+                if self.effects.len() > 8 {
+                    self.effects.remove(0);
+                }
+            }
+            Err(e) => log::debug!("rumble: {e}"),
+        }
     }
 
     /// Apply pending button events (as `pad:<Button>` sources through the bind table) and the

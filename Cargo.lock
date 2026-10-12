@@ -1415,6 +1415,7 @@ dependencies = [
  "log",
  "pollster",
  "quake-bsp",
+ "sdl3-sys",
  "softbuffer",
  "wgpu",
  "winit",
@@ -2451,6 +2452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sdl3-sys"
+version = "0.7.2+SDL-3.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b6a7f3cad40c5b318b3539bb4624389f4a03504cd5f4c65030787b962505ac"
+dependencies = [
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2996,6 +3007,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vec_map"

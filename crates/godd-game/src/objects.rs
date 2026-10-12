@@ -910,7 +910,7 @@ impl Objects {
         if count > 0 && count != 9999 {
             self.list[i].sound.left -= 1;
         }
-        self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None }));
+        self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None, muffle: 0.0 }));
     }
 
     /// OSNDSEQ start: slots 0..4 one after another, each `int k + 1` times; the whole chain
@@ -997,7 +997,7 @@ impl Objects {
             self.list[i].sound.reps = 0;
             let len = self.sound_seconds(&name);
             self.list[i].sound.next = Some(now + len);
-            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None }));
+            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None, muffle: 0.0 }));
         }
     }
 

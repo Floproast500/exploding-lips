@@ -708,3 +708,65 @@ fn lips00_as_a_game_module() {
     assert!((after.angle - before.angle).abs() > 0.2, "turned left");
     assert!(!m.images().is_empty() && m.shade_rows().len() == 16);
 }
+
+/// Rumble: firing gives a short kick, losing life a heavier one; `joy_rumble 0` silences both.
+#[test]
+fn lips00_shots_and_damage_rumble() {
+    use godd_game::{Action, Input, script::LIFE};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.5); // the start pad hands over the shotgun
+    let _ = game.drain_haptics();
+    let mut fire = Input::default();
+    fire.set(Action::Use, true);
+    for _ in 0..30 {
+        game.tick(&vfs, &fire);
+    }
+    let shots = game.drain_haptics();
+    assert!(shots.iter().any(|h| h.high > h.low && h.seconds < 0.2), "a shot kick: {shots:?}");
+    run(&mut game, &vfs, 1.0);
+    let _ = game.drain_haptics();
+    game.session_mut().unwrap().script.states[LIFE] -= 20;
+    run(&mut game, &vfs, 0.05);
+    let hurt = game.drain_haptics();
+    assert!(hurt.iter().any(|h| h.low >= 0.3 && h.seconds >= 0.2), "a damage rumble: {hurt:?}");
+    game.cvars.set("joy_rumble", "0").unwrap();
+    game.session_mut().unwrap().script.states[LIFE] -= 20;
+    run(&mut game, &vfs, 0.05);
+    assert!(game.drain_haptics().is_empty());
+}
+
+/// Occlusion: portal hops grow away from the listener's room; positional sounds carry a
+/// muffle amount from them (0 nearby, up to 1 several rooms away).
+#[test]
+fn lips00_sounds_behind_walls_are_muffled() {
+    use godd_game::AudioEvent;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let s = game.session().unwrap();
+    let hops = s.portal_hops(s.player.region);
+    assert_eq!(hops[s.player.region], 0);
+    let reachable = |hops: &[u8]| hops.iter().filter(|&&h| h != u8::MAX).count();
+    let closed = reachable(&hops);
+    assert!(closed > 5 && hops.iter().any(|&h| (3..u8::MAX).contains(&h)), "{closed} reachable regions");
+    let _ = game.drain_audio();
+    game.session_mut().unwrap().fire_tag(53);
+    run(&mut game, &vfs, 0.1);
+    // A shut door (ceiling down on the floor) stops sound reaching through it.
+    let next = hops.iter().position(|&h| h == 1).unwrap();
+    let s = game.session_mut().unwrap();
+    let saved = s.level.world.regions[next].ceiling;
+    s.level.world.regions[next].ceiling = s.level.world.regions[next].floor;
+    let shut = s.portal_hops(s.player.region);
+    assert_eq!(shut[next], u8::MAX);
+    assert!(reachable(&shut) < closed);
+    s.level.world.regions[next].ceiling = saved;
+    let muffles: Vec<f32> = game
+        .drain_audio()
+        .iter()
+        .filter_map(|e| match e {
+            AudioEvent::Sound { pos: Some(_), muffle, .. } => Some(*muffle),
+            _ => None,
+        })
+        .collect();
+    assert!(!muffles.is_empty() && muffles.iter().all(|m| (0.0..=1.0).contains(m)), "{muffles:?}");
+}
