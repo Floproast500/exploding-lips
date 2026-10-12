@@ -623,3 +623,34 @@ fn every_region_triangulates() {
     assert!(bad.is_empty(), "{} of {regions} regions fail ({samples} samples):\n{}", bad.len(), bad.join("\n"));
     assert!(stray < regions / 50, "{stray} regions have stray edges");
 }
+
+/// Modern audio: a door's sounds come from the door region (positional), and every frame tells
+/// the front end where the listener is and how much the room reverberates.
+#[test]
+fn lips00_door_sounds_are_positional() {
+    use godd_game::AudioEvent;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let _ = game.drain_audio();
+    let before: Vec<f32> = game.session().unwrap().level.world.regions.iter().map(|r| r.ceiling).collect();
+    game.session_mut().unwrap().fire_tag(53);
+    run(&mut game, &vfs, 0.1);
+    let events = game.drain_audio();
+    let regions = &game.session().unwrap().level.world.regions;
+    let moving: Vec<_> = regions.iter().zip(&before).filter(|(r, c)| r.ceiling != **c).map(|(r, _)| r.bounds).collect();
+    let positional: Vec<(&str, [f32; 3])> = events
+        .iter()
+        .filter_map(|e| match e {
+            AudioEvent::Sound { name, pos: Some(p), .. } => Some((name.as_str(), *p)),
+            _ => None,
+        })
+        .collect();
+    let inside = |p: &[f32; 3], ((x0, y0), (x1, y1)): &((f32, f32), (f32, f32))| (*x0..=*x1).contains(&p[0]) && (*y0..=*y1).contains(&p[1]);
+    assert!(!moving.is_empty(), "tag 53 opens doors");
+    assert!(positional.iter().any(|(_, p)| moving.iter().any(|b| inside(p, b))), "a sound from an opening door {moving:?}: {positional:?}");
+    let reverb = events.iter().find_map(|e| match e {
+        AudioEvent::Listener { reverb, .. } => Some(*reverb),
+        _ => None,
+    });
+    assert!(reverb.is_some_and(|r| (0.0..=1.0).contains(&r)), "listener with reverb {reverb:?}");
+}

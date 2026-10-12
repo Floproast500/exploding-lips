@@ -193,6 +193,50 @@ impl Session {
         Ok(session)
     }
 
+    /// How much the space around `region` reverberates (0 dry .. 1 huge hall): the floor area
+    /// reachable through open portals within a radius, its height, and whether it is open sky.
+    pub fn reverb_at(&self, region: usize) -> f32 {
+        let w = &self.level.world;
+        let Some(start) = w.regions.get(region) else { return 0.0 };
+        let centre = |r: &crate::world::Region| {
+            let ((x0, y0), (x1, y1)) = r.bounds;
+            ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        };
+        let origin = centre(start);
+        let (mut area, mut volume, mut sky) = (0.0f32, 0.0f32, 0.0f32);
+        let mut seen = vec![false; w.regions.len()];
+        let mut stack = vec![region];
+        seen[region] = true;
+        while let Some(r) = stack.pop() {
+            let reg = &w.regions[r];
+            let ((x0, y0), (x1, y1)) = reg.bounds;
+            let a = (x1 - x0).max(0.0) * (y1 - y0).max(0.0);
+            area += a;
+            volume += a * (reg.ceiling - reg.floor).max(0.0);
+            if reg.ceiling_surface.is_none() {
+                sky += a;
+            }
+            for &wi in &reg.walls {
+                let wall = &w.walls[wi];
+                let Some(b) = wall.back.filter(|&b| b != wall.front) else { continue };
+                let other = if wall.front == r { b } else { wall.front };
+                let Some(o) = w.regions.get(other) else { continue };
+                let open = reg.ceiling.min(o.ceiling) - reg.floor.max(o.floor);
+                let (cx, cy) = centre(o);
+                if !seen[other] && open > 48.0 && ((cx - origin.0).powi(2) + (cy - origin.1).powi(2)).sqrt() < 1024.0 {
+                    seen[other] = true;
+                    stack.push(other);
+                }
+            }
+        }
+        if area <= 0.0 {
+            return 0.0;
+        }
+        // ~0.15 for a small room, ~0.6 for a large hall; open sky mostly removes it.
+        let size = ((volume / 4.0e6).max(1.0).log2() / 10.0).clamp(0.0, 0.7);
+        size * (1.0 - 0.8 * sky / area)
+    }
+
     pub fn drain_audio(&mut self) -> std::vec::Drain<'_, AudioEvent> {
         self.audio.drain(..)
     }
@@ -644,7 +688,13 @@ impl Session {
                         self.outgoing_tags.push(t);
                         self.script.activate_tag(t);
                     }
-                    EffectRequest::Sound(name) => self.audio.push(AudioEvent::sound(name)),
+                    EffectRequest::Sound(name, region) => self.audio.push(match region.and_then(|r| self.level.world.regions.get(r)) {
+                        Some(reg) => {
+                            let ((x0, y0), (x1, y1)) = reg.bounds;
+                            AudioEvent::sound_at(name, [(x0 + x1) / 2.0, (y0 + y1) / 2.0, (reg.floor + reg.ceiling) / 2.0])
+                        }
+                        None => AudioEvent::sound(name),
+                    }),
                     EffectRequest::Launch(vz) => self.player.vz = vz,
                     EffectRequest::Rotated { region, pivot, angle } => self.carry_rotation(region, pivot, angle),
                 }

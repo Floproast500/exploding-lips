@@ -23,6 +23,7 @@ the engine reads them from your install folder at runtime.
 | Objects: bots (mover scripts), pickups, text, looping/positional sounds and sound sequences, wall/object morphs, flying, TV views, overlays, lightning, switches, timers, counters, teleports, level exits | implemented; data-driven tests |
 | Combat: tools 0–9, projectiles, explosions (bomb multi-hit), bot attacks, first-person weapon | implemented; shots-to-kill and fire rate confirmed against `lips.exe` |
 | HUD, status messages, menus (LIPSTART), character save slots (LIPSTART.GAM) | exact original layout |
+| Audio: positional 3D sound (bots, doors, lifts, shots, explosions), room reverb sized from the surrounding space, effects/music/master volume, streamed MIDI with a built-in fallback SoundFont (`snd_spatial`, `snd_reverb`) | unit-tested (gain/pan, SoundFont parses and plays, streaming and stop) and data-tested (door sounds come from the door) |
 | Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput) |
 | Web (WASM): folder picker, saves in localStorage | working, headless-tested |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
@@ -37,6 +38,7 @@ Engine code is written from those specs, not from decompiler output.
 ```
 crates/engine-core    game-agnostic core: frame, VFS, clock, cvars, bindings, config, audio requests
 crates/engine-scene   scene data for GPU renderers: sector outlines, triangulation, per-frame scenes
+crates/engine-audio   kira playback: positional sound, reverb send, buses, streamed MIDI, fallback SoundFont
 crates/engine-gpu     wgpu renderer: palette-indexed world pass, portal clip windows, HDR/bloom, HD packs, UI
 tools/packbuilder     build HD texture packs (Real-ESRGAN or scale2x, normal maps) from your own files
 crates/godd-formats   parsers for the data files (no platform dependencies)
@@ -90,8 +92,9 @@ Every image is upscaled 4x (tiling textures with wrap-around padding so edges st
 sprites with clean alpha) and gets a normal map; the renderer keeps the original texture
 coordinates, filters with mipmaps and anisotropy, and lights the normal maps.
 
-**Music** needs a General MIDI SoundFont (e.g. `soundfont-fluid` on Arch); sound effects play
-without one.
+**Music** is MIDI, streamed through a SoundFont: `--soundfont`, then the system's
+(`/usr/share/soundfonts`, e.g. `soundfont-fluid` on Arch), else a small built-in General MIDI
+SoundFont the engine generates itself — so music always plays.
 
 **Web:** `./scripts/build-web.sh`, then `python3 -m http.server -d crates/lips-web/www 8080` and
 open `http://localhost:8080`; choose your game folder. Add `?join=ws://HOST:PORT&name=you` to join

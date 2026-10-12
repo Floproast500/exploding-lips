@@ -1,0 +1,12 @@
+[package]
+name = "engine-audio"
+description = "Engine audio: kira playback with positional sound and room reverb, streamed MIDI, a built-in fallback SoundFont"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+engine-core.workspace = true
+log.workspace = true
+rustysynth = "1"
+kira = "0.12"

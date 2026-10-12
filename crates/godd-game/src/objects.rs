@@ -636,6 +636,19 @@ impl Objects {
         }
     }
 
+    /// A sound coming from object `i` (positional playback where the front end supports it).
+    fn sound_from(&mut self, i: usize, name: Option<String>) {
+        let o = &self.list[i];
+        let pos = [o.x, o.y, o.z + o.height / 2.0];
+        self.sound_at(name, pos);
+    }
+
+    fn sound_at(&mut self, name: Option<String>, pos: [f32; 3]) {
+        if let Some(n) = name {
+            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::sound_at(n, pos)));
+        }
+    }
+
     /// Run an object's effect for a tag (0x40), a named trigger (0x80) or a player bump (0x200).
     fn fire(&mut self, i: usize, how: Trigger, now: f64) {
         let o = &self.list[i];
@@ -675,7 +688,7 @@ impl Objects {
                 let text: String = (5..10).filter_map(&slot).collect::<Vec<_>>().join("").replace('_', " ");
                 self.list[i].deadline = Some(now + seconds as f64);
                 self.requests.push(ObjRequest::Text { text, x: int(0), y: int(1), seconds });
-                self.sound(sound(0));
+                self.sound_from(i, sound(0));
             }
             fx::OPICKUP => {
                 if self.list[i].hidden {
@@ -692,7 +705,7 @@ impl Objects {
                 if int(0) > 0 {
                     self.requests.push(ObjRequest::Tag(int(0) as u32));
                 }
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OTIMER | fx::ORANDOM => {
                 let period = if o.effect == fx::ORANDOM {
@@ -713,14 +726,14 @@ impl Objects {
                 } else {
                     self.requests.push(ObjRequest::TriggerNamed(format!("@teleport:{dest}")));
                 }
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OSTRAP => {
                 if let Some(level) = slot(9) {
                     self.requests.push(ObjRequest::LevelExit { level: level.to_ascii_uppercase(), start: slot(8) });
                 }
                 if int(0) != 1 {
-                    self.sound(sound(4));
+                    self.sound_from(i, sound(4));
                 }
             }
             fx::OSELTOOL => {
@@ -768,7 +781,7 @@ impl Objects {
             fx::OWTOW => {
                 if let (Some(target), Some(source)) = (slot(9), slot(8)) {
                     self.requests.push(ObjRequest::CopyWall { target, source });
-                    self.sound(sound(4));
+                    self.sound_from(i, sound(4));
                 }
             }
             fx::OOTOO => {
@@ -784,16 +797,16 @@ impl Objects {
                         self.morph(t, src);
                     }
                 }
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OFLYON => {
                 let height = (int(0) > 0).then(|| int(0) as f32);
                 self.requests.push(ObjRequest::Fly { on: true, height });
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OFLYOFF => {
                 self.requests.push(ObjRequest::Fly { on: false, height: None });
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::ODROP => self.drop_item(i, slot(9), slot(8), int(0), sound(4)),
             fx::OTEXOVER => {
@@ -801,10 +814,10 @@ impl Objects {
                 let on = !self.overlays_on.contains(&i);
                 if on {
                     self.overlays_on.push(i);
-                    self.sound(sound(0));
+                    self.sound_from(i, sound(0));
                 } else {
                     self.overlays_on.retain(|&o| o != i);
-                    self.sound(sound(2));
+                    self.sound_from(i, sound(2));
                 }
                 self.requests.push(ObjRequest::Overlay { tex, x: int(1), y: int(0), on });
             }
@@ -814,13 +827,13 @@ impl Objects {
                 let on_time = self.flash_time(int(0));
                 self.list[i].flash = (flashes, Some(now + on_time), true);
                 self.requests.push(ObjRequest::Flash(true));
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OVIEWON | fx::OVIEWOFF => {
                 if let Some(view) = slot(9) {
                     self.requests.push(ObjRequest::View { name: view, on: o.effect == fx::OVIEWON });
                 }
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OCOUNT => {
                 self.list[i].deadline = None;
@@ -831,7 +844,7 @@ impl Objects {
                     if let Some(target) = slot(9) {
                         self.trigger_named(&target, now);
                     }
-                    self.sound(sound(4));
+                    self.sound_from(i, sound(4));
                     if int(3) > 0 {
                         self.requests.push(ObjRequest::Tag(int(3) as u32));
                     }
@@ -850,7 +863,7 @@ impl Objects {
                 if let Some(target) = slot(9) {
                     self.trigger_named(&target, now);
                 }
-                self.sound(sound(4));
+                self.sound_from(i, sound(4));
             }
             fx::OPHYSON => {} // movement model 0 is the only one used (set at every start)
             _ => {}
@@ -883,7 +896,7 @@ impl Objects {
         st.left = count;
         if count == -1 {
             st.looping = true;
-            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Loop { channel: channel(i), name, volume: volume(aux.ints[1]), pan: 0.0 }));
+            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Loop { channel: channel(i), name, volume: volume(aux.ints[1]), pan: 0.0, pos: None }));
             return;
         }
         if delay != 0 {
@@ -897,7 +910,7 @@ impl Objects {
         if count > 0 && count != 9999 {
             self.list[i].sound.left -= 1;
         }
-        self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0 }));
+        self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None }));
     }
 
     /// OSNDSEQ start: slots 0..4 one after another, each `int k + 1` times; the whole chain
@@ -984,7 +997,7 @@ impl Objects {
             self.list[i].sound.reps = 0;
             let len = self.sound_seconds(&name);
             self.list[i].sound.next = Some(now + len);
-            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0 }));
+            self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Sound { name, volume: volume(aux.ints[1]), pan: 0.0, pos: None }));
         }
     }
 
@@ -1120,7 +1133,7 @@ impl Objects {
         }
         let sounds = aux.sounds.clone();
         self.motions.push((object, region, target, speed / 1.2, ceiling));
-        self.sound(sounds[0].clone());
+        self.sound_from(object, sounds[0].clone());
     }
 
     /// Advance one simulation tick of `dt` seconds.
@@ -1141,7 +1154,7 @@ impl Objects {
         for (k, obj) in finished.into_iter().rev() {
             self.motions.remove(k);
             let stop = self.list[obj].aux.as_ref().and_then(|a| a.sounds[2].clone());
-            self.sound(stop);
+            self.sound_from(obj, stop);
         }
 
         self.frame_accum += dt * FRAME_RATE;
@@ -1164,7 +1177,7 @@ impl Objects {
                 if let Some(target) = aux.as_ref().and_then(|a| a.slot(9)).map(str::to_string) {
                     self.trigger_named(&target, now);
                 }
-                self.sound(aux.and_then(|a| a.sounds[4].clone()));
+                self.sound_from(i, aux.and_then(|a| a.sounds[4].clone()));
             }
         }
 
@@ -1276,7 +1289,7 @@ impl Objects {
                 MoverRequest::Tag(t) => self.requests.push(ObjRequest::Tag(t)),
                 MoverRequest::TagRange(a, b) => self.requests.push(ObjRequest::TagRange(a, b)),
                 MoverRequest::Message { color, text } => self.requests.push(ObjRequest::Message { color, text }),
-                MoverRequest::Sound(s) => self.requests.push(ObjRequest::Sound(s)),
+                MoverRequest::Sound(s) => self.sound_from(i, Some(s)),
                 MoverRequest::PlayerState { index, op, value } => self.requests.push(ObjRequest::PlayerState { index, op, value }),
                 MoverRequest::TurnPlayer { units_per_frame, frames } => self.requests.push(ObjRequest::TurnPlayer { units_per_frame, frames }),
                 MoverRequest::FacePlayer { away } => {
@@ -1414,7 +1427,7 @@ impl Objects {
             }
         let explosion = self.tools.bot_explosions.get(tool).cloned().flatten().map(|_| tool);
         p.kind = Kind::Projectile { from_player: false, tag, flying: def.flying(), life: 6.0, explosion };
-        self.sound(def.sounds[0].clone());
+        self.sound_at(def.sounds[0].clone(), [p.x, p.y, p.z]);
         self.list.push(p);
     }
 
@@ -1549,7 +1562,7 @@ impl Objects {
                     let life = def.tex.and_then(|t| level.sequences.get(t)?.as_ref()).map(|s| sequence_seconds(s).max(1.0 / FRAME_RATE)).unwrap_or(0.6);
                     e.kind = Kind::Explosion { life, weapon: from_player && def.amf & 0x80 != 0 };
                     let snd = def.sounds[if target.is_some() { 0 } else { 2 }].clone().or(def.sounds[0].clone());
-                    self.sound(snd);
+                    self.sound_at(snd, [e.x, e.y, e.z]);
                     self.list.push(e);
                 }
             }

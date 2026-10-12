@@ -8,14 +8,13 @@ version.workspace = true
 [dependencies]
 engine-core.workspace = true
 engine-gpu.workspace = true
+engine-audio.workspace = true
 godd-game.workspace = true
 godd-net = { workspace = true, features = ["game"] }
 bytemuck = { version = "1", features = ["derive"] }
 env_logger = "0.11"
 gilrs = "0.11"
-kira = "0.12"
 log.workspace = true
-rustysynth = "1"
 pollster = "1"
 softbuffer = "0.4"
 wgpu = "30"

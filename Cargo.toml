@@ -11,6 +11,7 @@ version = "0.1.0"
 engine-core = { path = "crates/engine-core" }
 engine-scene = { path = "crates/engine-scene" }
 engine-gpu = { path = "crates/engine-gpu" }
+engine-audio = { path = "crates/engine-audio" }
 godd-formats = { path = "crates/godd-formats" }
 godd-game = { path = "crates/godd-game" }
 godd-net = { path = "crates/godd-net" }

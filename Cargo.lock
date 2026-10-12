@@ -726,6 +726,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-audio"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "kira",
+ "log",
+ "rustysynth",
+]
+
+[[package]]
 name = "engine-core"
 version = "0.1.0"
 dependencies = [
@@ -1393,16 +1403,15 @@ name = "lips-desktop"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "engine-audio",
  "engine-core",
  "engine-gpu",
  "env_logger",
  "gilrs",
  "godd-game",
  "godd-net",
- "kira",
  "log",
  "pollster",
- "rustysynth",
  "softbuffer",
  "wgpu",
  "winit",

@@ -161,6 +161,7 @@ impl App {
         let events = self.game.drain_audio();
         if let Some(audio) = &mut self.audio {
             audio.set_volumes(self.game.options.volume);
+            audio.set_spatial(self.game.cvars.get_bool("snd_spatial"));
             for event in &events {
                 audio.handle(&self.vfs, event);
             }

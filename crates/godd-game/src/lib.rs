@@ -92,6 +92,8 @@ pub struct Game {
     epoch: u64,
     /// Triangulated regions of the current level, for the GPU scene.
     scene_cache: Option<(u64, Vec<scene::RegionMesh>)>,
+    /// Reverb of the listener's surroundings, cached per (level, region).
+    reverb_cache: ((u64, usize), f32),
     /// Modern lighting fitted from the palette: brightness per shade level, emissive colours.
     light_fit: ([f32; 16], [u32; 8]),
     ui_colors: (u8, u8, u8, u8),
@@ -163,6 +165,7 @@ impl Game {
             pending_look: (0.0, 0.0),
             epoch: 0,
             scene_cache: None,
+            reverb_cache: ((u64::MAX, 0), 0.0),
             light_fit: fit_light(&palette.rgb, &palette.colormaps[..SHADE_LEVELS.min(palette.colormaps.len())]),
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
@@ -437,6 +440,12 @@ impl Game {
     pub fn drain_audio(&mut self) -> Vec<AudioEvent> {
         if let State::Playing(session) = &mut self.state {
             self.audio.extend(session.drain_audio());
+            let p = session.player;
+            if self.reverb_cache.0 != (self.epoch, p.region) {
+                self.reverb_cache = ((self.epoch, p.region), session.reverb_at(p.region));
+            }
+            let reverb = if self.cvars.get_bool("snd_reverb") { self.reverb_cache.1 } else { 0.0 };
+            self.audio.push(AudioEvent::Listener { pos: [p.x, p.y, p.eye_z(&self.physics)], angle: p.angle, reverb });
         }
         std::mem::take(&mut self.audio)
     }

@@ -27,6 +27,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);
+    c.bool("snd_spatial", "3D positional sound", Audio, true);
+    c.bool("snd_reverb", "Room reverb", Audio, true);
     c.float("m_sensitivity", "Mouse speed", Controls, (0.2, 20.0, 0.2), 2.6);
     c.float("m_yscale", "Mouse vertical scale", Controls, (0.25, 4.0, 0.05), 1.0);
     c.bool("m_invert", "Invert mouse", Controls, false);

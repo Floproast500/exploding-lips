@@ -1,147 +1,45 @@
-//! Desktop audio: plays the game's WAV effects with kira and renders MIDI music through a
-//! user-supplied SoundFont (rustysynth). Audio is optional — failures only log.
+//! Desktop audio: engine-audio playback with the game's files, music through a SoundFont from
+//! the settings, a system location, or the built-in fallback.
 
 use godd_game::{AudioEvent, Vfs, music_path, sound_path};
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::{AudioManager, AudioManagerSettings, DefaultBackend, Decibels, Panning, Tween};
-use std::collections::HashMap;
-use std::io::Cursor;
-use std::path::Path;
-use std::sync::Arc;
-
-const MUSIC_SAMPLE_RATE: u32 = 44_100;
+use std::path::{Path, PathBuf};
 
 pub struct Audio {
-    manager: AudioManager,
-    cache: HashMap<String, Option<StaticSoundData>>,
-    soundfont: Option<Arc<rustysynth::SoundFont>>,
-    music: Option<StaticSoundHandle>,
-    /// Looping channels with their unscaled volume, so volume changes can be re-applied.
-    channels: HashMap<u32, (StaticSoundHandle, f32)>,
-    /// Master, effects and music volume (0..=1), from the snd_* cvars.
-    volumes: (f32, f32, f32),
+    inner: engine_audio::Audio,
 }
 
 impl Audio {
     pub fn new(soundfont: Option<&Path>) -> Option<Self> {
-        let manager = AudioManager::<DefaultBackend>::new(AudioManagerSettings::default())
-            .map_err(|e| log::warn!("audio disabled: {e}"))
-            .ok()?;
-        let found = soundfont.map(Path::to_path_buf).or_else(find_soundfont);
-        if found.is_none() {
-            log::warn!("music disabled: no SoundFont found (install one, e.g. `soundfont-fluid`, or pass --soundfont FILE.sf2)");
+        let path = soundfont.map(Path::to_path_buf).or_else(find_soundfont);
+        let bytes = path.as_ref().and_then(|p| std::fs::read(p).map_err(|e| log::warn!("soundfont {}: {e}", p.display())).ok());
+        if let Some(p) = path.as_ref().filter(|_| bytes.is_some()) {
+            log::info!("music: SoundFont {}", p.display());
         }
-        let soundfont = found.as_deref().and_then(|path| {
-            log::info!("music: SoundFont {}", path.display());
-            let mut file = std::fs::File::open(path).map_err(|e| log::warn!("soundfont {}: {e}", path.display())).ok()?;
-            rustysynth::SoundFont::new(&mut file).map(Arc::new).map_err(|e| log::warn!("soundfont: {e}")).ok()
-        });
-        Some(Self { manager, cache: HashMap::new(), soundfont, music: None, channels: HashMap::new(), volumes: (1.0, 1.0, 1.0) })
+        Some(Self { inner: engine_audio::Audio::new(bytes)? })
     }
 
-    /// Apply the volume buses; changes take effect on playing loops and music at once.
     pub fn set_volumes(&mut self, volumes: (f32, f32, f32)) {
-        if volumes == self.volumes {
-            return;
-        }
-        self.volumes = volumes;
-        let sfx = volumes.0 * volumes.1;
-        for (handle, base) in self.channels.values_mut() {
-            handle.set_volume(amplitude_to_db(*base * sfx), Tween::default());
-        }
-        if let Some(m) = &mut self.music {
-            m.set_volume(amplitude_to_db(volumes.0 * volumes.2), Tween::default());
-        }
+        self.inner.set_volumes(volumes);
     }
 
-    fn sfx(&self) -> f32 {
-        self.volumes.0 * self.volumes.1
+    pub fn set_spatial(&mut self, on: bool) {
+        self.inner.spatial = on;
     }
 
     pub fn handle(&mut self, vfs: &Vfs, event: &AudioEvent) {
-        match event {
-            AudioEvent::Sound { name, volume, pan } => {
-                let Some(data) = self.load_sound(vfs, name) else { return };
-                let data = data.volume(amplitude_to_db(*volume * self.sfx())).panning(Panning(pan.clamp(-1.0, 1.0)));
-                if let Err(e) = self.manager.play(data) {
-                    log::warn!("play {name}: {e}");
-                }
-            }
-            AudioEvent::Loop { channel, name, volume, pan } => {
-                if let Some((mut old, _)) = self.channels.remove(channel) {
-                    old.stop(Tween::default());
-                }
-                let Some(data) = self.load_sound(vfs, name) else { return };
-                let data = data.loop_region(..).volume(amplitude_to_db(*volume * self.sfx())).panning(Panning(pan.clamp(-1.0, 1.0)));
-                match self.manager.play(data) {
-                    Ok(handle) => {
-                        self.channels.insert(*channel, (handle, *volume));
-                    }
-                    Err(e) => log::warn!("loop {name}: {e}"),
-                }
-            }
-            AudioEvent::ChannelVolume { channel, volume, pan } => {
-                let sfx = self.sfx();
-                if let Some((h, base)) = self.channels.get_mut(channel) {
-                    *base = *volume;
-                    h.set_volume(amplitude_to_db(*volume * sfx), Tween::default());
-                    h.set_panning(Panning(pan.clamp(-1.0, 1.0)), Tween::default());
-                }
-            }
-            AudioEvent::Stop { channel } => {
-                if let Some((mut h, _)) = self.channels.remove(channel) {
-                    h.stop(Tween::default());
-                }
-            }
-            AudioEvent::Music { name, looped } => {
-                if let Some(mut old) = self.music.take() {
-                    old.stop(Tween::default());
-                }
-                let Some(name) = name else { return };
-                let Some(mut data) = self.render_midi(vfs, name) else { return };
-                if *looped {
-                    data = data.loop_region(..);
-                }
-                data = data.volume(amplitude_to_db(self.volumes.0 * self.volumes.2));
-                self.music = self.manager.play(data).map_err(|e| log::warn!("music {name}: {e}")).ok();
-            }
-        }
-    }
-
-    fn load_sound(&mut self, vfs: &Vfs, name: &str) -> Option<StaticSoundData> {
-        self.cache
-            .entry(name.to_ascii_lowercase())
-            .or_insert_with(|| {
-                let bytes = vfs.read(&sound_path(name)).map_err(|e| log::warn!("{e}")).ok()?;
-                StaticSoundData::from_cursor(Cursor::new(bytes.to_vec())).map_err(|e| log::warn!("decode {name}: {e}")).ok()
-            })
-            .clone()
-    }
-
-    fn render_midi(&self, vfs: &Vfs, name: &str) -> Option<StaticSoundData> {
-        let soundfont = self.soundfont.as_ref()?;
-        let bytes = vfs.read(&music_path(name)).map_err(|e| log::warn!("{e}")).ok()?;
-        let midi = rustysynth::MidiFile::new(&mut Cursor::new(bytes)).map_err(|e| log::warn!("midi {name}: {e}")).ok()?;
-        let settings = rustysynth::SynthesizerSettings::new(MUSIC_SAMPLE_RATE as i32);
-        let synth = rustysynth::Synthesizer::new(soundfont, &settings).ok()?;
-        let mut sequencer = rustysynth::MidiFileSequencer::new(synth);
-        let midi = Arc::new(midi);
-        sequencer.play(&midi, false);
-        let frames = (midi.get_length() * MUSIC_SAMPLE_RATE as f64) as usize + MUSIC_SAMPLE_RATE as usize;
-        let (mut left, mut right) = (vec![0.0f32; frames], vec![0.0f32; frames]);
-        sequencer.render(&mut left, &mut right);
-        let frames: Arc<[kira::Frame]> = left.iter().zip(&right).map(|(&l, &r)| kira::Frame { left: l, right: r }).collect();
-        Some(StaticSoundData {
-            sample_rate: MUSIC_SAMPLE_RATE,
-            frames,
-            settings: Default::default(),
-            slice: None,
-        })
+        let load = |asset: engine_audio::Asset| {
+            let path = match asset {
+                engine_audio::Asset::Sound(n) => sound_path(n),
+                engine_audio::Asset::Music(n) => music_path(n),
+            };
+            vfs.read(&path).map(<[u8]>::to_vec).map_err(|e| log::warn!("{e}")).ok()
+        };
+        self.inner.handle(&load, event);
     }
 }
 
-/// Look for a General MIDI SoundFont in the usual system locations.
-fn find_soundfont() -> Option<std::path::PathBuf> {
+/// A General MIDI SoundFont in the usual system locations.
+fn find_soundfont() -> Option<PathBuf> {
     const CANDIDATES: &[&str] = &[
         "/usr/share/soundfonts/default.sf2",
         "/usr/share/soundfonts/FluidR3_GM.sf2",
@@ -150,14 +48,9 @@ fn find_soundfont() -> Option<std::path::PathBuf> {
         "/usr/share/soundfonts/GeneralUser-GS.sf2",
         "/usr/share/sounds/sf2/TimGM6mb.sf2",
         "/opt/homebrew/share/soundfonts/default.sf2",
-        "C:\\soundfonts\\default.sf2",
     ];
-    CANDIDATES.iter().map(std::path::PathBuf::from).find(|p| p.is_file()).or_else(|| {
+    CANDIDATES.iter().map(PathBuf::from).find(|p| p.is_file()).or_else(|| {
         let dir = std::fs::read_dir("/usr/share/soundfonts").ok()?;
         dir.filter_map(Result::ok).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("sf2")))
     })
-}
-
-fn amplitude_to_db(amplitude: f32) -> Decibels {
-    if amplitude <= 0.0 { Decibels::SILENCE } else { Decibels(20.0 * amplitude.log10()) }
 }

@@ -41,7 +41,8 @@ const WALL_LIMITED_USES: u32 = 0x1000;
 #[derive(Debug, Clone, PartialEq)]
 pub enum EffectRequest {
     Tag(u32),
-    Sound(String),
+    /// A sound, from a region (its moving door/lift) when known.
+    Sound(String, Option<usize>),
     /// Set the player's vertical speed (jump pads).
     Launch(f32),
     /// RROTATE turned `region` by `angle` radians about `pivot`: objects on its floor follow.
@@ -325,7 +326,15 @@ impl Effects {
 
     fn sound(&mut self, name: Option<String>) {
         if let Some(n) = name {
-            self.requests.push(EffectRequest::Sound(n));
+            self.requests.push(EffectRequest::Sound(n, None));
+        }
+    }
+
+    /// A sound from effect entry `i`'s world region.
+    fn sound_in(&mut self, i: usize, name: Option<String>) {
+        if let Some(n) = name {
+            let region = self.regions[i].region;
+            self.requests.push(EffectRequest::Sound(n, Some(region)));
         }
     }
 
@@ -353,8 +362,8 @@ impl Effects {
                 rot.turned = 0;
                 rot.segments_done = 0;
                 let (start, run) = (rot.aux.as_ref().and_then(|a| a.sound(0)), rot.aux.as_ref().and_then(|a| a.sound(1)));
-                self.sound(start);
-                self.sound(run);
+                self.sound_in(i, start);
+                self.sound_in(i, run);
             } else {
                 rot.mode = 2;
             }
@@ -364,8 +373,8 @@ impl Effects {
             && !*moving {
                 *moving = true;
                 let (start, run) = (aux.as_ref().and_then(|a| a.sound(0)), aux.as_ref().and_then(|a| a.sound(1)));
-                self.sound(start);
-                self.sound(run);
+                self.sound_in(i, start);
+                self.sound_in(i, run);
             }
     }
 

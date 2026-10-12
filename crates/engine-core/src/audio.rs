@@ -10,9 +10,14 @@ pub enum AudioEvent {
         volume: f32,
         /// -1 (left) ..= 1 (right)
         pan: f32,
+        /// World position for positional (3D) playback; `None` plays as-is (UI, the player).
+        pos: Option<[f32; 3]>,
     },
     /// Start a looping sound on a channel (replacing whatever plays there).
-    Loop { channel: u32, name: String, volume: f32, pan: f32 },
+    Loop { channel: u32, name: String, volume: f32, pan: f32, pos: Option<[f32; 3]> },
+    /// Where the listener is (once per frame): position, facing (radians, counter-clockwise
+    /// from +X) and how much the surroundings reverberate (0 dry .. 1 huge hall).
+    Listener { pos: [f32; 3], angle: f32, reverb: f32 },
     /// Change a looping channel's volume/pan (positional sounds).
     ChannelVolume { channel: u32, volume: f32, pan: f32 },
     /// Stop a looping channel.
@@ -23,7 +28,12 @@ pub enum AudioEvent {
 
 impl AudioEvent {
     pub fn sound(name: impl Into<String>) -> Self {
-        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0 }
+        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: None }
+    }
+
+    /// A one-shot sound at a world position.
+    pub fn sound_at(name: impl Into<String>, pos: [f32; 3]) -> Self {
+        Self::Sound { name: name.into(), volume: 1.0, pan: 0.0, pos: Some(pos) }
     }
 }
 
