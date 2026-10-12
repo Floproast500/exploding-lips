@@ -84,6 +84,9 @@ impl PhysicsParams {
     }
 }
 
+/// Walls tracked in contact at once.
+const MAX_CONTACTS: usize = 6;
+
 #[derive(Debug, Clone, Copy)]
 pub struct Player {
     pub x: f32,
@@ -102,7 +105,8 @@ pub struct Player {
     /// Flying (OFLYON): Jump rises, Crouch sinks, no gravity.
     pub flying: bool,
     /// Last wall touched; a wall fires once per continuous contact (world-effects.md §1.1).
-    last_touched: Option<usize>,
+    /// Walls in contact at the last update (each fires once per continuous contact).
+    touching: [u32; MAX_CONTACTS],
     /// Yaw (radians) and look (units) the last tick took from mouse/stick look. The camera
     /// shows that part immediately instead of interpolating it, so look stays 1:1.
     pub direct_turn: f32,
@@ -134,7 +138,7 @@ impl Player {
 
     pub fn in_region(world: &World, x: f32, y: f32, angle: f32, region: usize) -> Self {
         let z = world.regions.get(region).map_or(0.0, |r| r.floor);
-        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, last_touched: None, direct_turn: 0.0, direct_look: 0.0 }
+        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, touching: [u32::MAX; MAX_CONTACTS], direct_turn: 0.0, direct_look: 0.0 }
     }
 
     pub fn eye_z(&self, params: &PhysicsParams) -> f32 {
@@ -164,10 +168,13 @@ impl Player {
                 events.push(PlayerEvent::HitCeiling(owner));
             }
         }
-        // Wall contact: the nearest wall within radius + margin that overlaps our height.
+        // Wall contact (world-effects.md §1.1): every wall within radius + margin that overlaps
+        // our height: blocking walls, closed portals and passable lines being approached. Each
+        // fires once per continuous contact; a closed door face touched while standing on an
+        // open doorway line is still touched.
         let reach = params.radius + CONTACT_MARGIN;
         let height = if self.crouching { params.crouch_eye } else { params.height };
-        let mut nearest: Option<(f32, usize)> = None;
+        let mut near: Vec<(f32, usize)> = Vec::new();
         for (wi, wall) in world.walls.iter().enumerate() {
             let (ax, ay) = world.vertices[wall.a];
             let (bx, by) = world.vertices[wall.b];
@@ -180,18 +187,19 @@ impl Player {
             }
             let (px, py) = closest_point(ax, ay, bx, by, self.x, self.y);
             let d = ((self.x - px).powi(2) + (self.y - py).powi(2)).sqrt();
-            if d <= reach && nearest.is_none_or(|n| d < n.0) {
-                nearest = Some((d, wi));
+            if d <= reach {
+                near.push((d, wi));
             }
         }
-        match nearest {
-            Some((_, wi)) if self.last_touched != Some(wi) => {
-                self.last_touched = Some(wi);
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut now = [u32::MAX; MAX_CONTACTS];
+        for (slot, &(_, wi)) in now.iter_mut().zip(&near) {
+            *slot = wi as u32;
+            if !self.touching.contains(&(wi as u32)) {
                 events.push(PlayerEvent::TouchedWall(wi));
             }
-            Some(_) => {}
-            None => self.last_touched = None,
         }
+        self.touching = now;
     }
 
     pub fn tick(&mut self, world: &World, input: &Input, params: &PhysicsParams) {

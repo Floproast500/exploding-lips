@@ -1,0 +1,9 @@
+[package]
+name = "playbot"
+description = "Plays Exploding Lips through the game simulation to find anything that blocks progress"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+godd-game.workspace = true

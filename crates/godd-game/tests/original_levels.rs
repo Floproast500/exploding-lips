@@ -990,3 +990,26 @@ fn lips00_region_backgrounds_replace_each_other() {
     let events = std::mem::take(&mut s.audio);
     assert!(events.iter().any(|e| matches!(e, AudioEvent::Loop { name, .. } if name.eq_ignore_ascii_case("DUNGN10"))), "BACKSND restores the level's own: {events:?}");
 }
+
+/// A door opened by walking into its face (LIPS00 wall 460, tag 30) opens even though the
+/// player is standing on the open doorway line behind it (wall 39): every wall in contact is
+/// touched, not only the nearest (world-effects.md §1.1). Found by the play bot.
+#[test]
+fn lips00_door_face_opens_from_a_doorway() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let s = game.session_mut().unwrap();
+    (s.player.x, s.player.y, s.player.z) = (17920.0, 16640.0, 0.0);
+    s.player.region = s.level.world.region_at_z(17920.0, 16640.0, Some(1.0)).unwrap();
+    s.player.angle = -std::f32::consts::FRAC_PI_2;
+    s.previous = s.player;
+    let mut walk = Input::default();
+    walk.set(Action::Forward, true);
+    for _ in 0..120 {
+        game.tick(&vfs, &walk);
+    }
+    let s = game.session().unwrap();
+    assert!(s.level.world.regions[81].ceiling > 64.0, "door 81 opened");
+    assert!(s.player.y < 16500.0, "walked through: {}", s.player.y);
+}
