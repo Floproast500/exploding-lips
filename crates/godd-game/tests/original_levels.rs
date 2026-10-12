@@ -689,3 +689,22 @@ fn lips00_save_slot_round_trip() {
     assert!((at(&restored).0 - saved_at.0).abs() < 1.0 && (at(&restored).1 - saved_at.1).abs() < 1.0);
     assert_eq!(restored.session().unwrap().script.states[MONEY], 1234);
 }
+
+/// Exploding Lips runs through the generic GameModule interface too (the one the Quake-family
+/// viewer implements): it ticks from ModuleInput and produces GPU views.
+#[test]
+fn lips00_as_a_game_module() {
+    use engine_scene::module::{GameModule, ModuleInput};
+    let Some((vfs, game)) = start("LIPS00") else { return };
+    let mut m = godd_game::module::GoddModule::new(game, vfs);
+    assert!(m.title().contains("Mortuary"));
+    let mut ui = godd_game::Frame::new(320, 200);
+    let before = m.view(&mut ui, 1.0).unwrap().camera;
+    for _ in 0..30 {
+        m.tick(&ModuleInput { forward: 1.0, look: (0.01, 0.0), ..Default::default() });
+    }
+    let after = m.view(&mut ui, 1.0).unwrap().camera;
+    assert!(((after.pos[0] - before.pos[0]).powi(2) + (after.pos[1] - before.pos[1]).powi(2)).sqrt() > 50.0, "walked");
+    assert!((after.angle - before.angle).abs() > 0.2, "turned left");
+    assert!(!m.images().is_empty() && m.shade_rows().len() == 16);
+}

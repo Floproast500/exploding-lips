@@ -7,6 +7,7 @@
 mod audio;
 mod config;
 mod gamepad;
+mod module_app;
 mod present;
 
 use engine_core::{BindTable, CvarRegistry};
@@ -356,6 +357,24 @@ impl ApplicationHandler for App {
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // `--bsp <PAK|BSP> <MAP> [palette=FILE]`: fly through a Quake-family map (Quake, Hexen II)
+    // with the engine's renderer instead of starting Exploding Lips.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--bsp") {
+        let (Some(source), Some(map)) = (args.get(i + 1), args.get(i + 2)) else {
+            eprintln!("usage: lips-desktop --bsp <PAK|BSP> <MAP> [palette=FILE]");
+            std::process::exit(2);
+        };
+        let palette = args.iter().find_map(|a| a.strip_prefix("palette=")).map(std::path::Path::new);
+        match quake_bsp::viewer::open(std::path::Path::new(source), map, palette) {
+            Ok(viewer) => module_app::run(Box::new(viewer)),
+            Err(e) => {
+                eprintln!("cannot open {map}: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let mut cvars = CvarRegistry::default();
     godd_game::options::register_cvars(&mut cvars);
     config::register(&mut cvars);

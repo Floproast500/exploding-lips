@@ -9,6 +9,8 @@ version.workspace = true
 engine-core.workspace = true
 engine-gpu.workspace = true
 engine-audio.workspace = true
+engine-scene.workspace = true
+quake-bsp.workspace = true
 godd-game.workspace = true
 godd-net = { workspace = true, features = ["game"] }
 bytemuck = { version = "1", features = ["derive"] }

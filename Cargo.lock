@@ -759,6 +759,7 @@ name = "engine-scene"
 version = "0.1.0"
 dependencies = [
  "earcut",
+ "engine-core",
 ]
 
 [[package]]
@@ -1406,12 +1407,14 @@ dependencies = [
  "engine-audio",
  "engine-core",
  "engine-gpu",
+ "engine-scene",
  "env_logger",
  "gilrs",
  "godd-game",
  "godd-net",
  "log",
  "pollster",
+ "quake-bsp",
  "softbuffer",
  "wgpu",
  "winit",
@@ -1446,6 +1449,7 @@ dependencies = [
  "godd-formats",
  "godd-game",
  "png",
+ "quake-bsp",
  "wgpu",
 ]
 
@@ -2205,6 +2209,14 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
+
+[[package]]
+name = "quake-bsp"
+version = "0.1.0"
+dependencies = [
+ "engine-core",
+ "engine-scene",
+]
 
 [[package]]
 name = "quick-xml"

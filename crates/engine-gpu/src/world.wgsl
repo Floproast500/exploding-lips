@@ -54,6 +54,7 @@ const DISCARD_OUTSIDE_V: u32 = 8u;
 const CLAMP: u32 = 16u;
 const OBJECT: u32 = 32u;
 const VOID: u32 = 64u;
+const SCREEN: u32 = 128u;
 const HD: u32 = 65536u;
 const HD_NORMAL: u32 = 131072u;
 const TAU: f32 = 6.28318530718;
@@ -73,7 +74,7 @@ struct VsOut {
     @location(1) depth: f32,
     @location(2) @interpolate(flat) rect: vec4<u32>,
     @location(3) @interpolate(flat) layer_flags: vec2<u32>,
-    @location(4) @interpolate(flat) light: f32,
+    @location(4) light: f32,
     @location(5) world: vec3<f32>,
     @location(6) normal: vec3<f32>,
 };
@@ -84,6 +85,17 @@ fn vs_main(v: VsIn) -> VsOut {
     let forward = dot(rel.xy, u.basis.xy);
     let right = dot(rel.xy, u.basis.zw);
     var out: VsOut;
+    if ((v.layer_flags.y & SCREEN) != 0u) {
+        out.clip = vec4<f32>(v.pos.xy, 0.0, 1.0);
+        out.uv = v.uv;
+        out.depth = 0.0;
+        out.rect = v.rect;
+        out.layer_flags = v.layer_flags;
+        out.light = v.light;
+        out.world = u.cam.xyz + vec3<f32>(1.0e6, 0.0, 0.0); // out of reach of every light
+        out.normal = vec3<f32>(-u.basis.x, -u.basis.y, 0.0);
+        return out;
+    }
     if (u.look.x > 0.5) {
         // True pitch: rotate (forward, up) about the right axis.
         let f = forward * u.look.z + rel.z * u.look.y;

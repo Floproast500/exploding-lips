@@ -13,4 +13,5 @@ png = "0.17"
 engine-gpu.workspace = true
 engine-core.workspace = true
 engine-scene.workspace = true
+quake-bsp.workspace = true
 wgpu = "30"

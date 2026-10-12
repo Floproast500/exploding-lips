@@ -1,7 +1,8 @@
 //! Game-agnostic scene data for the GPU renderer. Game modules turn their worlds into these
 //! shapes; the renderer draws them: sector outlines and triangulation ([`polygon`]) and the
-//! per-frame scene ([`scene`]).
+//! per-frame scene ([`scene`]), and the game-module contract ([`module`]).
 
+pub mod module;
 pub mod polygon;
 pub mod scene;
 

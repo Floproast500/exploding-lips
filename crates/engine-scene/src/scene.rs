@@ -17,6 +17,9 @@ pub const OBJECT: u32 = 32;
 /// Palette colour 0, unlit: what classic portal renderers leave in gaps they never draw
 /// (a step between two regions with no texture for it).
 pub const VOID: u32 = 64;
+/// Screen-space quad (first-person weapon): `pos.xy` are normalized device coordinates, drawn
+/// in front of everything, unaffected by the camera and dynamic lights.
+pub const SCREEN: u32 = 128;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SceneVertex {

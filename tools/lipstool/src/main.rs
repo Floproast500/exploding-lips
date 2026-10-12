@@ -13,6 +13,8 @@
 //!   lipstool render-gpu <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units] [truecolor]
 //!                                                  the same view through the GPU renderer
 //!                                                  (extra words: look, shear, modern, boom)
+//!   lipstool render-bsp <PAK|BSP> <MAP> <OUT.png> [WxH] [palette=FILE]
+//!                                                  a Quake-family map (Quake, Hexen II) from the start
 //!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern]
 //!                                                  GPU frame time
 
@@ -37,6 +39,15 @@ fn main() -> AnyResult {
             save_rgb(Path::new(out), w, h, &rgb)
         }
         ["dump-mesh", dir, level, out] => dump_mesh(Path::new(dir), level, Path::new(out)),
+        ["render-bsp", source, map, out, rest @ ..] => {
+            let size = rest.first().and_then(|v| v.split_once('x')).and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).unwrap_or((1280, 720));
+            let palette = rest.iter().find_map(|a| a.strip_prefix("palette=")).map(Path::new);
+            let mut viewer = lipstool::bsp_viewer(Path::new(source), map, palette)?;
+            let b = viewer.bsp();
+            println!("{map}: {} faces ({} world), {} textures", b.faces.len(), b.world_faces.len(), b.textures.len());
+            let rgb = lipstool::render_module(&mut viewer, size)?;
+            save_rgb(Path::new(out), size.0, size.1, &rgb)
+        }
         ["bench-gpu", dir, level, rest @ ..] => {
             let ms = lipstool::bench_gpu(Path::new(dir), level, rest, 200)?;
             let cpu = lipstool::bench_scene(Path::new(dir), level, rest, 200)?;

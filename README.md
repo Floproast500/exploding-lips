@@ -1,4 +1,4 @@
-# Exploding Lips — engine reimplementation
+# Exploding Lips — engine reimplementation (and a retro engine)
 
 A clean-room reimplementation of the G.O.D.D. ("WinGodd") engine used by **Exploding Lips**
 (Galaxy Games, 1999), written in Rust. It plays the original game data on modern systems —
@@ -16,6 +16,8 @@ the engine reads them from your install folder at runtime.
 | Renderer: portals, stacked (room-over-room) regions, floors/ceilings, sky, sprites with rotations, masked walls, original lighting | software renderer matches the original (golden test: RMSE 0.04 view / 0.06 full screen vs. `lips.exe`) |
 | GPU renderer (wgpu): triangulated regions, portal visibility with exact screen windows, original shade tables or true colour, true-3D freelook | matches the software renderer (parity test: 110 views over 9 levels, worst RMSE 0.03); default on desktop (`r_renderer`) |
 | HD texture packs (`tools/packbuilder`, `r_texpack`): 4x upscaled textures with normal maps, mipmaps, anisotropic filtering | texture coordinates verified unchanged (test: 4x copies render within RMSE 0.02 of the originals) |
+| First-person weapon on the GPU (screen-space quad: HD packs apply) | parity test unchanged (worst RMSE 0.033) |
+| Engine/game split: `GameModule` interface implemented by Exploding Lips and the BSP viewer; desktop `--bsp` runner | tested with LIPS00C.BSP, Hexen II demo1–3 and Quake E1M1 (when installed) |
 | Modern lighting (`r_lighting modern`, default with the GPU renderer): smooth light fitted to the original shade tables, coloured dynamic lights (shots, projectiles, explosions), HDR, 4x MSAA, bloom, soft/filmic tonemapping, exposure | 3440x1440 in ~0.8 ms GPU + 0.3 ms CPU per frame on an RX 9070 XT (`lipstool bench-gpu`) |
 | Movement & collision (walk/run/turn/jump/fall/step, see-through floors) | constants from the original; golden-tested against memory probes of `lips.exe` |
 | Script VM (`ONTAG`, tags, OS states with thresholds, `XM`/`XT`/`OTEXT`/`XCHANGE`/…) | complete for the shipped INIs, original quirks included |
@@ -33,6 +35,17 @@ the engine reads them from your install folder at runtime.
 | Console (`~`): config commands, Tab completion, history, scrollback, INI commands, `warp` | unit-tested |
 | Mods & packs (F10): pick a texture pack, toggle mod folders from `mods/` (applied on restart), `--mod DIR` | working |
 
+The engine is split into game-agnostic `engine-*` crates and game modules behind one interface
+(`engine_scene::module::GameModule`). Exploding Lips is the first module; the second is a
+**Quake-family BSP viewer** (Quake, Hexen II), the first step toward reviving more 90s–00s games:
+
+```sh
+cargo run --release -p lips-desktop -- --bsp "~/.local/share/Steam/steamapps/common/Hexen 2/data1/pak0.pak" demo1
+cargo run --release -p lips-desktop -- --bsp original/LIPS00C.BSP lips00c palette=original/PALETTE.PAL
+#   WASD/arrows fly, mouse look (click to capture), Space/Ctrl up/down, Shift faster, Esc releases/quits
+cargo run --release -p lipstool -- render-bsp <PAK|BSP> <MAP> out.png [WxH] [palette=FILE]
+```
+
 Reverse-engineering notes live in [`re/`](re/): file formats in `re/formats/`, engine behaviour
 in `re/engine/` (renderer, physics, script, movers, combat, HUD, object and world effects).
 Engine code is written from those specs, not from decompiler output.
@@ -45,6 +58,7 @@ crates/engine-scene   scene data for GPU renderers: sector outlines, triangulati
 crates/engine-audio   kira playback: positional sound, reverb send, buses, streamed MIDI, fallback SoundFont
 crates/engine-gpu     wgpu renderer: palette-indexed world pass, portal clip windows, HDR/bloom, HD packs, UI
 tools/packbuilder     build HD texture packs (Real-ESRGAN or scale2x, normal maps) from your own files
+crates/quake-bsp      Quake-family BSP v29 module: PAK, palette/colormap, textures, lightmaps, fly viewer
 crates/godd-formats   parsers for the data files (no platform dependencies)
 crates/godd-game      engine core: world, renderer, physics, scripts, effects, objects, UI
 crates/godd-net       netplay protocol, UDP/WebSocket server, client glue (feature "game")

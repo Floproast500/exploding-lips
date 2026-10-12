@@ -15,6 +15,7 @@ mod input;
 pub mod level;
 pub mod menus;
 pub mod mover;
+pub mod module;
 pub mod objects;
 pub mod options;
 pub mod player;
@@ -166,7 +167,7 @@ impl Game {
             epoch: 0,
             scene_cache: None,
             reverb_cache: ((u64::MAX, 0), 0.0),
-            light_fit: fit_light(&palette.rgb, &palette.colormaps[..SHADE_LEVELS.min(palette.colormaps.len())]),
+            light_fit: engine_scene::module::fit_light(&palette.rgb, &palette.colormaps[..SHADE_LEVELS.min(palette.colormaps.len())]),
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
                 text::nearest_color(&palette.rgb, [24, 24, 252]),
@@ -714,7 +715,7 @@ impl Game {
         let freelook = self.cvars.get_bool("r_freelook");
         scene::frame(&session.level.world, &self.scene_cache.as_ref().expect("scene cache").1, &cam, (tan_half_h, tan_half_v), freelook, &mut frame);
         frame.dirty_images = session.tvs.iter().map(|t| t.image as u32).collect();
-        draw_weapon(ui, session, &self.shade_rows);
+        weapon_quad(&mut frame, session, ui.width as f32 / ui.height.max(1) as f32);
         draw_overlays(ui, session);
         let c = &self.cvars;
         let modern = (c.get_str("r_lighting") == "modern").then(|| engine_scene::scene::Modern {
@@ -882,32 +883,6 @@ fn camera(session: &Session, physics: &PhysicsParams, alpha: f32, pending: (f32,
     }
 }
 
-/// Fit the modern lighting model to the palette: the linear brightness of each shade level
-/// (how much the shade tables darken colours on average) and the colours no level darkens.
-fn fit_light(palette: &[[u8; 3]; 256], rows: &[[u8; 256]]) -> ([f32; 16], [u32; 8]) {
-    let lin = |c: u8| {
-        let v = c as f32 / 255.0;
-        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
-    };
-    let lum = |i: u8| {
-        let [r, g, b] = palette[i as usize];
-        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-    };
-    let mut brightness = [0.0f32; 16];
-    let base: f32 = (0..=255u8).map(lum).sum::<f32>().max(1e-6);
-    for (level, b) in brightness.iter_mut().enumerate() {
-        *b = rows.get(level).map_or(0.0, |row| (0..256).map(|i| lum(row[i])).sum::<f32>() / base);
-    }
-    let mut emissive = [0u32; 8];
-    for i in 1..256usize {
-        let steady = !rows.is_empty() && rows.iter().all(|row| palette[row[i] as usize] == palette[i]);
-        if steady && lum(i as u8) > 0.05 {
-            emissive[i / 32] |= 1 << (i % 32);
-        }
-    }
-    (brightness, emissive)
-}
-
 /// Dynamic lights for the modern renderer: flying projectiles, explosions (fading out) and the
 /// player's muzzle flash.
 fn scene_lights(session: &Session, physics: &PhysicsParams) -> Vec<engine_scene::scene::SceneLight> {
@@ -1033,6 +1008,30 @@ fn draw_weapon(frame: &mut Frame, session: &Session, shade_rows: &[[u8; 256]]) {
             }
         }
     }
+}
+
+/// The first-person weapon as a screen-space quad for the GPU path (same placement as
+/// `draw_weapon`: centred, scaled with the screen height, bottom row 8 lines below the screen),
+/// so HD packs and modern lighting's colour handling apply to it.
+fn weapon_quad(out: &mut engine_scene::scene::SceneFrame, session: &Session, aspect: f32) {
+    use engine_scene::scene::{CLAMP, NO_DISTANCE, SCREEN, SceneVertex, TRANSPARENT};
+    let Some(pic) = session.objects.weapon_pic(&session.level) else { return };
+    let Some(image) = session.level.world.images.get(pic) else { return };
+    // In units of the 320x200 screen height: 2 NDC units = 200 rows.
+    let (w, h) = (image.width as f32 / CLASSIC_HEIGHT as f32 * 2.0 / aspect, image.height as f32 / CLASSIC_HEIGHT as f32 * 2.0);
+    let bottom = 1.0 - 208.0 / CLASSIC_HEIGHT as f32 * 2.0;
+    let corner = |x: f32, y: f32, u: f32, v: f32| SceneVertex {
+        pos: [x, y, 0.0],
+        uv: [u, v],
+        image: pic as u32,
+        light: 0.0,
+        flags: SCREEN | TRANSPARENT | CLAMP | NO_DISTANCE,
+        normal: [0.0, 0.0, 1.0],
+    };
+    let (iw, ih) = (image.width as f32, image.height as f32);
+    let start = out.vertices.len();
+    out.quad([corner(-w / 2.0, bottom, 0.0, ih), corner(w / 2.0, bottom, iw, ih), corner(w / 2.0, bottom + h, iw, 0.0), corner(-w / 2.0, bottom + h, 0.0, 0.0)]);
+    out.batch(start, None);
 }
 
 /// Scale an image to fit the frame (nearest neighbour), centred, honouring pixel aspect.

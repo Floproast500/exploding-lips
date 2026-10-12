@@ -7,3 +7,4 @@ version.workspace = true
 
 [dependencies]
 earcut = "0.4"
+engine-core.workspace = true

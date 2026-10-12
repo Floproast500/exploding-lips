@@ -243,3 +243,21 @@ pub fn bench_scene(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyRe
 pub fn hd_textures(game: &godd_game::Game, dir: &Path) -> AnyResult<Vec<Option<engine_scene::scene::HdTexture>>> {
     Ok(game.hd_textures(&engine_core::pack::LoadedPack::open(dir)?))
 }
+
+/// Render a game module's current view off screen (UI layer included); returns RGB.
+pub fn render_module(module: &mut dyn engine_scene::module::GameModule, (w, h): (usize, usize)) -> AnyResult<Vec<u8>> {
+    let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
+    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut ui = godd_game::Frame::new(w, h);
+    let view = module.view(&mut ui, 1.0).ok_or("nothing to show")?;
+    renderer.set_palette(&device, &queue, module.palette(), module.shade_rows());
+    renderer.set_images(&device, &queue, &module.images());
+    let coverage = ui.coverage.clone().unwrap_or_default();
+    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage)));
+    Ok(rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
+}
+
+/// A BSP viewer for `source` (see [`quake_bsp::viewer::open`]).
+pub fn bsp_viewer(source: &Path, map: &str, palette: Option<&Path>) -> AnyResult<quake_bsp::viewer::BspViewer> {
+    Ok(quake_bsp::viewer::open(source, map, palette)?)
+}
