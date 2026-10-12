@@ -8,7 +8,7 @@ cargo test --workspace --features godd-net/game,lips-desktop/sdl --quiet
 echo "== clippy"
 cargo clippy --workspace --all-targets --features godd-net/game,lips-desktop/sdl --quiet -- -D warnings
 echo "== release tools"
-cargo build --release --quiet -p lipstool -p lips-desktop
+cargo build --release --quiet -p lipstool -p lips-desktop --features lips-desktop/sdl
 if rustup target list --installed 2>/dev/null | grep -q x86_64-pc-windows-gnu && command -v x86_64-w64-mingw32-gcc >/dev/null; then
     echo "== windows cross-build"
     cargo build --release --quiet -p lips-desktop --target x86_64-pc-windows-gnu
