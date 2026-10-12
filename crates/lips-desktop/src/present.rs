@@ -62,6 +62,14 @@ impl Presenter {
         }
     }
 
+    /// Save the next presented frame to `path` (GPU presentation only).
+    pub fn request_screenshot(&mut self, path: std::path::PathBuf) {
+        match self {
+            Self::Gpu(p) => p.screenshot = Some(path),
+            Self::Cpu(_) => log::warn!("screenshots need the GPU presenter"),
+        }
+    }
+
     pub fn is_gpu(&self) -> bool {
         matches!(self, Self::Gpu(_))
     }
@@ -127,6 +135,8 @@ pub struct GpuPresenter {
     /// GPU world renderer, plus the level epoch and pack folder whose images it holds.
     world: Option<(engine_gpu::WorldRenderer, (u64, Option<std::path::PathBuf>))>,
     adapter: wgpu::Adapter,
+    /// Save the next presented frame here (PNG).
+    screenshot: Option<std::path::PathBuf>,
 }
 
 impl GpuPresenter {
@@ -153,7 +163,8 @@ impl GpuPresenter {
         let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
         let present_mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // Copyable when the surface allows it, for screenshots of exactly what is shown.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | (caps.usages & wgpu::TextureUsages::COPY_SRC),
             format,
             color_space: wgpu::SurfaceColorSpace::Auto,
             width: size.width.max(1),
@@ -164,7 +175,8 @@ impl GpuPresenter {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
-        Ok(Self { frames: engine_gpu::FramePresenter::new(&device, format), surface, device, queue, config, world: None, adapter })
+        log::info!("surface {:?} {}x{}", config.format, config.width, config.height);
+        Ok(Self { frames: engine_gpu::FramePresenter::new(&device, format), surface, device, queue, config, world: None, adapter, screenshot: None })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -194,7 +206,9 @@ impl GpuPresenter {
         let cpu = engine_gpu::CpuFrame { width: frame.width as u32, height: frame.height as u32, indices: &frame.pixels, rgb: frame.rgb.as_deref(), palette };
         let vp = engine_gpu::letterbox(self.config.width, self.config.height, frame.display_aspect());
         self.frames.present(&self.device, &self.queue, &mut encoder, &target, vp, &cpu);
+        let grab = self.grab(&mut encoder, &output.texture);
         self.queue.submit([encoder.finish()]);
+        self.save_grab(grab);
         self.queue.present(output);
     }
 
@@ -236,8 +250,72 @@ impl GpuPresenter {
             let list = ui.ui_list.as_deref().unwrap_or_default();
             world.draw_ui(device, queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage, list, game.cvars.get_bool("hud_smooth"));
         }
-        queue.submit([encoder.finish()]);
-        world.submitted();
-        queue.present(output);
+        let grab = self.grab(&mut encoder, &output.texture);
+        self.queue.submit([encoder.finish()]);
+        if let Some((world, _)) = &mut self.world {
+            world.submitted();
+        }
+        self.save_grab(grab);
+        self.queue.present(output);
+    }
+
+    /// When a screenshot is requested: copy the frame into a readback buffer.
+    fn grab(&mut self, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture) -> Option<(std::path::PathBuf, wgpu::Buffer, u32)> {
+        self.screenshot.as_ref()?;
+        if !self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) {
+            log::warn!("screenshots are not supported by this display surface");
+            self.screenshot = None;
+            return None;
+        }
+        let path = self.screenshot.take()?;
+        let (w, h) = (self.config.width, self.config.height);
+        let row = (w * 4).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screenshot"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        Some((path, buffer, row))
+    }
+
+    /// Wait for a grabbed frame and write it as a PNG.
+    fn save_grab(&self, grab: Option<(std::path::PathBuf, wgpu::Buffer, u32)>) {
+        let Some((path, buffer, row)) = grab else { return };
+        let (w, h) = (self.config.width as usize, self.config.height as usize);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let Ok(data) = buffer.slice(..).get_mapped_range() else { return };
+        let format = self.config.format;
+        let mut pixels = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for px in data[y * row as usize..][..w * 4].as_chunks::<4>().0 {
+                pixels.extend_from_slice(&match format {
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => [px[2], px[1], px[0], 255],
+                    // 10 bits per channel (HDR-capable compositors): keep the top 8.
+                    wgpu::TextureFormat::Rgb10a2Unorm => {
+                        let v = u32::from_le_bytes(*px);
+                        [(v >> 2) as u8, (v >> 12) as u8, (v >> 22) as u8, 255]
+                    }
+                    _ => [px[0], px[1], px[2], 255],
+                });
+            }
+        }
+        let image = engine_core::pack::Rgba { width: w, height: h, pixels };
+        let written = engine_core::pack::encode_png(&image).map_err(|e| e.to_string()).and_then(|png| {
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&path, png).map_err(|e| e.to_string())
+        });
+        match written {
+            Ok(()) => log::info!("screenshot {} ({w}x{h})", path.display()),
+            Err(e) => log::warn!("screenshot {}: {e}", path.display()),
+        }
     }
 }

@@ -133,7 +133,9 @@ rebinds any action to a key, mouse button, wheel direction or pad button and has
 - **Classic**: the original `keyboard.txt` (arrows, Alt+arrows strafe, Tab jump, Caps Lock crouch,
   W/X look, S centre, Ctrl use, F2 map).
 
-Both: Esc menu, `~` console, F6 quicksave, F7 quickload, F11 fullscreen, numpad `*`/`/` brightness.
+Both: Esc menu, `~` console, F6 quicksave, F7 quickload, F11 fullscreen, F12 screenshot (PNG in
+`screenshots/` beside your saves), numpad `*`/`/` brightness. `--set NAME VALUE` lasts for that
+run only; settings changed in game are saved.
 Options include always run, toggle crouch, mouse speed / vertical scale / invert, stick speed /
 invert, crosshair, HUD scale and volume. Gamepad: left stick move, right stick look, A jump/select,
 X/RT use, LT run, LB/RB or D-pad left/right switch tools, Start menu, Select options. Steam

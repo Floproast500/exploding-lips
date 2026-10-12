@@ -25,7 +25,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]...";
+const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]... [--screenshot-after SECONDS FILE.png] | --pad-test [SECONDS] | --bsp <PAK|BSP> <MAP>";
 
 /// Command-line options that are not cvars (cvar options are applied to the registry directly).
 struct Options {
@@ -39,6 +39,11 @@ struct Options {
     ws_port: Option<u16>,
     name: String,
     mods: Vec<PathBuf>,
+    /// `--screenshot-after SECONDS FILE`: save a screenshot after that long, then quit.
+    screenshot_after: Option<(f64, PathBuf)>,
+    /// Cvars set on the command line: (name, value before, value set). They last for this run
+    /// only; config.cfg keeps the earlier value unless the player changes it in game.
+    overrides: Vec<(String, String, String)>,
 }
 
 fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
@@ -51,10 +56,21 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
         port: godd_net::DEFAULT_PORT,
         ws_port: None,
         mods: Vec::new(),
+        screenshot_after: None,
+        overrides: Vec::new(),
         name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
     };
     let mut args = std::env::args().skip(1);
-    let mut set = |name: &str, value: &str| cvars.set(name, value);
+    let mut overrides = Vec::new();
+    let mut set = |name: &str, value: &str| {
+        let before = cvars.get_str(name);
+        cvars.set(name, value)?;
+        // The game folder is remembered on purpose (so later runs need no --data).
+        if name != "fs_data" {
+            overrides.push((name.to_string(), before, cvars.get_str(name)));
+        }
+        Ok::<(), String>(())
+    };
     while let Some(arg) = args.next() {
         let mut next = |what: &str| args.next().ok_or(format!("{arg} needs {what}"));
         match arg.as_str() {
@@ -77,6 +93,10 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
             }
             "--software" => opts.software = true,
             "--mute" => opts.mute = true,
+            "--screenshot-after" => {
+                let secs = next("seconds")?.parse().map_err(|_| "--screenshot-after needs seconds")?;
+                opts.screenshot_after = Some((secs, PathBuf::from(next("a .png file")?)));
+            }
             "--level" => opts.level = Some(next("a name like LIPS00")?),
             "--host" => opts.host = true,
             "--join" => opts.join = Some(next("host[:port]")?),
@@ -91,6 +111,7 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
+    opts.overrides = overrides;
     Ok(opts)
 }
 
@@ -113,6 +134,9 @@ struct App {
     /// HD texture pack (r_texpack).
     pack: Option<engine_core::pack::LoadedPack>,
     last: Instant,
+    started: Instant,
+    /// Screenshot requested by --screenshot-after (quit once it is saved).
+    auto_shot: bool,
     window: Option<Arc<Window>>,
     mouse_captured: bool,
     presenter: Option<present::Presenter>,
@@ -131,6 +155,19 @@ impl App {
 
     fn redraw(&mut self) {
         let now = Instant::now();
+        // Automated screenshot: request it once the time has passed; quit on the next frame
+        // (saving settings as a normal quit does; command-line overrides are not kept).
+        if let Some((secs, path)) = &self.opts.screenshot_after
+            && (now - self.started).as_secs_f64() >= *secs
+            && let Some(p) = &mut self.presenter
+        {
+            if self.auto_shot {
+                self.save_settings();
+                std::process::exit(0);
+            }
+            p.request_screenshot(path.clone());
+            self.auto_shot = true;
+        }
         let elapsed = (now - self.last).as_secs_f64();
         #[cfg(feature = "sdl")]
         if let Some(pads) = &mut self.sdl_pads {
@@ -244,6 +281,14 @@ impl App {
     fn key(&mut self, event: &KeyEvent) {
         let PhysicalKey::Code(code) = event.physical_key else { return };
         let down = event.state == ElementState::Pressed;
+        if code == KeyCode::F12 && down && !event.repeat {
+            let dir = self.save_path.as_ref().and_then(|f| f.parent()).map_or_else(|| PathBuf::from("screenshots"), |d| d.join("screenshots"));
+            let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            if let Some(p) = &mut self.presenter {
+                p.request_screenshot(dir.join(format!("lips-{stamp}.png")));
+            }
+            return;
+        }
         if code == KeyCode::F11 && down && !event.repeat {
             let on = !self.game.cvars.get_bool("vid_fullscreen");
             self.game.cvars.set_bool("vid_fullscreen", on);
@@ -263,6 +308,21 @@ impl App {
     }
 
     fn save_settings(&mut self) {
+        // Command-line overrides still in effect are written with their earlier values.
+        let mut restore = Vec::new();
+        for (name, before, set) in &self.opts.overrides {
+            if self.game.cvars.get_str(name) == *set {
+                restore.push((name.clone(), set.clone()));
+                let _ = self.game.cvars.set(name, before);
+            }
+        }
+        self.write_settings();
+        for (name, value) in restore {
+            let _ = self.game.cvars.set(&name, &value);
+        }
+    }
+
+    fn write_settings(&mut self) {
         let data = self.game.cvars.get_str("fs_data");
         if let Ok(abs) = std::fs::canonicalize(&data) {
             let _ = self.game.cvars.set("fs_data", &abs.display().to_string());
@@ -494,6 +554,8 @@ fn main() {
         ui: Frame::new(640, 480),
         pack: None,
         last: Instant::now(),
+        started: Instant::now(),
+        auto_shot: false,
         window: None,
         mouse_captured: false,
         presenter: None,
