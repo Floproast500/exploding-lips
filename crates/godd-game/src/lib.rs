@@ -92,6 +92,8 @@ pub struct Game {
     epoch: u64,
     /// Triangulated regions of the current level, for the GPU scene.
     scene_cache: Option<(u64, Vec<scene::RegionMesh>)>,
+    /// Modern lighting fitted from the palette: brightness per shade level, emissive colours.
+    light_fit: ([f32; 16], [u32; 8]),
     ui_colors: (u8, u8, u8, u8),
     fps: FpsCounter,
     /// Ticks since the game was created (the original HUD clock is time since launch).
@@ -161,6 +163,7 @@ impl Game {
             pending_look: (0.0, 0.0),
             epoch: 0,
             scene_cache: None,
+            light_fit: fit_light(&palette.rgb, &palette.colormaps[..SHADE_LEVELS.min(palette.colormaps.len())]),
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
                 text::nearest_color(&palette.rgb, [24, 24, 252]),
@@ -605,6 +608,19 @@ impl Game {
         frame.dirty_images = session.tvs.iter().map(|t| t.image as u32).collect();
         draw_weapon(ui, session, &self.shade_rows);
         draw_overlays(ui, session);
+        let c = &self.cvars;
+        let modern = (c.get_str("r_lighting") == "modern").then(|| engine_scene::scene::Modern {
+            brightness: self.light_fit.0,
+            emissive: self.light_fit.1,
+            dynamic_lights: c.get_bool("r_dynlights"),
+            bloom: c.get_bool("r_bloom"),
+            tonemap: c.get_int("r_tonemap") as u32,
+            exposure: c.get_float("r_exposure") as f32,
+            msaa: if c.get_int("r_msaa") > 0 { 4 } else { 1 },
+        });
+        if modern.is_some_and(|m| m.dynamic_lights) {
+            frame.lights = scene_lights(session, &self.physics);
+        }
         let s = &self.settings;
         let view = GpuView {
             camera: engine_scene::scene::SceneCamera { pos: [cam.x, cam.y, cam.z], angle: cam.angle, pitch: cam.pitch, vfov_degrees: s.vfov_degrees, freelook },
@@ -615,12 +631,22 @@ impl Game {
                 fullbright: s.fullbright,
                 max_object_shade: 14.0,
                 zero_substitute: 8,
+                modern,
             },
             scene: frame,
             epoch,
         };
         self.render_ui(ui);
         Some(view)
+    }
+
+    /// Size of the UI layer for a `width`x`height` GPU view: the UI is pixel art drawn at a whole
+    /// scale (HUD scale option, or the largest that fits), so the layer is drawn at 1/scale and
+    /// the GPU enlarges it.
+    pub fn ui_layer_size(&self, width: usize, height: usize) -> (usize, usize) {
+        let fit = (height / CLASSIC_HEIGHT).max(1);
+        let s = if self.options.hud_scale > 0 { self.options.hud_scale.min(fit) } else { fit };
+        (width.div_ceil(s), height.div_ceil(s))
     }
 
     /// The current level's images (for GPU upload when [`GpuView::epoch`] changes).
@@ -690,6 +716,60 @@ fn camera(session: &Session, physics: &PhysicsParams, alpha: f32, pending: (f32,
         pitch: PhysicsParams::look_to_pitch(look),
         region: q.region,
     }
+}
+
+/// Fit the modern lighting model to the palette: the linear brightness of each shade level
+/// (how much the shade tables darken colours on average) and the colours no level darkens.
+fn fit_light(palette: &[[u8; 3]; 256], rows: &[[u8; 256]]) -> ([f32; 16], [u32; 8]) {
+    let lin = |c: u8| {
+        let v = c as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    let lum = |i: u8| {
+        let [r, g, b] = palette[i as usize];
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    };
+    let mut brightness = [0.0f32; 16];
+    let base: f32 = (0..=255u8).map(lum).sum::<f32>().max(1e-6);
+    for (level, b) in brightness.iter_mut().enumerate() {
+        *b = rows.get(level).map_or(0.0, |row| (0..256).map(|i| lum(row[i])).sum::<f32>() / base);
+    }
+    let mut emissive = [0u32; 8];
+    for i in 1..256usize {
+        let steady = !rows.is_empty() && rows.iter().all(|row| palette[row[i] as usize] == palette[i]);
+        if steady && lum(i as u8) > 0.05 {
+            emissive[i / 32] |= 1 << (i % 32);
+        }
+    }
+    (brightness, emissive)
+}
+
+/// Dynamic lights for the modern renderer: flying projectiles, explosions (fading out) and the
+/// player's muzzle flash.
+fn scene_lights(session: &Session, physics: &PhysicsParams) -> Vec<engine_scene::scene::SceneLight> {
+    use engine_scene::scene::SceneLight;
+    use objects::Kind;
+    let mut lights = Vec::new();
+    for o in session.objects.list.iter().filter(|o| !o.destroyed && o.region.is_some()) {
+        let mid = [o.x, o.y, o.z + o.height / 2.0];
+        match o.kind {
+            Kind::Projectile { flying: true, .. } => lights.push(SceneLight { pos: mid, radius: 160.0, color: [1.6, 1.1, 0.6] }),
+            Kind::Explosion { life, .. } => {
+                let k = (life / 0.25).clamp(0.35, 1.0);
+                lights.push(SceneLight { pos: mid, radius: 320.0, color: [4.0 * k, 2.2 * k, 0.8 * k] });
+            }
+            _ => {}
+        }
+    }
+    let flash = session.objects.muzzle_flash;
+    if flash > 0.0 {
+        let p = &session.player;
+        let k = flash / 0.07;
+        let (sin, cos) = p.angle.sin_cos();
+        lights.push(SceneLight { pos: [p.x + cos * 24.0, p.y + sin * 24.0, p.eye_z(physics) - 8.0], radius: 300.0, color: [3.0 * k, 2.4 * k, 1.4 * k] });
+    }
+    lights.truncate(64);
+    lights
 }
 
 /// Crosshair styles: 1 dot, 2 cross, 3 circle.

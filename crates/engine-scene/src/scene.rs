@@ -29,6 +29,8 @@ pub struct SceneVertex {
     /// Base shade level (darkness, 0 = brightest) before distance.
     pub light: f32,
     pub flags: u32,
+    /// Surface normal (unit, world space) for dynamic lights.
+    pub normal: [f32; 3],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,6 +59,35 @@ pub struct Shading {
     pub max_object_shade: f32,
     /// Shade-table entry substituted when a lookup yields colour 0 (the original uses 8).
     pub zero_substitute: u32,
+    /// Modern lighting: linear HDR light from [`Shading::brightness`], emissive colours,
+    /// dynamic lights, bloom and tonemapping. Off: the original shade tables (or true colour).
+    pub modern: Option<Modern>,
+}
+
+/// Settings of the modern lighting model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Modern {
+    /// Brightness (linear, 1 = full) of each original shade level, fitted from the shade tables;
+    /// interpolated for continuous shade values.
+    pub brightness: [f32; 16],
+    /// Palette indices that never darken (lamps, lava): bit i of word i/32.
+    pub emissive: [u32; 8],
+    pub dynamic_lights: bool,
+    pub bloom: bool,
+    /// 0 clamp, 1 soft shoulder (keeps the original's colours), 2 ACES filmic.
+    pub tonemap: u32,
+    pub exposure: f32,
+    /// Multisampling (1, 2, 4 or 8).
+    pub msaa: u32,
+}
+
+/// A coloured point light (projectiles, explosions, muzzle flashes).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneLight {
+    pub pos: [f32; 3],
+    pub radius: f32,
+    /// Linear colour times intensity.
+    pub color: [f32; 3],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,6 +117,7 @@ pub struct SceneFrame {
     pub sky: Option<u32>,
     /// Images whose pixels changed since the last frame (live camera views).
     pub dirty_images: Vec<u32>,
+    pub lights: Vec<SceneLight>,
 }
 
 impl SceneFrame {

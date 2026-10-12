@@ -16,6 +16,9 @@ use std::f32::consts::TAU;
 /// Original logic frames per second.
 const FRAME_RATE: f32 = 30.0;
 const ANGLE_UNITS: f32 = 2048.0;
+/// How long a shot lights the scene (modern lighting only).
+const MUZZLE_FLASH_SECONDS: f32 = 0.07;
+
 /// Bump cooldown for bots/things: 20 animation units of 12 ms.
 const BUMP_COOLDOWN: f32 = 0.24;
 /// Movers farther than this from the player (and not in its region) sleep.
@@ -402,6 +405,8 @@ pub struct Objects {
     pub sound_lengths: HashMap<String, f32>,
     /// Shown OTEXOVER overlays (object indices).
     overlays_on: Vec<usize>,
+    /// Seconds left of the player's muzzle flash (a light for modern renderers).
+    pub muzzle_flash: f32,
 }
 
 impl Objects {
@@ -468,6 +473,7 @@ impl Objects {
                 .collect(),
             sound_lengths: HashMap::new(),
             overlays_on: Vec::new(),
+            muzzle_flash: 0.0,
         };
         // Links stored by the editor: leaders/path holders (+0x198), paths (+0x110), and the
         // regions carried by RMOVE carriers (region +0xfc).
@@ -1415,6 +1421,7 @@ impl Objects {
     fn fire_player_projectile(&mut self, player: &PlayerView) {
         let t = self.tools.current;
         let Some(def) = self.tools.projectiles[t].clone() else { return };
+        self.muzzle_flash = MUZZLE_FLASH_SECONDS;
         let mut p = Obj::blank();
         p.name = "_PPROJ_".into();
         let dist = player.radius + 4.0;
@@ -1553,6 +1560,7 @@ impl Objects {
     /// the weapon animation, releasing the shot at the sequence entry marked 99.
     fn tool_frame(&mut self, level: &Level, player: &PlayerView, _now: f64) {
         let frame_dt = 1.0 / FRAME_RATE;
+        self.muzzle_flash = (self.muzzle_flash - frame_dt).max(0.0);
         self.tools.cooldown = (self.tools.cooldown - frame_dt).max(0.0);
         let mut release = false;
         if let Some((tex, anim)) = &mut self.tools.anim

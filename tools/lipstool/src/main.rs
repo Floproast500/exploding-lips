@@ -12,6 +12,9 @@
 //!   lipstool dump-mesh <GAME_DIR> <LEVEL> <OUT.obj>  triangulated floors, ceilings and walls
 //!   lipstool render-gpu <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units] [truecolor]
 //!                                                  the same view through the GPU renderer
+//!                                                  (extra words: look, shear, modern, boom)
+//!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern]
+//!                                                  GPU frame time
 
 use godd_formats::xrb::{Orb, RecordExt, Section};
 use godd_formats::{pal::Palette, pic::Pic};
@@ -34,6 +37,12 @@ fn main() -> AnyResult {
             save_rgb(Path::new(out), w, h, &rgb)
         }
         ["dump-mesh", dir, level, out] => dump_mesh(Path::new(dir), level, Path::new(out)),
+        ["bench-gpu", dir, level, rest @ ..] => {
+            let ms = lipstool::bench_gpu(Path::new(dir), level, rest, 200)?;
+            let cpu = lipstool::bench_scene(Path::new(dir), level, rest, 200)?;
+            println!("{level} {rest:?}: GPU {ms:.2} ms, CPU scene {cpu:.2} ms per frame");
+            Ok(())
+        }
         ["render-gpu", dir, level, out, rest @ ..] => {
             let (w, h, rgb) = render_gpu(Path::new(dir), level, rest)?;
             save_rgb(Path::new(out), w, h, &rgb)

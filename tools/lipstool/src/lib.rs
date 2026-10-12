@@ -58,6 +58,16 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
     if rest.contains(&"shear") {
         game.cvars.set_bool("r_freelook", false);
     }
+    // "boom": an explosion 160 units ahead (to see dynamic lights).
+    if rest.contains(&"boom")
+        && let Some(s) = game.session_mut() {
+            let p = s.player;
+            let (x, y) = (p.x + p.angle.cos() * 160.0, p.y + p.angle.sin() * 160.0);
+            let region = s.level.world.region_at(x, y);
+            s.objects.spawn_explosion((x, y, p.z + 8.0), 32.0, 48.0, 0.5, region);
+        }
+    // GPU renders use the original lighting (parity with `render`) unless asked for "modern".
+    let _ = game.cvars.set("r_lighting", if rest.contains(&"modern") { "modern" } else { "classic" });
     Ok((vfs, game, w, h))
 }
 
@@ -66,7 +76,8 @@ pub fn render_gpu(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(usize, u
     let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
     let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
     let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
-    let mut ui = godd_game::Frame::new(w, h);
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
     // Repeat so the HUD's rolling counters reach their values, as `render` does.
     let mut view = None;
     for _ in 0..150 {
@@ -76,7 +87,7 @@ pub fn render_gpu(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(usize, u
     renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
     renderer.set_images(&device, &queue, &game.world_images());
     let coverage = ui.coverage.clone().unwrap_or_default();
-    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some((&ui.pixels, &coverage)));
+    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage)));
     Ok((w, h, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()))
 }
 
@@ -143,4 +154,61 @@ pub fn viewpoints(dir: &Path, level: &str, n: usize) -> AnyResult<Vec<usize>> {
     let step = (good.len() / n.max(1)).max(1);
     good = good.into_iter().step_by(step).take(n).collect();
     Ok(good)
+}
+
+/// Average GPU frame time (milliseconds) of the view at `size`, rendering `frames` frames into
+/// an off-screen target (each frame waits for the GPU, so this includes the whole pipeline).
+pub fn bench_gpu(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyResult<f64> {
+    let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
+    let (device, queue) = engine_gpu::headless().ok_or("no GPU adapter")?;
+    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
+    let view = game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
+    renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
+    renderer.set_images(&device, &queue, &game.world_images());
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("bench"),
+        size: wgpu::Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let target = target.create_view(&Default::default());
+    let coverage = ui.coverage.clone().unwrap_or_default();
+    let vp = [0.0, 0.0, w as f32, h as f32];
+    let frame = |renderer: &mut engine_gpu::WorldRenderer| {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(&device, &queue, &mut encoder, &target, (w as u32, h as u32), vp, &view.camera, &view.shading, &view.scene);
+        renderer.draw_ui(&device, &queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, &coverage);
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    };
+    for _ in 0..10 {
+        frame(&mut renderer); // warm up (pipelines, targets)
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..frames {
+        frame(&mut renderer);
+    }
+    Ok(start.elapsed().as_secs_f64() * 1000.0 / frames as f64)
+}
+
+/// Average CPU time (milliseconds) of building one GPU frame: portal walk, scene vertices, the
+/// UI layer (weapon, HUD) and live camera views.
+pub fn bench_scene(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyResult<f64> {
+    let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
+    for _ in 0..5 {
+        game.gpu_frame(&mut ui, 1.0);
+    }
+    let start = std::time::Instant::now();
+    for _ in 0..frames {
+        game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
+    }
+    Ok(start.elapsed().as_secs_f64() * 1000.0 / frames as f64)
 }

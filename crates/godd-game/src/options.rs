@@ -16,6 +16,12 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.bool("r_classic", "Classic 320x200", Video, false);
     c.choice("r_renderer", "Renderer", Video, &["software", "gpu"], 1);
     c.bool("r_freelook", "True 3D look (GPU)", Video, true);
+    c.choice("r_lighting", "Lighting (GPU)", Video, &["classic", "modern"], 1);
+    c.bool("r_dynlights", "Dynamic lights", Video, true);
+    c.bool("r_bloom", "Bloom", Video, true);
+    c.choice("r_msaa", "Anti-aliasing", Video, &["off", "4x"], 1);
+    c.choice("r_tonemap", "Tonemapping", Video, &["clamp", "soft", "filmic"], 1);
+    c.float("r_exposure", "Exposure", Video, (0.25, 4.0, 0.05), 1.0);
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);

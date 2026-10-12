@@ -357,7 +357,9 @@ impl GpuPresenter {
         };
         let target = output.texture.create_view(&Default::default());
         let size = (self.config.width, self.config.height);
-        let (x, y, w, h) = letterbox(size.0, size.1, ui.display_aspect());
+        // The UI layer may be smaller than the surface (drawn at 1/scale): the view fills the
+        // surface; letterbox only for the aspect the UI layer was laid out for.
+        let (x, y, w, h) = letterbox(size.0, size.1, size.0 as f32 / size.1.max(1) as f32);
         let vp = [x, y, w, h];
         let mut encoder = self.device.create_command_encoder(&Default::default());
         world.render(&self.device, &self.queue, &mut encoder, &target, size, vp, &view.camera, &view.shading, &view.scene);

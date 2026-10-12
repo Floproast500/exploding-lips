@@ -174,7 +174,8 @@ impl App {
         // renderer for classic 320x200, the title screen and CPU presentation.
         let want_gpu = self.game.cvars.get_str("r_renderer") == "gpu" && self.presenter.as_ref().is_some_and(present::Presenter::is_gpu);
         if want_gpu {
-            self.ui.resize(w, h);
+            let (uw, uh) = self.game.ui_layer_size(w, h);
+            self.ui.resize(uw, uh);
             self.ui.pixel_aspect = 1.0;
             if let Some(view) = self.game.gpu_frame(&mut self.ui, self.clock.alpha())
                 && let Some(p) = &mut self.presenter

@@ -176,7 +176,7 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
         let reg = &world.regions[r];
         // Floor and ceiling.
         let base = if reg.fullbright { NO_DISTANCE } else { 0 };
-        for (z, surface, light, link) in [(reg.floor, reg.floor_surface, reg.floor_light, reg.below), (reg.ceiling, reg.ceiling_surface, reg.ceiling_light, reg.above)] {
+        for (z, surface, light, link, up) in [(reg.floor, reg.floor_surface, reg.floor_light, reg.below, 1.0), (reg.ceiling, reg.ceiling_surface, reg.ceiling_light, reg.above, -1.0)] {
             if link.is_some() {
                 continue; // see-through into the stacked region
             }
@@ -191,6 +191,7 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
                             image: img,
                             light: light as f32,
                             flags: base,
+                            normal: [0.0, 0.0, up],
                         },
                         None => SceneVertex { pos: [x, y, z], image: NO_IMAGE, flags: SKY, ..Default::default() },
                     });
@@ -202,6 +203,9 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
             let wall = &world.walls[w];
             let ((ax, ay), (bx, by)) = (world.vertices[wall.a], world.vertices[wall.b]);
             let len = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+            // Facing into this region (the front region lies right of a→b).
+            let side = if wall.front == r { 1.0 } else { -1.0 } / len.max(1e-6);
+            let normal = [(by - ay) * side, -(bx - ax) * side, 0.0];
             let section = |out: &mut SceneFrame, surface: Option<Surface>, (z0, z1): (f32, f32), anchor: f32, flags: u32| {
                 if z1 <= z0 {
                     return;
@@ -217,6 +221,7 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
                             image: img,
                             light: wall.light as f32,
                             flags: flags | distance,
+                            normal,
                         }));
                     }
                     None => out.quad(corners.map(|(x, y, _, z)| SceneVertex {
@@ -294,6 +299,7 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
             image: img as u32,
             light: light as f32,
             flags,
+            normal: [-cos, -sin, 0.0],
         };
         out.quad([corner(-1.0, false, u0), corner(1.0, false, u1), corner(1.0, true, u1), corner(-1.0, true, u0)]);
     }

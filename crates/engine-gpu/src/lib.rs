@@ -5,6 +5,13 @@
 
 use engine_scene::scene::{IndexedImage, SceneCamera, SceneFrame, Shading};
 
+mod post;
+use post::Post;
+
+/// HDR format for modern lighting.
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const MAX_LIGHTS: usize = 64;
+
 /// Atlas layer size (the WebGL2 minimum for 2D textures).
 const LAYER: u32 = 2048;
 const NEAR: f32 = 4.0;
@@ -39,6 +46,7 @@ struct GpuVertex {
     rect: [u16; 4],
     layer_flags: [u32; 2],
     light: f32,
+    normal: [f32; 3],
 }
 
 #[repr(C)]
@@ -53,6 +61,9 @@ struct Uniforms {
     sky_rect: [u32; 4],
     sky_layer: [u32; 4],
     look: [f32; 4],
+    modern: [f32; 4],
+    brightness: [[f32; 4]; 4],
+    emissive: [[u32; 4]; 2],
 }
 
 /// Where an image lives in the atlas.
@@ -92,8 +103,15 @@ fn pack(sizes: &[(usize, usize)]) -> (Vec<Slot>, u32) {
 }
 
 pub struct WorldRenderer {
-    pipeline: wgpu::RenderPipeline,
+    shader: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
+    /// World pipelines per (target format, sample count).
+    pipelines: Vec<(wgpu::TextureFormat, u32, wgpu::RenderPipeline)>,
+    /// Presentation format (classic lighting draws straight into it).
+    format: wgpu::TextureFormat,
     layout: wgpu::BindGroupLayout,
+    lights: wgpu::Buffer,
+    post: Post,
     clip_layout: wgpu::BindGroupLayout,
     /// Per-batch clip windows (256-byte blocks bound with a dynamic offset).
     clips: Option<(wgpu::Buffer, wgpu::BindGroup, u64)>,
@@ -104,6 +122,7 @@ pub struct WorldRenderer {
     slots: Vec<Slot>,
     bind_group: Option<wgpu::BindGroup>,
     depth: Option<(wgpu::TextureView, u32, u32)>,
+    depth_samples: u32,
     vertices: Option<(wgpu::Buffer, u64)>,
     staging: Vec<GpuVertex>,
     ui: UiOverlay,
@@ -130,6 +149,12 @@ impl WorldRenderer {
                 tex(1, wgpu::TextureSampleType::Uint, wgpu::TextureViewDimension::D2Array),
                 tex(2, wgpu::TextureSampleType::Float { filterable: false }, wgpu::TextureViewDimension::D2),
                 tex(3, wgpu::TextureSampleType::Uint, wgpu::TextureViewDimension::D2),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
             ],
         });
         let clip_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -150,12 +175,53 @@ impl WorldRenderer {
             bind_group_layouts: &[Some(&layout), Some(&clip_layout)],
             ..Default::default()
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint16x4, 3 => Uint32x2, 4 => Float32];
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("world-uniforms"),
+            size: std::mem::size_of::<Uniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let lights = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("world-lights"),
+            size: (MAX_LIGHTS * 32) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let palette = texture(device, "palette", 256, 1, 1, wgpu::TextureFormat::Rgba8Unorm);
+        Self {
+            shader,
+            pipeline_layout,
+            pipelines: Vec::new(),
+            format,
+            layout,
+            lights,
+            post: Post::new(device, format),
+            clip_layout,
+            clips: None,
+            uniforms,
+            ui: UiOverlay::new(device, format, &palette),
+            palette,
+            colormap: None,
+            atlas: None,
+            slots: Vec::new(),
+            bind_group: None,
+            depth: None,
+            depth_samples: 1,
+            vertices: None,
+            staging: Vec::new(),
+        }
+    }
+
+    fn pipeline(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32) -> usize {
+        if let Some(i) = self.pipelines.iter().position(|(f, n, _)| *f == format && *n == samples) {
+            return i;
+        }
+        let attributes = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Uint16x4, 3 => Uint32x2, 4 => Float32, 5 => Float32x3];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("world"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&self.pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("vs_main"),
                 buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<GpuVertex>() as u64,
@@ -165,7 +231,7 @@ impl WorldRenderer {
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &self.shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(format.into())],
                 compilation_options: Default::default(),
@@ -178,33 +244,12 @@ impl WorldRenderer {
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
             multiview_mask: None,
             cache: None,
         });
-        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("world-uniforms"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let palette = texture(device, "palette", 256, 1, 1, wgpu::TextureFormat::Rgba8Unorm);
-        Self {
-            pipeline,
-            layout,
-            clip_layout,
-            clips: None,
-            uniforms,
-            ui: UiOverlay::new(device, format, &palette),
-            palette,
-            colormap: None,
-            atlas: None,
-            slots: Vec::new(),
-            bind_group: None,
-            depth: None,
-            vertices: None,
-            staging: Vec::new(),
-        }
+        self.pipelines.push((format, samples, pipeline));
+        self.pipelines.len() - 1
     }
 
     /// Palette (RGB) and shade tables (`rows[level][index]`, level 0 brightest).
@@ -261,6 +306,8 @@ impl WorldRenderer {
         shading: &Shading,
         scene: &SceneFrame,
     ) {
+        let original_viewport = viewport;
+        let pipeline = self.pipeline(device, if shading.modern.is_some() { HDR_FORMAT } else { self.format }, shading.modern.map_or(1, |m| m.msaa.clamp(1, 8)));
         let (Some(atlas), Some((colormap, levels))) = (&self.atlas, &self.colormap) else { return };
         if self.bind_group.is_none() {
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
@@ -278,22 +325,36 @@ impl WorldRenderer {
                     },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&view(&self.palette)) },
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view(colormap)) },
+                    wgpu::BindGroupEntry { binding: 4, resource: self.lights.as_entire_binding() },
                 ],
             }));
         }
-        if self.depth.as_ref().is_none_or(|(_, w, h)| (*w, *h) != target_size) {
+        // Modern lighting renders into an HDR image the size of the viewport, then post-
+        // processes into the target; classic lighting draws straight into the target.
+        let modern = shading.modern;
+        let samples = modern.map_or(1, |m| m.msaa.clamp(1, 8));
+        let (draw_size, draw_vp) = match modern {
+            Some(_) => {
+                let size = (viewport[2].round().max(1.0) as u32, viewport[3].round().max(1.0) as u32);
+                (size, [0.0, 0.0, size.0 as f32, size.1 as f32])
+            }
+            None => (target_size, viewport),
+        };
+        if self.depth.as_ref().is_none_or(|(_, w, h)| (*w, *h) != draw_size) || self.depth_samples != samples {
             let depth = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("depth"),
-                size: wgpu::Extent3d { width: target_size.0, height: target_size.1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: draw_size.0, height: draw_size.1, depth_or_array_layers: 1 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
                 format: DEPTH_FORMAT,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
-            self.depth = Some((depth.create_view(&Default::default()), target_size.0, target_size.1));
+            self.depth = Some((depth.create_view(&Default::default()), draw_size.0, draw_size.1));
+            self.depth_samples = samples;
         }
+        let viewport = draw_vp;
         // Uniforms: the software renderer's projection (focal from the vertical FOV, Hor+).
         let [_, _, vw, vh] = viewport;
         let focal = vh / 2.0 / (camera.vfov_degrees.to_radians() / 2.0).tan();
@@ -312,13 +373,31 @@ impl WorldRenderer {
                 let a = camera.pitch.atan();
                 [camera.freelook as u32 as f32, a.sin(), a.cos(), 0.0]
             },
+            modern: [
+                modern.is_some() as u32 as f32,
+                modern.is_some_and(|m| m.dynamic_lights) as u32 as f32,
+                scene.lights.len().min(MAX_LIGHTS) as f32,
+                0.0,
+            ],
+            brightness: {
+                let b = modern.map_or([0.0; 16], |m| m.brightness);
+                [[b[0], b[1], b[2], b[3]], [b[4], b[5], b[6], b[7]], [b[8], b[9], b[10], b[11]], [b[12], b[13], b[14], b[15]]]
+            },
+            emissive: {
+                let e = modern.map_or([0; 8], |m| m.emissive);
+                [[e[0], e[1], e[2], e[3]], [e[4], e[5], e[6], e[7]]]
+            },
         };
+        if !scene.lights.is_empty() {
+            let data: Vec<f32> = scene.lights.iter().take(MAX_LIGHTS).flat_map(|l| [l.pos[0], l.pos[1], l.pos[2], l.radius, l.color[0], l.color[1], l.color[2], 0.0]).collect();
+            queue.write_buffer(&self.lights, 0, bytemuck::cast_slice(&data));
+        }
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         // Vertices with their images' atlas slots.
         self.staging.clear();
         self.staging.extend(scene.vertices.iter().map(|v| {
             let s = self.slots.get(v.image as usize).copied().unwrap_or(Slot { w: 1, h: 1, ..Default::default() });
-            GpuVertex { pos: v.pos, uv: v.uv, rect: [s.x, s.y, s.w, s.h], layer_flags: [s.layer, v.flags], light: v.light }
+            GpuVertex { pos: v.pos, uv: v.uv, rect: [s.x, s.y, s.w, s.h], layer_flags: [s.layer, v.flags], light: v.light, normal: v.normal }
         }));
         let bytes = bytemuck::cast_slice::<GpuVertex, u8>(&self.staging);
         if self.vertices.as_ref().is_none_or(|(_, cap)| *cap < bytes.len() as u64) {
@@ -362,12 +441,19 @@ impl WorldRenderer {
             scene.batches.iter().flat_map(|b| clip_block(b.clip.as_ref(), slack)).collect()
         };
         queue.write_buffer(&self.clips.as_ref().expect("clips").0, 0, &data);
+        if modern.is_some() {
+            self.post.prepare(device, draw_size, samples);
+        }
+        let (color, resolve) = match modern {
+            Some(_) => self.post.world_targets(),
+            None => (target, None),
+        };
         let (depth, ..) = self.depth.as_ref().expect("depth");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("world"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                resolve_target: None,
+                view: color,
+                resolve_target: resolve,
                 depth_slice: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
             })],
@@ -380,7 +466,7 @@ impl WorldRenderer {
         });
         let [x, y, w, h] = viewport;
         pass.set_viewport(x, y, w, h, 0.0, 1.0);
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.pipelines[pipeline].2);
         pass.set_bind_group(0, self.bind_group.as_ref(), &[]);
         pass.set_vertex_buffer(0, buffer.slice(..bytes.len().max(1) as u64));
         let clip_bind = self.clips.as_ref().map(|(_, b, _)| b).expect("clip buffer");
@@ -388,7 +474,7 @@ impl WorldRenderer {
             pass.set_bind_group(1, clip_bind, &[0]);
             pass.draw(0..self.staging.len() as u32, 0..1);
         }
-        let (tw, th) = target_size;
+        let (tw, th) = draw_size;
         for (i, b) in scene.batches.iter().enumerate() {
             // Scissor to the window's bounding box; the shader clips to the polygon.
             let (mut sx0, mut sy0, mut sx1, mut sy1) = (x, y, x + w, y + h);
@@ -408,6 +494,10 @@ impl WorldRenderer {
             pass.set_scissor_rect(ax, ay, zx - ax, zy - ay);
             pass.set_bind_group(1, clip_bind, &[(i as u64 * CLIP_BLOCK) as u32]);
             pass.draw(b.start..b.end.min(self.staging.len() as u32), 0..1);
+        }
+        drop(pass);
+        if let Some(m) = modern {
+            self.post.run(device, queue, encoder, target, target_size, original_viewport, &m);
         }
     }
 
@@ -522,6 +612,10 @@ impl UiOverlay {
     }
 }
 
+fn write_uniform<T: bytemuck::Pod>(queue: &wgpu::Queue, buffer: &wgpu::Buffer, value: &T) {
+    queue.write_buffer(buffer, 0, bytemuck::bytes_of(value));
+}
+
 fn texture(device: &wgpu::Device, label: &str, width: u32, height: u32, layers: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -562,6 +656,9 @@ pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
     .ok()
 }
 
+/// A CPU-drawn UI layer: size, palette indices and coverage.
+pub type UiLayer<'a> = ((usize, usize), &'a [u8], &'a [u8]);
+
 /// Render a scene off screen and read it back as RGBA8 (`width * height * 4` bytes).
 #[allow(clippy::too_many_arguments)]
 pub fn render_offscreen(
@@ -572,7 +669,7 @@ pub fn render_offscreen(
     camera: &SceneCamera,
     shading: &Shading,
     scene: &SceneFrame,
-    ui: Option<(&[u8], &[u8])>,
+    ui: Option<UiLayer>,
 ) -> Vec<u8> {
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
@@ -588,8 +685,8 @@ pub fn render_offscreen(
     let mut encoder = device.create_command_encoder(&Default::default());
     let vp = [0.0, 0.0, width as f32, height as f32];
     renderer.render(device, queue, &mut encoder, &view, (width, height), vp, camera, shading, scene);
-    if let Some((indices, coverage)) = ui {
-        renderer.draw_ui(device, queue, &mut encoder, &view, vp, (width as usize, height as usize), indices, coverage);
+    if let Some((size, indices, coverage)) = ui {
+        renderer.draw_ui(device, queue, &mut encoder, &view, vp, size, indices, coverage);
     }
     let row = (width * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
