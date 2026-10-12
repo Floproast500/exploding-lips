@@ -6,6 +6,7 @@
 
 pub mod anim;
 pub mod automap;
+pub mod bsp_world;
 mod audio;
 pub use engine_core::clock;
 pub mod effects;
@@ -110,8 +111,8 @@ pub struct Game {
     fps: FpsCounter,
     /// GPU time of a recent frame (milliseconds), reported by the front end for `r_stats`.
     pub gpu_ms: Option<f32>,
-    /// The guide colours were explained this run.
-    guide_tip_shown: bool,
+    /// The last GPU frame showed the BSP world (its images are uploaded).
+    bsp_shown: bool,
     /// Ticks since the game was created (the original HUD clock is time since launch).
     uptime_ticks: u64,
     /// Character save slots, carried across levels.
@@ -191,7 +192,7 @@ impl Game {
             ),
             fps: FpsCounter::default(),
             gpu_ms: None,
-            guide_tip_shown: false,
+            bsp_shown: false,
             uptime_ticks: 0,
             save: options
                 .save
@@ -305,16 +306,6 @@ impl Game {
         self.epoch += 1;
         let regions = self.session().map_or(0, |s| s.level.world.regions.len());
         self.automap.reset(regions);
-        // Once per run, in the first real level: what the guide colours mean.
-        if !self.guide_tip_shown && self.cvars.get_bool("hud_guides") {
-            let color = text::nearest_color(self.palette(), [255, 200, 60]);
-            if let State::Playing(s) = &mut self.state
-                && guides::find(s).iter().any(|g| g.kind != guides::GuideKind::Switch)
-            {
-                s.show_message(color, "Way forward: BLUE glow = teleporter (walk into it), AMBER = switch (walk into it), GREEN = level exit. They show on the map too.");
-                self.guide_tip_shown = true;
-            }
-        }
         Ok(())
     }
 
@@ -746,6 +737,14 @@ impl Game {
         }
         match &self.state {
             State::Title => blit_fit(frame, self.title.width, self.title.height, &self.title.pixels),
+            State::Playing(session) if session.in_bsp => {
+                // The BSP world is drawn by the GPU renderer only.
+                let s = (frame.height / CLASSIC_HEIGHT).max(1);
+                let note = "This 3D area needs the GPU renderer";
+                let x = (frame.width.saturating_sub(text::text_width(note, s))) / 2;
+                text::draw_text(frame, x as i32, (frame.height / 2) as i32, s, self.ui_colors.3, note);
+                draw_weapon(frame, session, &self.shade_rows);
+            }
             State::Playing(session) => {
                 let cam = camera(session, &self.physics, alpha, self.pending_look);
                 let shading = Shading { rows: &self.shade_rows };
@@ -761,8 +760,14 @@ impl Game {
     /// overlays, HUD, menus, console) into `ui`, with coverage, to be composited on top.
     /// `None` on the title screen and in classic 320x200 mode (render with [`Game::render`]).
     pub fn gpu_frame(&mut self, ui: &mut Frame, alpha: f32) -> Option<GpuView> {
-        if self.options.classic || !matches!(self.state, State::Playing(_)) {
+        let in_bsp = matches!(&self.state, State::Playing(s) if s.in_bsp);
+        // The BSP world has no software view: it always goes through the GPU.
+        if (self.options.classic && !in_bsp) || !matches!(self.state, State::Playing(_)) {
             return None;
+        }
+        if in_bsp != self.bsp_shown {
+            self.bsp_shown = in_bsp;
+            self.epoch += 1; // other images: re-upload
         }
         self.fps.frames += 1;
         ui.palette = *self.palette();
@@ -774,6 +779,55 @@ impl Game {
         let epoch = self.epoch;
         let State::Playing(session) = &mut self.state else { return None };
         self.settings.fullbright = session.flash;
+        let modern = modern_settings(&self.cvars, self.light_fit);
+        if in_bsp {
+            let aspect = ui.width as f32 / ui.height.max(1) as f32;
+            let guides_on = self.cvars.get_bool("hud_guides") && modern.is_some_and(|m| m.dynamic_lights);
+            let t = self.uptime_ticks as f32 / TICK_RATE as f32;
+            let world = session.bsp.as_mut()?;
+            world.images(&ui.palette, &session.level.world.images);
+            let (god_pal, god_rows) = (world.palette, world.colormap.clone());
+            let map = bsp_world::relight_levels(&god_pal, &god_rows, &ui.palette, &self.shade_rows);
+            world.relight(map);
+            let offset = world.texture_count() as u32;
+            let mut frame = world.scene.clone();
+            let p = world.player;
+            if guides_on {
+                // The way to the exit: green lights along the planned route and at the exit.
+                let pulse = 1.0 + 0.35 * (t * std::f32::consts::TAU * 0.8).sin();
+                let green = guides::GuideKind::Exit.light();
+                for spot in world.route_ahead(6) {
+                    frame.lights.push(engine_scene::scene::SceneLight { pos: spot, radius: 64.0, color: green.map(|v| v * 0.8 * pulse) });
+                }
+                for c in world.exits() {
+                    frame.lights.push(engine_scene::scene::SceneLight { pos: c.centre, radius: 192.0, color: green.map(|v| v * pulse) });
+                }
+            }
+            let first_sprite = frame.vertices.len();
+            // The world is one unclipped batch (once any batch exists only batches are drawn).
+            frame.batch(0, None);
+            weapon_quad(&mut frame, session, aspect);
+            for v in &mut frame.vertices[first_sprite..] {
+                v.image += offset; // level images follow the BSP textures
+            }
+            let s = &self.settings;
+            let view = GpuView {
+                camera: engine_scene::scene::SceneCamera { pos: p.pos, angle: p.orb_angle(), pitch: p.pitch.tan(), vfov_degrees: s.vfov_degrees, freelook: true },
+                shading: engine_scene::scene::Shading {
+                    visibility: 1.0e9,
+                    fade_bias: 0.0,
+                    true_color: true,
+                    fullbright: false,
+                    max_object_shade: 14.0,
+                    zero_substitute: 8,
+                    modern,
+                },
+                scene: frame,
+                epoch,
+            };
+            self.render_ui(ui);
+            return Some(view);
+        }
         render_tvs(&mut self.renderer, session, &self.shade_rows, &self.settings, &ui.palette);
         if self.scene_cache.as_ref().is_none_or(|(e, _)| *e != epoch) {
             self.scene_cache = Some((epoch, scene::build(&session.level.world)));
@@ -788,18 +842,6 @@ impl Game {
         weapon_quad(&mut frame, session, ui.width as f32 / ui.height.max(1) as f32);
         draw_overlays(ui, session);
         let c = &self.cvars;
-        let modern = (c.get_str("r_lighting") == "modern").then(|| engine_scene::scene::Modern {
-            brightness: self.light_fit.0,
-            emissive: self.light_fit.1,
-            dynamic_lights: c.get_bool("r_dynlights"),
-            bloom: c.get_bool("r_bloom"),
-            tonemap: c.get_int("r_tonemap") as u32,
-            exposure: c.get_float("r_exposure") as f32,
-            msaa: 1 << c.get_int("r_msaa").clamp(0, 3),
-            render_scale: c.get_float("r_scale") as f32,
-            fxaa: c.get_bool("r_fxaa"),
-            shadows: c.get_bool("r_shadows"),
-        });
         if modern.is_some_and(|m| m.dynamic_lights) {
             frame.lights = scene_lights(session, &self.physics);
             if c.get_bool("hud_guides") {
@@ -845,14 +887,27 @@ impl Game {
     /// The current level's images (for GPU upload when [`GpuView::epoch`] changes).
     pub fn world_images(&self) -> Vec<engine_scene::scene::IndexedImage<'_>> {
         self.session().map_or_else(Vec::new, |s| {
-            s.level.world.images.iter().map(|i| engine_scene::scene::IndexedImage { width: i.width, height: i.height, pixels: &i.pixels }).collect()
+            Self::shown_images(s).iter().map(|i| engine_scene::scene::IndexedImage { width: i.width, height: i.height, pixels: &i.pixels }).collect()
         })
+    }
+
+    /// The images of the world being shown: the BSP's textures while in it, else the level's.
+    fn shown_images(s: &Session) -> &[world::Image] {
+        match &s.bsp {
+            Some(b) if s.in_bsp => b.cached_images(),
+            _ => &s.level.world.images,
+        }
     }
 
     /// Pack keys (name, content hash) of the current level's images, by image index.
     pub fn world_image_keys(&self) -> Vec<(String, u64)> {
         let Some(s) = self.session() else { return Vec::new() };
-        s.level
+        // In the BSP world: its textures first, then the level's images (as `world_images`).
+        let bsp: Vec<(String, u64)> = match s.bsp.as_ref().filter(|_| s.in_bsp) {
+            Some(b) => b.bsp.textures.iter().zip(b.cached_images()).map(|(t, i)| (t.name.clone(), engine_core::pack::image_hash(i.width, i.height, &i.pixels))).collect(),
+            None => Vec::new(),
+        };
+        bsp.into_iter().chain(s.level
             .world
             .images
             .iter()
@@ -861,6 +916,7 @@ impl Game {
                 let name = s.level.orb.pics.get(i).map_or_else(|| format!("PIC{i}"), |p| p.name.trim().to_string());
                 (name, engine_core::pack::image_hash(img.width, img.height, &img.pixels))
             })
+            )
             .collect()
     }
 
@@ -876,7 +932,7 @@ impl Game {
 
     /// One world image (live camera views change every frame).
     pub fn world_image(&self, index: u32) -> Option<engine_scene::scene::IndexedImage<'_>> {
-        let i = self.session()?.level.world.images.get(index as usize)?;
+        let i = Self::shown_images(self.session()?).get(index as usize)?;
         Some(engine_scene::scene::IndexedImage { width: i.width, height: i.height, pixels: &i.pixels })
     }
 
@@ -910,7 +966,14 @@ impl Game {
                 self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
-            self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);
+            if self.cvars.get_str("hud_style") == "modern" && !self.options.classic {
+                self.hud.draw_modern(frame, session, self.options.high_contrast, self.options.hud_scale);
+                if self.show_map {
+                    self.hud.draw_stats(frame, session, session.tool, uptime, self.options.hud_scale);
+                }
+            } else {
+                self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);
+            }
             draw_crosshair(frame, self.options.crosshair, self.ui_colors.3);
             session.menus.draw(frame, &session.save);
         }
@@ -978,6 +1041,22 @@ fn camera(session: &Session, physics: &PhysicsParams, alpha: f32, pending: (f32,
         pitch: PhysicsParams::look_to_pitch(look),
         region: q.region,
     }
+}
+
+/// Modern-lighting settings from the cvars (`None`: original shade tables).
+fn modern_settings(c: &engine_core::CvarRegistry, light_fit: ([f32; 16], [u32; 8])) -> Option<engine_scene::scene::Modern> {
+    (c.get_str("r_lighting") == "modern").then(|| engine_scene::scene::Modern {
+        brightness: light_fit.0,
+        emissive: light_fit.1,
+        dynamic_lights: c.get_bool("r_dynlights"),
+        bloom: c.get_bool("r_bloom"),
+        tonemap: c.get_int("r_tonemap") as u32,
+        exposure: c.get_float("r_exposure") as f32,
+        msaa: 1 << c.get_int("r_msaa").clamp(0, 3),
+        render_scale: c.get_float("r_scale") as f32,
+        fxaa: c.get_bool("r_fxaa"),
+        shadows: c.get_bool("r_shadows"),
+    })
 }
 
 /// Dynamic lights for the modern renderer: flying projectiles, explosions (fading out) and the

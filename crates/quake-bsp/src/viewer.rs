@@ -79,7 +79,7 @@ impl BspViewer {
 }
 
 /// Triangles of the world model: fans over each face, texel UVs, lightmap light per vertex.
-fn build_scene(bsp: &Bsp) -> SceneFrame {
+pub fn build_scene(bsp: &Bsp) -> SceneFrame {
     let mut scene = SceneFrame::default();
     for face in &bsp.faces[bsp.world_faces.clone()] {
         if face.points.len() < 3 {

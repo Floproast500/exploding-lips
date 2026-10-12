@@ -175,6 +175,14 @@ fn collect(vfs: &godd_game::Vfs, levels: &[String]) -> AnyResult<Vec<Source>> {
             }
         }
     }
+    // BSP worlds (LIPS00C): their textures as shown in play, tiling like walls.
+    let palette = godd_formats::pal::Palette::parse(vfs.read("PALETTE.PAL")?)?.rgb;
+    for level in levels {
+        for (name, img) in godd_game::bsp_world::level_textures(vfs, level, &palette) {
+            let hash = image_hash(img.width, img.height, &img.pixels);
+            found.entry((name.to_ascii_uppercase(), hash)).or_insert_with(|| Source { name, hash, class: Class::Wall, width: img.width, height: img.height, pixels: img.pixels });
+        }
+    }
     Ok(found.into_values().collect())
 }
 

@@ -79,6 +79,17 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
     }
     // GPU renders use the original lighting (parity with `render`) unless asked for "modern".
     let _ = game.cvars.set("r_lighting", if rest.contains(&"modern") { "modern" } else { "classic" });
+    // Comparisons with the original use its HUD; "modern" renders show the modern one.
+    let _ = game.cvars.set("hud_style", if rest.contains(&"modern") { "modern" } else { "classic" });
+    // "tag:N": fire tag N, then let a second pass (tag:132 in LIPS00 enters its BSP world).
+    for tag in rest.iter().filter_map(|a| a.strip_prefix("tag:")?.parse::<u32>().ok()) {
+        if let Some(s) = game.session_mut() {
+            s.fire_tag(tag);
+        }
+        for _ in 0..60 {
+            game.tick(&vfs, &idle);
+        }
+    }
     // "set:NAME=VALUE": any cvar (r_msaa=8x, r_scale=1.5, r_fxaa=1 ...).
     for (name, value) in rest.iter().filter_map(|a| a.strip_prefix("set:")?.split_once('=')) {
         game.cvars.set(name, value)?;

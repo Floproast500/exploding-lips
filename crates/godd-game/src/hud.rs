@@ -41,6 +41,117 @@ impl Hud {
         Self { shown: [0; STATE_COUNT], visible: true }
     }
 
+    /// The modern HUD: status messages top-left; one compact cluster bottom-left with Life,
+    /// Armor and Money, and bars for Magic and Experience. Scales with the frame (or `scale`),
+    /// anchored to the corner at any aspect ratio. Score, time, tool, treasures, deaths and
+    /// kills are on the automap's panel instead ([`Hud::draw_stats`]).
+    pub fn draw_modern(&mut self, frame: &mut Frame, session: &Session, high_contrast: bool, scale: usize) {
+        let fit = (frame.height / CLASSIC_HEIGHT).max(1);
+        let s = if scale == 0 { fit } else { scale.min(fit) };
+        let si = s as i32;
+        self.draw_messages(frame, session, s);
+        if !self.visible {
+            return;
+        }
+        let pal = frame.palette;
+        let col = |rgb: [u8; 3]| crate::text::nearest_color(&pal, rgb);
+        let (shadow, white, back) = (col([0, 0, 0]), col([235, 235, 235]), col([24, 22, 30]));
+        let (red, blue, green, pink, yellow) = (col([235, 50, 50]), col([70, 130, 255]), col([90, 220, 90]), col([240, 80, 210]), col([250, 215, 50]));
+        let value = if high_contrast { col([255, 255, 80]) } else { white };
+        let states = session.script.states;
+        let mut roll = |i: usize| {
+            let old = self.shown[i];
+            self.shown[i] += (states[i] - old).signum();
+            if old == states[i] { states[i] } else { old }
+        };
+        let (life, magic, armor, money, exp) = (roll(LIFE), roll(MAGIC), roll(ARMOR), roll(MONEY), roll(EXPERIENCE));
+        let text = |frame: &mut Frame, x: i32, y: i32, color: u8, t: &str| {
+            draw_text(frame, x + si, y + si, s, shadow, t);
+            draw_text(frame, x, y, s, color, t)
+        };
+        // Bottom-left corner, 6 units in.
+        let (x0, bottom) = (6 * si, frame.height as i32 - 6 * si);
+        let line = 10 * si;
+        // Row 1: Life, Armor, Money.
+        let y1 = bottom - 3 * line;
+        let mut x = x0;
+        for (icon, color, number) in [(HEART.to_string(), red, format!("{life}")), (DIAMOND.to_string(), blue, format!("{armor}")), ("$".to_string(), green, format!("{money}"))] {
+            x += text(frame, x, y1, color, &icon) as i32 + 2 * si;
+            x += text(frame, x, y1, value, &number) as i32 + 10 * si;
+        }
+        // Rows 2 and 3: Magic and Experience bars.
+        let thresholds = &session.script.thresholds;
+        let magic_max = thresholds.max[MAGIC].max(1);
+        let next_exp = ((exp / 1000) + 1) * 1000;
+        let bar_w = 96 * si;
+        for (row, icon, color, fill, label) in [
+            (2, SPADE.to_string(), pink, magic as f32 / magic_max as f32, format!("{magic}")),
+            (1, "*".to_string(), yellow, (exp % 1000) as f32 / 1000.0, format!("{exp} / {next_exp}")),
+        ] {
+            let y = bottom - row * line;
+            let bx = x0 + 10 * si;
+            text(frame, x0, y, color, &icon);
+            fill_rect(frame, bx - si, y - si, (bar_w + 2 * si) as usize, (8 * si) as usize, shadow);
+            fill_rect(frame, bx, y, bar_w as usize, (6 * si) as usize, back);
+            let w = (bar_w as f32 * fill.clamp(0.0, 1.0)).round() as i32;
+            if w > 0 {
+                fill_rect(frame, bx, y, w as usize, (6 * si) as usize, color);
+            }
+            text(frame, bx + bar_w + 4 * si, y - si, value, &label);
+        }
+    }
+
+    /// The automap's panel (modern HUD): score heading, time, tool, treasures, deaths, kills.
+    pub fn draw_stats(&self, frame: &mut Frame, session: &Session, tool: usize, uptime_seconds: u64, scale: usize) {
+        let fit = (frame.height / CLASSIC_HEIGHT).max(1);
+        let s = if scale == 0 { fit } else { scale.min(fit) };
+        let si = s as i32;
+        let pal = frame.palette;
+        let col = |rgb: [u8; 3]| crate::text::nearest_color(&pal, rgb);
+        let (shadow, label, value, back, edge) = (col([0, 0, 0]), col([120, 200, 120]), col([235, 235, 235]), col([16, 16, 22]), col([70, 70, 90]));
+        let states = session.script.states;
+        let t = uptime_seconds % 3600;
+        let rows = [
+            ("Time", format!("{:02}:{:02}", t / 60, t % 60)),
+            ("Tool", tool.to_string()),
+            ("Treasures found", format!("{}", states[TREASURES])),
+            ("Deaths", format!("{}", states[DEATHS])),
+            ("Enemies killed", format!("{}", states[KILLS])),
+        ];
+        let (w, h) = (150 * si, (16 + rows.len() as i32 * 11) * si);
+        let (x0, y0) = (frame.width as i32 - w - 8 * si, 8 * si);
+        fill_rect(frame, x0 - si, y0 - si, (w + 2 * si) as usize, (h + 2 * si) as usize, edge);
+        fill_rect(frame, x0, y0, w as usize, h as usize, back);
+        draw_text(frame, x0 + 6 * si + si, y0 + 4 * si + si, s, shadow, "Score");
+        draw_text(frame, x0 + 6 * si, y0 + 4 * si, s, value, "Score");
+        for (k, (name, v)) in rows.iter().enumerate() {
+            let y = y0 + (16 + k as i32 * 11) * si;
+            draw_text(frame, x0 + 6 * si, y, s, label, name);
+            let vw = (v.chars().count() * GLYPH) as i32 * si;
+            draw_text(frame, x0 + w - 6 * si - vw, y, s, value, v);
+        }
+    }
+
+    /// Status messages (the oldest five, top-left, wrapped) and the OTEXT box.
+    fn draw_messages(&self, frame: &mut Frame, session: &Session, s: usize) {
+        let si = s as i32;
+        let bottom0 = frame.height as i32 - (CLASSIC_HEIGHT * s) as i32;
+        let mut row = 0;
+        for m in session.messages.iter().take(MESSAGE_LINES) {
+            for (i, line) in wrap(&m.text).iter().enumerate() {
+                let x = if i == 0 { 0 } else { (INDENT * GLYPH) as i32 };
+                draw_text(frame, x * si, row * 8 * si, s, m.color, line);
+                row += 1;
+            }
+        }
+        if let Some(t) = &session.overlay_text {
+            let (x, y) = OTEXT_POS;
+            let w = (t.text.chars().count() * GLYPH + 6) * s;
+            fill_rect(frame, x * si, bottom0 + y * si - 2 * si, w, 12 * s, color::OTEXT_BOX);
+            draw_text(frame, (x + 3) * si, bottom0 + y * si, s, color::OTEXT, &t.text);
+        }
+    }
+
     /// `uptime_seconds` is time since the game was launched (the original's HUD clock).
     /// `scale` 0 picks the largest whole scale that fits; other values shrink the HUD.
     pub fn draw(&mut self, frame: &mut Frame, session: &Session, tool: usize, uptime_seconds: u64, high_contrast: bool, scale: usize) {

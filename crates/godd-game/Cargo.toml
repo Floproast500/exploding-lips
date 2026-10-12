@@ -9,5 +9,6 @@ version.workspace = true
 engine-core.workspace = true
 engine-scene.workspace = true
 godd-formats.workspace = true
+quake-bsp.workspace = true
 font8x8 = "0.3"
 log.workspace = true

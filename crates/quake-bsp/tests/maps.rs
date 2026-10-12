@@ -57,3 +57,50 @@ fn quake_e1m1() {
     let (_, yaw) = v.bsp().player_start();
     assert!((0.0..360.0).contains(&yaw));
 }
+
+/// Collision from the player start: the player box (hull 1) is in open space, falls onto a
+/// floor, and every horizontal sweep stops at a wall facing it, never inside solid.
+fn check_collision(bsp: &quake_bsp::Bsp) {
+    use quake_bsp::collision::SOLID;
+    let h = &bsp.hulls;
+    assert!(h.hull_count() >= 3, "{} hulls", h.hull_count());
+    let (start, _) = bsp.player_start();
+    // Quake starts stand on the floor with the origin 24 above it; nudge up in case.
+    let origin = [start[0], start[1], start[2] + 1.0];
+    assert_ne!(h.contents(1, origin), SOLID, "player box at the start is free");
+    let down = h.trace(1, origin, [origin[0], origin[1], origin[2] - 4096.0]);
+    assert!(down.fraction < 1.0 && down.normal[2] > 0.7, "lands on a floor: {down:?}");
+    let mut walls = 0;
+    for k in 0..16 {
+        let a = k as f32 / 16.0 * std::f32::consts::TAU;
+        let (dx, dy) = (a.cos(), a.sin());
+        let end = [origin[0] + dx * 8192.0, origin[1] + dy * 8192.0, origin[2]];
+        let t = h.trace(1, origin, end);
+        assert!(!t.start_solid);
+        assert_ne!(h.contents(1, t.end), SOLID, "stops outside solid: {t:?}");
+        if t.fraction < 1.0 {
+            walls += 1;
+            assert!(t.normal[0] * dx + t.normal[1] * dy < 0.0, "the wall faces the mover: {t:?}");
+            // Just past the stop is solid.
+            let past = [t.end[0] + dx * 2.0, t.end[1] + dy * 2.0, t.end[2]];
+            let beyond = h.trace(1, t.end, past);
+            assert!(beyond.fraction < 1.0, "blocked right after the stop");
+        }
+    }
+    assert!(walls >= 14, "{walls} of 16 directions hit walls");
+}
+
+#[test]
+fn collision_on_real_maps() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../original");
+    if dir.join("LIPS00C.BSP").exists() {
+        let v = open(&dir.join("LIPS00C.BSP"), "lips00c", Some(&dir.join("PALETTE.PAL"))).unwrap();
+        check_collision(v.bsp());
+    }
+    if let Some(pak) = steam("Quake/rerelease/id1/pak0.pak") {
+        check_collision(open(&pak, "e1m1", None).unwrap().bsp());
+    }
+    if let Some(pak) = steam("Hexen 2/data1/pak0.pak") {
+        check_collision(open(&pak, "demo1", None).unwrap().bsp());
+    }
+}

@@ -3,6 +3,7 @@
 //! colormap, level-0 mip textures, faces with lightmaps, and the player start. Written from the
 //! publicly documented file formats.
 
+pub mod collision;
 pub mod viewer;
 
 use std::collections::HashMap;
@@ -110,6 +111,8 @@ pub struct Bsp {
     pub world_faces: std::ops::Range<usize>,
     pub lighting: Vec<u8>,
     pub entities: String,
+    /// Collision hulls of the world model.
+    pub hulls: collision::Hulls,
 }
 
 const LUMP_ENTITIES: usize = 0;
@@ -177,7 +180,12 @@ impl Bsp {
             }
             (next == faces.len()).then_some(r)
         };
-        let (first, count) = ranges(64).or_else(|| ranges(80)).and_then(|r| r.first().copied()).unwrap_or((0, faces.len()));
+        let (record, ranges) = match ranges(64) {
+            Some(r) => (64, Some(r)),
+            None => (80, ranges(80)),
+        };
+        let (first, count) = ranges.and_then(|r| r.first().copied()).unwrap_or((0, faces.len()));
+        let hulls = collision::Hulls::parse(&lump, record)?;
         let world_faces = first.min(faces.len())..(first + count).min(faces.len());
         let tex = lump(LUMP_TEXTURES)?;
         let mut textures = Vec::new();
@@ -196,7 +204,7 @@ impl Bsp {
                 textures.push(MipTex { name: cstr(&t[0..16]), width: w.max(1), height: h.max(1), pixels });
             }
         }
-        Ok(Self { textures, texinfo, faces, world_faces, lighting: lump(LUMP_LIGHTING)?.to_vec(), entities: cstr(lump(LUMP_ENTITIES)?) })
+        Ok(Self { textures, texinfo, faces, world_faces, lighting: lump(LUMP_LIGHTING)?.to_vec(), entities: cstr(lump(LUMP_ENTITIES)?), hulls })
     }
 
     /// Key/value blocks of the entity lump.

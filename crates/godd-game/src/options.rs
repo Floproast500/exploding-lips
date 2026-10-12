@@ -45,6 +45,7 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.float("joy_gyro_sensitivity", "Gyro speed", Controls, (0.2, 4.0, 0.1), 1.0);
     c.bool("cl_autorun", "Always run", Controls, false);
     c.bool("cl_togglecrouch", "Toggle crouch", Controls, false);
+    c.choice("hud_style", "HUD", Hud, &["classic", "modern"], 1);
     c.int("hud_scale", "HUD scale (0 = auto)", Hud, (0, 8, 1), 0);
     c.choice("crosshair", "Crosshair", Hud, &["off", "dot", "cross", "circle"], 0);
     c.bool("hud_fps", "Show FPS", Hud, false);

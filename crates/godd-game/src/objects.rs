@@ -33,7 +33,7 @@ const PROJECTILE_RADIUS: f32 = 8.0;
 const PROJECTILE_HEIGHT: f32 = 16.0;
 
 /// Effect indices used here (row order of re/engine/effects.md).
-mod fx {
+pub(crate) mod fx {
     pub const OWALK: i32 = 5;
     pub const OFOLLOW: i32 = 10;
     pub const OFLYON: i32 = 26;
@@ -54,6 +54,10 @@ mod fx {
     pub const OTAGSW: i32 = 20;
     pub const OBUMPSW: i32 = 22;
     pub const OSTRAP: i32 = 29;
+    /// BSP world (re/engine/bsp-world.md): exit cube, enter, tag cube.
+    pub const ORORB: i32 = 192;
+    pub const ORPOLY: i32 = 193;
+    pub const OPTAGSW: i32 = 194;
     pub const OSETF: i32 = 41;
     pub const OSETC: i32 = 49;
     pub const OSOUND: i32 = 53;
@@ -330,6 +334,8 @@ pub enum ObjRequest {
     Flash(bool),
     /// RMOVE: a carrier moved its region by (dx, dy).
     CarryRegion { region: usize, dx: f32, dy: f32 },
+    /// ORPOLY: enter the BSP world at a BSP position with an orb heading; background sound.
+    EnterBsp { pos: [i32; 3], heading: i32, sound: Option<String> },
 }
 
 /// Player tool state.
@@ -727,6 +733,11 @@ impl Objects {
                     self.requests.push(ObjRequest::TriggerNamed(format!("@teleport:{dest}")));
                 }
                 self.sound_from(i, sound(4));
+            }
+            fx::ORPOLY => {
+                if aux.is_some() {
+                    self.requests.push(ObjRequest::EnterBsp { pos: [int(0), int(1), int(2)], heading: int(3), sound: sound(0) });
+                }
             }
             fx::OSTRAP => {
                 if let Some(level) = slot(9) {
@@ -1271,7 +1282,7 @@ impl Objects {
         }
         let effect = o.effect;
         let accepts = match effect {
-            fx::OBUMPSW | fx::OTELE | fx::OSELTOOL => !by_projectile,
+            fx::OBUMPSW | fx::OTELE | fx::OSELTOOL | fx::ORPOLY => !by_projectile,
             fx::OTAGSW | fx::OPICKUP | fx::OSOUND | fx::OTEXT | fx::OTIMER | fx::OSTRAP | fx::OSETF | fx::OSETC | fx::OSNDSEQ
             | fx::OWTOW | fx::OOTOO | fx::OFLYON | fx::OFLYOFF | fx::ODROP | fx::OTEXOVER | fx::OFLASH | fx::OVIEWON | fx::OVIEWOFF
             | fx::OCOUNT | fx::OEFFSW | fx::OPHYSON => true,

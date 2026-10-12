@@ -782,7 +782,8 @@ fn lips00_hud_is_recorded_for_the_gpu() {
     let mut ui = godd_game::Frame::new(w, h);
     game.gpu_frame(&mut ui, 1.0).unwrap();
     let list = ui.ui_list.as_ref().expect("recording");
-    assert!(list.iter().filter(|c| matches!(c, UiCmd::Glyph { .. })).count() > 50, "HUD glyphs");
+    assert!(list.iter().filter(|c| matches!(c, UiCmd::Glyph { .. })).count() > 10, "HUD glyphs");
+    assert!(list.iter().filter(|c| matches!(c, UiCmd::Rect { .. })).count() >= 4, "Magic and Experience bars");
     let drawn = |ui: &godd_game::Frame| ui.coverage.as_ref().unwrap().iter().filter(|&&c| c != 0).count();
     let hd_pixels = drawn(&ui);
     game.cvars.set("hud_hd", "0").unwrap();
@@ -813,7 +814,7 @@ fn lips00_automap_lines_are_recorded() {
 
 /// Progression guides in LIPS00: the start room's way out is the switch at the end of its
 /// north corridor; it is a guide (the ledge's two inert teleporter objects are not), the exit
-/// switch is green, guides glow in the GPU view and the first level explains the colours.
+/// switch is green, and guides glow in the GPU view (without any helper text).
 #[test]
 fn lips00_guides_show_the_way_out() {
     use godd_game::guides::{self, GuideKind};
@@ -825,11 +826,122 @@ fn lips00_guides_show_the_way_out() {
     assert!(near(GuideKind::Switch, 11712.0, 16768.0), "start corridor switch");
     assert!(!found.iter().any(|g| g.kind == GuideKind::Teleport && (g.pos[1] - 16496.0).abs() < 40.0), "inert ledge objects are not guides");
     assert_eq!(found.iter().filter(|g| g.kind == GuideKind::Exit).count(), 1, "one exit switch");
-    assert!(s.messages.iter().any(|m| m.text.contains("AMBER")), "tip shown");
+    assert!(s.messages.is_empty(), "no helper text");
     let (w, h) = game.ui_layer_size(1280, 720);
     let mut ui = godd_game::Frame::new(w, h);
     let lights = game.gpu_frame(&mut ui, 1.0).unwrap().scene.lights.len();
     assert!(lights >= 1, "{lights} lights");
     game.cvars.set("hud_guides", "0").unwrap();
     assert_eq!(game.gpu_frame(&mut ui, 1.0).unwrap().scene.lights.len(), 0);
+}
+
+/// LIPS00's BSP world (re/engine/bsp-world.md §6.3): the start-room switch (tag 132) moves the
+/// player into LIPS00C.BSP; the player lands on the floor there; reaching COFFIN1's exit cube
+/// brings them back onto COFFIN1 in the orb, whose floor then rises out of the pit.
+#[test]
+fn lips00_bsp_world_round_trip() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    assert!(game.session().unwrap().bsp.is_some(), "LIPS00C.BSP loaded");
+    game.session_mut().unwrap().fire_tag(132);
+    let s = game.session().unwrap();
+    assert!(s.in_bsp, "in the BSP world");
+    let p = s.bsp.as_ref().unwrap().player;
+    assert_eq!(p.pos, [2640.0, 832.0, 448.1]);
+    assert!(s.player.angle.abs() < 1e-3 || (s.player.angle - std::f32::consts::TAU).abs() < 1e-3, "facing +X");
+    let orb_before = (s.player.x, s.player.y);
+    run(&mut game, &vfs, 0.5);
+    let s = game.session().unwrap();
+    let p = s.bsp.as_ref().unwrap().player;
+    assert!((p.pos[2] - 424.0).abs() < 1.0 && !p.airborne, "landed on the floor: {:?}", p.pos);
+    assert_eq!((s.player.x, s.player.y), orb_before, "the orb is frozen");
+    // Walking moves the BSP player, not the orb one.
+    let mut walk = godd_game::Input::default();
+    walk.set(godd_game::Action::Forward, true);
+    for _ in 0..30 {
+        game.tick(&vfs, &walk);
+    }
+    let moved = game.session().unwrap().bsp.as_ref().unwrap().player.pos;
+    assert!((moved[0] - 2640.0).abs() > 50.0 || (moved[1] - 832.0).abs() > 50.0, "walked: {moved:?}");
+    // Step into COFFIN1's exit cube.
+    let floor_before = {
+        let s = game.session().unwrap();
+        s.level.world.regions[26].floor
+    };
+    game.session_mut().unwrap().bsp.as_mut().unwrap().player.pos = [-2384.0, -1120.0, 424.0];
+    run(&mut game, &vfs, 0.1);
+    let s = game.session().unwrap();
+    assert!(!s.in_bsp, "back in the orb");
+    assert_eq!((s.player.x, s.player.y, s.player.region), (17272.0, 16784.0, 26));
+    assert!((s.player.angle - std::f32::consts::PI).abs() < 1e-3, "angle 1024: {}", s.player.angle);
+    run(&mut game, &vfs, 1.0);
+    let s = game.session().unwrap();
+    assert!(s.level.world.regions[26].floor > floor_before + 10.0, "COFFIN1 rises: {} -> {}", floor_before, s.level.world.regions[26].floor);
+}
+
+/// The BSP world can be crossed on foot: a planner using the player's own ClipMove finds a
+/// path from where ORPOLY puts the player to COFFIN1's exit, and steering along it with plain
+/// forward movement gets there (stairs, shafts, ramps).
+#[test]
+fn lips00_bsp_world_walkable_to_the_exit() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    game.session_mut().unwrap().fire_tag(132);
+    run(&mut game, &vfs, 0.5);
+    let route = game.session().unwrap().bsp.as_ref().unwrap().path_to_exit().expect("a walkable path to the exit");
+    println!("path: {} steps", route.len());
+    let mut walk = Input::default();
+    walk.set(Action::Forward, true);
+    let idle = Input::default();
+    let mut ticks = 0;
+    'route: for (k, &target) in route.iter().enumerate().skip(1) {
+        loop {
+            let s = game.session_mut().unwrap();
+            if !s.in_bsp {
+                break 'route;
+            }
+            let w = s.bsp.as_mut().unwrap();
+            let p = w.player.pos;
+            let (dx, dy) = (target[0] - p[0], target[1] - p[1]);
+            if dx.hypot(dy) < 6.0 {
+                break;
+            }
+            // Face the next spot (forward is (−sin yaw, cos yaw)); no steering while falling.
+            w.look((-dx).atan2(dy) - w.player.yaw, 0.0);
+            let falling = w.player.airborne;
+            game.tick(&vfs, if falling { &idle } else { &walk });
+            ticks += 1;
+            assert!(ticks < 60 * 300, "stuck before step {k} {target:?} at {p:?}");
+        }
+    }
+    let s = game.session().unwrap();
+    assert!(!s.in_bsp, "reached the exit");
+    assert_eq!(s.player.region, 26);
+    println!("crossed the BSP world in {:.1} s", ticks as f32 / 60.0);
+}
+
+/// Modern HUD: the score stats (time, tool, treasures, deaths, kills) appear only with the
+/// automap open; the classic HUD keeps them on screen.
+#[test]
+fn lips00_score_panel_only_on_the_automap() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let texts = |game: &mut godd_game::Game| {
+        let (w, h) = game.ui_layer_size(1920, 1080);
+        let mut ui = godd_game::Frame::new(w, h);
+        game.gpu_frame(&mut ui, 1.0).unwrap();
+        ui.ui_list.unwrap().iter().filter(|c| matches!(c, engine_core::UiCmd::Glyph { .. })).count()
+    };
+    let plain = texts(&mut game);
+    let mut open = Input::default();
+    open.set(Action::Map, true);
+    game.tick(&vfs, &open);
+    let with_map = texts(&mut game);
+    assert!(with_map > plain + 40, "stats panel on the map: {plain} -> {with_map}");
+    game.cvars.set("hud_style", "classic").unwrap();
+    game.tick(&vfs, &open);
+    let classic = texts(&mut game);
+    assert!(classic > plain + 40, "classic HUD shows the stats: {classic}");
 }

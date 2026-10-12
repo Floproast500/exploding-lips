@@ -10,6 +10,7 @@ use crate::objects::{ObjRequest, Objects, PlayerView};
 use crate::player::{PhysicsParams, Player, PlayerEvent};
 use crate::script::{STARTUP_TAG, Script, ScriptEvent};
 use crate::{BoxError, TICK_RATE, Vfs};
+use godd_formats::xrb::{RecordExt, Section};
 
 /// The startup INI read before the first level (GODDRUN.DAT names it).
 pub const STARTUP_INI: &str = "LIPSTART.INI";
@@ -27,6 +28,11 @@ pub struct Message {
 
 pub struct Session {
     pub name: String,
+    /// The level's BSP world (`[startup] loadbspfilename`), and whether the player is in it.
+    pub bsp: Option<Box<crate::bsp_world::BspWorld>>,
+    pub in_bsp: bool,
+    /// Background sound now playing (region sounds, the BSP stay).
+    background: Option<String>,
     pub level: Level,
     pub player: Player,
     /// Player state at the previous tick, for render interpolation.
@@ -130,7 +136,11 @@ impl Session {
         let tvs = setup_tvs(&mut level);
         let mut menus = Menus::new(&level, &ini, &cursor_pic, "lipstart");
         menus.current_slot = current_slot;
+        let bsp = ini.section("startup").and_then(|s| s.get("loadbspfilename")).and_then(|file| load_bsp(vfs, file, &objects));
         let mut session = Self {
+            bsp,
+            in_bsp: false,
+            background: None,
             menus,
             save,
             save_dirty: false,
@@ -315,6 +325,10 @@ impl Session {
                 self.level.sequences = sequences;
             }
         }
+        if self.in_bsp {
+            self.bsp_tick(input);
+            return;
+        }
         if input.held(Action::Use) {
             let mut states = self.script.states;
             self.objects.use_tool(&mut states, &self.level);
@@ -323,6 +337,9 @@ impl Session {
         self.tool = self.objects.tools.current;
         let mut contacts: Vec<PlayerEvent> = Vec::new();
         self.player.tick_with_events(&self.level.world, input, physics, &mut contacts);
+        if self.player.region != self.previous.region {
+            self.region_background(self.player.region);
+        }
         // Ramps (RSLANT): stand on the slope; never above its top unless flying.
         if let Some((low, high)) = self.effects.ramp_limits(self.player.region, self.player.x, self.player.y) {
             if self.player.z < low {
@@ -500,6 +517,18 @@ impl Session {
             }
             ObjRequest::IncState { index, delta } => self.script.change_state(index, delta),
             ObjRequest::Teleport { x, y, z, angle, region } => self.teleport(x, y, z, angle, region),
+            ObjRequest::EnterBsp { pos, heading, sound } => {
+                if let Some(world) = &mut self.bsp {
+                    world.place(pos, heading);
+                    world.reset_route();
+                    self.player.angle = world.player.orb_angle();
+                    if sound.is_some() {
+                        self.set_background(sound);
+                    }
+                    self.in_bsp = true;
+                    log::info!("entering the BSP world at {pos:?}");
+                }
+            }
             ObjRequest::LevelExit { level, start } => self.pending_level = Some((level, start)),
             ObjRequest::TurnPlayer { units_per_frame, frames } => {
                 // Original units per 30 Hz frame → radians per simulation tick.
@@ -542,6 +571,75 @@ impl Session {
             }
             ObjRequest::Flash(on) => self.flash = on,
             ObjRequest::CarryRegion { region, dx, dy } => self.carry_translation(region, dx, dy),
+        }
+    }
+
+    /// One game tick in the BSP world: the orb is frozen; tags fired there still reach orb
+    /// objects at once; the orb player's facing follows the BSP view.
+    fn bsp_tick(&mut self, input: &Input) {
+        use crate::bsp_world::{BspEvent, BspInput};
+        let Some(world) = &mut self.bsp else {
+            self.in_bsp = false;
+            return;
+        };
+        let axis = |pos: Action, neg: Action, analog: f32| (input.held(pos) as i32 - input.held(neg) as i32) as f32 + analog;
+        let bsp_input = BspInput {
+            forward: axis(Action::Forward, Action::Back, input.move_axis.1),
+            strafe: axis(Action::StrafeRight, Action::StrafeLeft, input.move_axis.0),
+            turn: axis(Action::TurnLeft, Action::TurnRight, 0.0),
+            jump: input.held(Action::Jump),
+            fire: input.held(Action::Use),
+        };
+        world.look(-input.look_delta.0, -input.look_delta.1);
+        let events = world.tick(1.0 / TICK_RATE as f32, &bsp_input);
+        self.player.angle = world.player.orb_angle();
+        self.previous = self.player;
+        for e in events {
+            match e {
+                BspEvent::Tag(t) => self.fire_tag(t),
+                BspEvent::Exit(object) => self.leave_bsp(object),
+            }
+        }
+    }
+
+    /// ORORB: back to the orb onto the exit object (as OTELE moves to an object).
+    fn leave_bsp(&mut self, object: usize) {
+        let Some(o) = self.objects.list.get(object) else { return };
+        let (x, y, z, angle, region) = (o.x, o.y, o.z, o.angle, o.region);
+        self.teleport(x, y, Some(z), Some(angle), region);
+        self.in_bsp = false;
+        self.region_background(self.player.region);
+        log::info!("back from the BSP world at ({x}, {y}, {z})");
+    }
+
+    /// The background sound of `region` (region record +0x100), as on entering it.
+    fn region_background(&mut self, region: usize) {
+        let sound = self
+            .level
+            .orb
+            .records(Section::Regions)
+            .get(region)
+            .and_then(|r| usize::try_from(r.le_i32(0x100)).ok())
+            .and_then(|s| self.level.orb.records(Section::Sounds).get(s))
+            .map(|rec| c_name(&rec[0x0c..0x18]))
+            .filter(|n| !n.is_empty());
+        if sound.is_some() {
+            self.set_background(sound);
+        }
+    }
+
+    /// Switch the background sound: BSNDOFF / BACKSND stop it, other names loop.
+    fn set_background(&mut self, name: Option<String>) {
+        let Some(name) = name else { return };
+        if self.background.as_deref().is_some_and(|b| b.eq_ignore_ascii_case(&name)) {
+            return;
+        }
+        self.audio.push(AudioEvent::Stop { channel: BACKGROUND_CHANNEL });
+        if name.eq_ignore_ascii_case("BSNDOFF") || name.eq_ignore_ascii_case("BACKSND") {
+            self.background = None;
+        } else {
+            self.audio.push(AudioEvent::Loop { channel: BACKGROUND_CHANNEL, name: name.clone(), volume: 1.0, pan: 0.0, pos: None });
+            self.background = Some(name);
         }
     }
 
@@ -855,4 +953,33 @@ fn read_text(vfs: &Vfs, path: &str) -> String {
 
 fn seed_from(name: &str) -> u64 {
     name.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Audio channel of the background sound (object loops use 1000 and up).
+const BACKGROUND_CHANNEL: u32 = 999;
+
+/// Load the level's BSP world (`[startup] loadbspfilename`) with the level's ORORB exit cubes and
+/// OPTAGSW tag cubes.
+fn load_bsp(vfs: &Vfs, file: &str, objects: &Objects) -> Option<Box<crate::bsp_world::BspWorld>> {
+    use crate::bsp_world::{BspWorld, Cube, goddpoly_palette};
+    use crate::objects::fx;
+    let path = if file.contains('.') { file.to_string() } else { format!("{file}.BSP") };
+    let data = vfs.read(&path).map_err(|e| log::warn!("BSP {path}: {e}")).ok()?;
+    let bsp = quake_bsp::Bsp::parse(data).map_err(|e| log::warn!("BSP {path}: {e}")).ok()?;
+    let cubes = |effect: i32| -> Vec<Cube> {
+        objects
+            .list
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| o.effect == effect)
+            .filter_map(|(i, o)| {
+                let a = o.aux.as_ref()?;
+                Some(Cube::new([a.ints[0], a.ints[1], a.ints[2], a.ints[3]], i, o.tag))
+            })
+            .collect()
+    };
+    log::info!("BSP world {path}: {} faces", bsp.world_faces.len());
+    let mut world = BspWorld::new(bsp, goddpoly_palette(vfs), cubes(fx::ORORB), cubes(fx::OPTAGSW));
+    world.colormap = crate::bsp_world::goddpoly_colormap(vfs);
+    Some(Box::new(world))
 }
