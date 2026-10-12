@@ -1,0 +1,13 @@
+[package]
+name = "engine-gpu"
+description = "wgpu renderer for engine scenes: palette-indexed world pass, UI overlay, headless rendering"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+engine-scene.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+log.workspace = true
+pollster = "1"
+wgpu = "30"

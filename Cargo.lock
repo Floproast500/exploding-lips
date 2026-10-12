@@ -733,6 +733,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-gpu"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "engine-scene",
+ "log",
+ "pollster",
+ "wgpu",
+]
+
+[[package]]
 name = "engine-scene"
 version = "0.1.0"
 dependencies = [
@@ -1382,6 +1393,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "engine-core",
+ "engine-gpu",
  "env_logger",
  "gilrs",
  "godd-game",
@@ -1411,10 +1423,12 @@ dependencies = [
 name = "lipstool"
 version = "0.1.0"
 dependencies = [
+ "engine-gpu",
  "font8x8",
  "godd-formats",
  "godd-game",
  "png",
+ "wgpu",
 ]
 
 [[package]]

@@ -88,6 +88,10 @@ pub struct Game {
     crouch_latched: bool,
     /// Mouse look not yet consumed by a tick (yaw radians, look units), shown by the camera.
     pending_look: (f32, f32),
+    /// Bumped whenever a level is loaded (GPU renderers re-upload images and geometry).
+    epoch: u64,
+    /// Triangulated regions of the current level, for the GPU scene.
+    scene_cache: Option<(u64, Vec<scene::RegionMesh>)>,
     ui_colors: (u8, u8, u8, u8),
     fps: FpsCounter,
     /// Ticks since the game was created (the original HUD clock is time since launch).
@@ -102,6 +106,15 @@ pub struct Game {
     quicksave_dirty: bool,
     /// F2 automap overlay.
     show_map: bool,
+}
+
+/// One frame for a GPU renderer (see [`Game::gpu_frame`]).
+pub struct GpuView {
+    pub camera: engine_scene::scene::SceneCamera,
+    pub shading: engine_scene::scene::Shading,
+    pub scene: engine_scene::scene::SceneFrame,
+    /// Changes when a new level is loaded: re-upload [`Game::world_images`].
+    pub epoch: u64,
 }
 
 /// The engine console (~): runs INI commands like the original, plus `warp LEVEL`.
@@ -146,6 +159,8 @@ impl Game {
             saved_config: (0, engine_core::BindTable::default()),
             crouch_latched: false,
             pending_look: (0.0, 0.0),
+            epoch: 0,
+            scene_cache: None,
             ui_colors: (
                 text::nearest_color(&palette.rgb, [10, 10, 40]),
                 text::nearest_color(&palette.rgb, [24, 24, 252]),
@@ -260,6 +275,7 @@ impl Game {
         let save = std::mem::take(&mut self.save);
         let session = Session::start(vfs, name, entry, carried, save, self.current_slot)?;
         self.state = State::Playing(Box::new(session));
+        self.epoch += 1;
         Ok(())
     }
 
@@ -558,6 +574,71 @@ impl Game {
                 draw_overlays(frame, session);
             }
         }
+    }
+
+    /// The GPU path: returns the 3D scene for this frame and draws everything else (weapon,
+    /// overlays, HUD, menus, console) into `ui`, with coverage, to be composited on top.
+    /// `None` on the title screen and in classic 320x200 mode (render with [`Game::render`]).
+    pub fn gpu_frame(&mut self, ui: &mut Frame, alpha: f32) -> Option<GpuView> {
+        if self.options.classic || !matches!(self.state, State::Playing(_)) {
+            return None;
+        }
+        self.fps.frames += 1;
+        ui.palette = *self.palette();
+        if ui.coverage.is_none() {
+            ui.track_coverage(true);
+        }
+        ui.clear(0);
+        let epoch = self.epoch;
+        let State::Playing(session) = &mut self.state else { return None };
+        self.settings.fullbright = session.flash;
+        render_tvs(&mut self.renderer, session, &self.shade_rows, &self.settings, &ui.palette);
+        if self.scene_cache.as_ref().is_none_or(|(e, _)| *e != epoch) {
+            self.scene_cache = Some((epoch, scene::build(&session.level.world)));
+        }
+        let cam = camera(session, &self.physics, alpha, self.pending_look);
+        let mut frame = engine_scene::scene::SceneFrame::default();
+        let tan_half_v = (self.settings.vfov_degrees.to_radians() / 2.0).tan();
+        let tan_half_h = tan_half_v * ui.width as f32 / ui.height.max(1) as f32;
+        let freelook = self.cvars.get_bool("r_freelook");
+        scene::frame(&session.level.world, &self.scene_cache.as_ref().expect("scene cache").1, &cam, (tan_half_h, tan_half_v), freelook, &mut frame);
+        frame.dirty_images = session.tvs.iter().map(|t| t.image as u32).collect();
+        draw_weapon(ui, session, &self.shade_rows);
+        draw_overlays(ui, session);
+        let s = &self.settings;
+        let view = GpuView {
+            camera: engine_scene::scene::SceneCamera { pos: [cam.x, cam.y, cam.z], angle: cam.angle, pitch: cam.pitch, vfov_degrees: s.vfov_degrees, freelook },
+            shading: engine_scene::scene::Shading {
+                visibility: s.visibility,
+                fade_bias: s.fade_bias as f32,
+                true_color: s.true_color,
+                fullbright: s.fullbright,
+                max_object_shade: 14.0,
+                zero_substitute: 8,
+            },
+            scene: frame,
+            epoch,
+        };
+        self.render_ui(ui);
+        Some(view)
+    }
+
+    /// The current level's images (for GPU upload when [`GpuView::epoch`] changes).
+    pub fn world_images(&self) -> Vec<engine_scene::scene::IndexedImage<'_>> {
+        self.session().map_or_else(Vec::new, |s| {
+            s.level.world.images.iter().map(|i| engine_scene::scene::IndexedImage { width: i.width, height: i.height, pixels: &i.pixels }).collect()
+        })
+    }
+
+    /// One world image (live camera views change every frame).
+    pub fn world_image(&self, index: u32) -> Option<engine_scene::scene::IndexedImage<'_>> {
+        let i = self.session()?.level.world.images.get(index as usize)?;
+        Some(engine_scene::scene::IndexedImage { width: i.width, height: i.height, pixels: &i.pixels })
+    }
+
+    /// Shade tables (`rows[level][index]`).
+    pub fn shade_rows(&self) -> &[[u8; 256]] {
+        &self.shade_rows
     }
 
     /// Everything drawn over the view: automap, HUD, menus, options, console and FPS counter.

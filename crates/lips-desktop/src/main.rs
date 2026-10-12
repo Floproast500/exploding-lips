@@ -103,6 +103,8 @@ struct App {
     net: Option<net::NetSession>,
     clock: FixedClock,
     frame: Frame,
+    /// UI layer composited over the GPU world view.
+    ui: Frame,
     last: Instant,
     window: Option<Arc<Window>>,
     mouse_captured: bool,
@@ -167,10 +169,23 @@ impl App {
                 w.set_fullscreen(fullscreen.then_some(Fullscreen::Borderless(None)));
             }
         let (w, h) = self.frame_size();
+        self.game.preview_look(&self.input);
+        // GPU world renderer (r_renderer gpu) when the presenter has a GPU; the software
+        // renderer for classic 320x200, the title screen and CPU presentation.
+        let want_gpu = self.game.cvars.get_str("r_renderer") == "gpu" && self.presenter.as_ref().is_some_and(present::Presenter::is_gpu);
+        if want_gpu {
+            self.ui.resize(w, h);
+            self.ui.pixel_aspect = 1.0;
+            if let Some(view) = self.game.gpu_frame(&mut self.ui, self.clock.alpha())
+                && let Some(p) = &mut self.presenter
+                && p.present_world(&self.game, &view, &self.ui)
+            {
+                return;
+            }
+        }
         self.frame.resize(w, h);
         self.frame.pixel_aspect = if self.game.options.classic { CLASSIC_PIXEL_ASPECT } else { 1.0 };
         self.frame.set_true_color(self.game.options.true_color);
-        self.game.preview_look(&self.input);
         self.game.render(&mut self.frame, self.clock.alpha());
         if let Some(p) = &mut self.presenter {
             p.present(&self.frame, self.game.palette());
@@ -370,6 +385,7 @@ fn main() {
         net: None,
         clock: FixedClock::new(TICK_RATE),
         frame: Frame::new(640, 480),
+        ui: Frame::new(640, 480),
         last: Instant::now(),
         window: None,
         mouse_captured: false,

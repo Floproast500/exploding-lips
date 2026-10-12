@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 engine-core.workspace = true
+engine-gpu.workspace = true
 godd-game.workspace = true
 godd-net = { workspace = true, features = ["game"] }
 bytemuck = { version = "1", features = ["derive"] }

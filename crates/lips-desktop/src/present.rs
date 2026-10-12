@@ -41,6 +41,21 @@ impl Presenter {
             Self::Cpu(p) => p.present(frame, palette),
         }
     }
+
+    /// Draw a GPU world view with the UI layer on top. False when this presenter cannot (CPU).
+    pub fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame) -> bool {
+        match self {
+            Self::Gpu(p) => {
+                p.present_world(game, view, ui);
+                true
+            }
+            Self::Cpu(_) => false,
+        }
+    }
+
+    pub fn is_gpu(&self) -> bool {
+        matches!(self, Self::Gpu(_))
+    }
 }
 
 pub struct CpuPresenter {
@@ -106,6 +121,8 @@ pub struct GpuPresenter {
     rgb_pipeline: wgpu::RenderPipeline,
     rgb_layout: wgpu::BindGroupLayout,
     rgb_tex: Option<(wgpu::Texture, wgpu::BindGroup, u32, u32)>,
+    /// GPU world renderer and the level epoch whose images it holds.
+    world: Option<(engine_gpu::WorldRenderer, u64)>,
 }
 
 impl GpuPresenter {
@@ -241,6 +258,7 @@ impl GpuPresenter {
             rgb_pipeline,
             rgb_layout,
             rgb_tex: None,
+            world: None,
         })
     }
 
@@ -308,6 +326,43 @@ impl GpuPresenter {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
             pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(output);
+    }
+
+    fn present_world(&mut self, game: &godd_game::Game, view: &godd_game::GpuView, ui: &godd_game::Frame) {
+        let (device, queue) = (&self.device, &self.queue);
+        let (world, epoch) = self.world.get_or_insert_with(|| (engine_gpu::WorldRenderer::new(device, self.config.format), u64::MAX));
+        if *epoch != view.epoch {
+            world.set_palette(device, queue, game.palette(), game.shade_rows());
+            world.set_images(device, queue, &game.world_images());
+            *epoch = view.epoch;
+        }
+        for &i in &view.scene.dirty_images {
+            if let Some(image) = game.world_image(i) {
+                world.update_image(queue, i, image);
+            }
+        }
+        let output = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            other => {
+                log::warn!("surface unavailable: {other:?}");
+                return;
+            }
+        };
+        let target = output.texture.create_view(&Default::default());
+        let size = (self.config.width, self.config.height);
+        let (x, y, w, h) = letterbox(size.0, size.1, ui.display_aspect());
+        let vp = [x, y, w, h];
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        world.render(&self.device, &self.queue, &mut encoder, &target, size, vp, &view.camera, &view.shading, &view.scene);
+        if let Some(coverage) = &ui.coverage {
+            world.draw_ui(&self.device, &self.queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage);
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(output);

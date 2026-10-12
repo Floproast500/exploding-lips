@@ -14,6 +14,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.float("r_fov", "Field of view", Video, (30.0, 120.0, 2.0), 48.9);
     c.bool("r_truecolor", "True colour", Video, false);
     c.bool("r_classic", "Classic 320x200", Video, false);
+    c.choice("r_renderer", "Renderer", Video, &["software", "gpu"], 1);
+    c.bool("r_freelook", "True 3D look (GPU)", Video, true);
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);

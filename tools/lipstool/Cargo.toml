@@ -10,3 +10,5 @@ godd-formats.workspace = true
 godd-game.workspace = true
 font8x8 = "0.3"
 png = "0.17"
+engine-gpu.workspace = true
+wgpu = "30"

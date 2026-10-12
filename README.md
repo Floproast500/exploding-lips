@@ -13,7 +13,8 @@ the engine reads them from your install folder at runtime.
 | Area | State |
 |---|---|
 | File formats: XRB levels, XPG pixels, PAL, PIC, BMP, INI scripts, GAM saves | parsed; tested on every shipped file; byte-identical save rewrite; damaged-input robustness tests |
-| Renderer: portals, stacked (room-over-room) regions, floors/ceilings, sky, sprites with rotations, masked walls, original lighting | matches the original (golden test: RMSE 0.04 view / 0.06 full screen vs. `lips.exe`) |
+| Renderer: portals, stacked (room-over-room) regions, floors/ceilings, sky, sprites with rotations, masked walls, original lighting | software renderer matches the original (golden test: RMSE 0.04 view / 0.06 full screen vs. `lips.exe`) |
+| GPU renderer (wgpu): triangulated regions, portal visibility with exact screen windows, original shade tables or true colour, true-3D freelook | matches the software renderer (parity test: 110 views over 9 levels, worst RMSE 0.03); default on desktop (`r_renderer`) |
 | Movement & collision (walk/run/turn/jump/fall/step, see-through floors) | constants from the original; golden-tested against memory probes of `lips.exe` |
 | Script VM (`ONTAG`, tags, OS states with thresholds, `XM`/`XT`/`OTEXT`/`XCHANGE`/…) | complete for the shipped INIs, original quirks included |
 | World effects: doors, lifts, jump pads, rotating rooms, ramps, rafts, switches, region triggers, scrolling/animated textures | implemented; data-driven tests on the shipped levels |
@@ -32,6 +33,9 @@ Engine code is written from those specs, not from decompiler output.
 ## Layout
 
 ```
+crates/engine-core    game-agnostic core: frame, VFS, clock, cvars, bindings, config, audio requests
+crates/engine-scene   scene data for GPU renderers: sector outlines, triangulation, per-frame scenes
+crates/engine-gpu     wgpu renderer: palette-indexed world pass, portal clip windows, UI overlay
 crates/godd-formats   parsers for the data files (no platform dependencies)
 crates/godd-game      engine core: world, renderer, physics, scripts, effects, objects, UI
 crates/godd-net       netplay protocol, UDP/WebSocket server, client glue (feature "game")
@@ -100,6 +104,8 @@ cargo run -p lipstool -- info  original/LIPS00.XRB
 cargo run -p lipstool -- pics  original/LIPS00.XRB original/PALETTE.PAL out/
 cargo run -p lipstool -- map   original/LIPS00.XRB lips00.png
 cargo run -p lipstool -- render original LIPS00 view.png 1920x1080 90 0 truecolor
+cargo run -p lipstool -- render-gpu original LIPS00 view.png 1920x1080 90 0       # same view on the GPU
+cargo run -p lipstool -- dump-mesh original LIPS00 lips00.obj                     # triangulated level
 ```
 
 ## Testing

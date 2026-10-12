@@ -6,13 +6,17 @@
 //!   lipstool pic   <FILE.PIC> <PALETTE.PAL> <OUT.png>
 //!   lipstool map   <LEVEL.XRB> <OUT.png>          top-down wall plot
 //!   lipstool biosfont <OUT.bin>                    IBM 8x8 glyphs 0-127 in BIOS ROM layout
-//!   lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units] [truecolor]
+//!   lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units|sN] [truecolor]
 //!                                                  render the player's start view headlessly
+//!                                                  (sN: stand at sprite N instead of walking)
 //!   lipstool dump-mesh <GAME_DIR> <LEVEL> <OUT.obj>  triangulated floors, ceilings and walls
+//!   lipstool render-gpu <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units] [truecolor]
+//!                                                  the same view through the GPU renderer
 
 use godd_formats::xrb::{Orb, RecordExt, Section};
 use godd_formats::{pal::Palette, pic::Pic};
 use std::error::Error;
+use lipstool::{render_gpu, save_rgb};
 use std::path::Path;
 
 type AnyResult<T = ()> = Result<T, Box<dyn Error>>;
@@ -25,8 +29,15 @@ fn main() -> AnyResult {
         ["pic", pic, pal, out] => export_pic(Path::new(pic), Path::new(pal), Path::new(out)),
         ["map", xrb, out] => export_map(Path::new(xrb), Path::new(out)),
         ["biosfont", out] => export_bios_font(Path::new(out)),
-        ["render", dir, level, out, rest @ ..] => render_view(Path::new(dir), level, Path::new(out), rest),
+        ["render", dir, level, out, rest @ ..] => {
+            let (w, h, rgb) = lipstool::render_software(Path::new(dir), level, rest)?;
+            save_rgb(Path::new(out), w, h, &rgb)
+        }
         ["dump-mesh", dir, level, out] => dump_mesh(Path::new(dir), level, Path::new(out)),
+        ["render-gpu", dir, level, out, rest @ ..] => {
+            let (w, h, rgb) = render_gpu(Path::new(dir), level, rest)?;
+            save_rgb(Path::new(out), w, h, &rgb)
+        }
         _ => {
             eprintln!(
                 "usage:\n  lipstool info <LEVEL.XRB>\n  lipstool pics <LEVEL.XRB> <PALETTE.PAL> <OUT_DIR>\n  lipstool pic <FILE.PIC> <PALETTE.PAL> <OUT.png>\n  lipstool map <LEVEL.XRB> <OUT.png>\n  lipstool biosfont <OUT.bin>\n  lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units]\n  lipstool dump-mesh <GAME_DIR> <LEVEL> <OUT.obj>"
@@ -191,42 +202,6 @@ fn dump_mesh(dir: &Path, level: &str, out: &Path) -> AnyResult {
     }
     std::fs::write(out, obj)?;
     println!("{}: {floors} flat triangles, {} vertices, {stray} regions with stray edges", out.display(), n);
-    Ok(())
-}
-
-fn render_view(dir: &Path, level: &str, out: &Path, rest: &[&str]) -> AnyResult {
-    let (w, h) = match rest.first() {
-        Some(size) => {
-            let (w, h) = size.split_once('x').ok_or("size must be WxH")?;
-            (w.parse()?, h.parse()?)
-        }
-        None => (godd_game::CLASSIC_WIDTH, godd_game::CLASSIC_HEIGHT),
-    };
-    let turn: f32 = rest.get(1).map_or(Ok(0.0), |v| v.parse())?;
-    let forward: f32 = rest.get(2).map_or(Ok(0.0), |v| v.parse())?;
-    let vfs = godd_game::Vfs::from_dir(dir)?;
-    let mut game = godd_game::Game::new(&vfs, &godd_game::Options { start_level: Some(level.to_string()), save: None })?;
-    // Let objects settle for half a second (start-pad tool pickups etc.) before moving.
-    let idle = godd_game::Input::default();
-    for _ in 0..30 {
-        game.tick(&vfs, &idle);
-    }
-    game.debug_move_player(turn.to_radians(), forward);
-    let true_color = rest.get(3) == Some(&"truecolor");
-    game.settings.true_color = true_color;
-    let mut frame = godd_game::Frame::new(w, h);
-    frame.set_true_color(true_color);
-    // Render repeatedly so the HUD's rolling counters reach their values.
-    for _ in 0..150 {
-        game.render(&mut frame, 1.0);
-    }
-    let mut rgba = Vec::new();
-    frame.to_rgba(game.palette(), &mut rgba);
-    let rgb: Vec<u8> = rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(out)?), w as u32, h as u32);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header()?.write_image_data(&rgb)?;
     Ok(())
 }
 
