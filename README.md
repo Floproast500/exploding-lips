@@ -30,6 +30,7 @@ the engine reads them from your install folder at runtime.
 | Web (WASM): folder picker, GPU renderer on WebGPU or WebGL2 (software canvas fallback), positional audio with streamed music, options/bindings/saves in localStorage | working; headless-tested on WebGL2 and software (headless Chromium cannot show WebGPU canvases) |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
 | Modern extras: Hor+ widescreen, FOV, true colour, quicksave, key rebinding, high-contrast HUD, long messages | working |
+| HD HUD and menus: on the GPU renderer, text, boxes and menu images are drawn at display resolution with smooth glyph edges (`hud_hd`, `hud_smooth`) | GPU-tested (headless draw of boxes, glyphs, images) and data-tested (HUD recorded for the GPU) |
 | Automap (F2/Tab): explored regions only, textured floors, zoom (+/-, wheel), north-up or rotating, markers (M), other players | working |
 | Save slots (F10 > Save/Load game): 8 slots with view thumbnails, stored in the config folder / browser storage | data-tested round trip |
 | Console (`~`): config commands, Tab completion, history, scrollback, INI commands, `warp` | unit-tested |

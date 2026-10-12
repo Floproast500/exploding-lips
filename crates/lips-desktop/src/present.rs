@@ -218,7 +218,8 @@ impl GpuPresenter {
         let mut encoder = device.create_command_encoder(&Default::default());
         world.render(device, queue, &mut encoder, &target, size, vp, &view.camera, &view.shading, &view.scene);
         if let Some(coverage) = &ui.coverage {
-            world.draw_ui(device, queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage);
+            let list = ui.ui_list.as_deref().unwrap_or_default();
+            world.draw_ui(device, queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage, list, game.cvars.get_bool("hud_smooth"));
         }
         queue.submit([encoder.finish()]);
         queue.present(output);

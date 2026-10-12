@@ -113,7 +113,7 @@ pub fn render_gpu_with(
         renderer.set_hd(&device, &queue, &hd_textures(&game, Path::new(dir))?);
     }
     let coverage = ui.coverage.clone().unwrap_or_default();
-    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage)));
+    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default())));
     Ok((w, h, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()))
 }
 
@@ -209,7 +209,7 @@ pub fn bench_gpu(dir: &Path, level: &str, rest: &[&str], frames: u32) -> AnyResu
     let frame = |renderer: &mut engine_gpu::WorldRenderer| {
         let mut encoder = device.create_command_encoder(&Default::default());
         renderer.render(&device, &queue, &mut encoder, &target, (w as u32, h as u32), vp, &view.camera, &view.shading, &view.scene);
-        renderer.draw_ui(&device, &queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, &coverage);
+        renderer.draw_ui(&device, &queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default(), true);
         queue.submit([encoder.finish()]);
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
     };
@@ -253,7 +253,7 @@ pub fn render_module(module: &mut dyn engine_scene::module::GameModule, (w, h): 
     renderer.set_palette(&device, &queue, module.palette(), module.shade_rows());
     renderer.set_images(&device, &queue, &module.images());
     let coverage = ui.coverage.clone().unwrap_or_default();
-    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage)));
+    let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default())));
     Ok(rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect())
 }
 

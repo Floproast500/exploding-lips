@@ -8,6 +8,7 @@ use engine_scene::scene::{HdTexture, IndexedImage, SceneCamera, SceneFrame, Shad
 mod frame;
 mod hd;
 mod post;
+mod ui_list;
 pub use frame::{CpuFrame, FramePresenter, letterbox};
 use hd::HdSet;
 use post::Post;
@@ -136,6 +137,7 @@ pub struct WorldRenderer {
     vertices: Option<(wgpu::Buffer, u64)>,
     staging: Vec<GpuVertex>,
     ui: UiOverlay,
+    ui_list: ui_list::UiList,
 }
 
 impl WorldRenderer {
@@ -238,6 +240,7 @@ impl WorldRenderer {
             clips: None,
             uniforms,
             ui: UiOverlay::new(device, format, &palette),
+            ui_list: ui_list::UiList::new(device, format),
             palette,
             colormap: None,
             atlas: None,
@@ -576,7 +579,9 @@ impl WorldRenderer {
         }
     }
 
-    /// Composite a CPU-drawn indexed UI layer (`indices`, `coverage`) over `target`.
+    /// Composite a CPU-drawn indexed UI layer (`indices`, `coverage`) over `target`, then the
+    /// recorded UI drawing `list` (same `size` coordinates) at display resolution; `smooth`
+    /// gives glyphs smooth HD edges instead of enlarged pixels.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_ui(
         &mut self,
@@ -588,8 +593,13 @@ impl WorldRenderer {
         size: (usize, usize),
         indices: &[u8],
         coverage: &[u8],
+        list: &[engine_scene::scene::UiCmd],
+        smooth: bool,
     ) {
         self.ui.draw(device, queue, encoder, target, viewport, size, indices, coverage, &self.palette);
+        if !list.is_empty() {
+            self.ui_list.draw(device, queue, encoder, target, viewport, size, list, smooth, &self.palette);
+        }
     }
 }
 
@@ -741,8 +751,8 @@ pub fn headless() -> Option<(wgpu::Device, wgpu::Queue)> {
     .ok()
 }
 
-/// A CPU-drawn UI layer: size, palette indices and coverage.
-pub type UiLayer<'a> = ((usize, usize), &'a [u8], &'a [u8]);
+/// A UI layer: size, palette indices and coverage drawn on the CPU, and recorded UI drawing.
+pub type UiLayer<'a> = ((usize, usize), &'a [u8], &'a [u8], &'a [engine_scene::scene::UiCmd]);
 
 /// Render a scene off screen and read it back as RGBA8 (`width * height * 4` bytes).
 #[allow(clippy::too_many_arguments)]
@@ -770,8 +780,8 @@ pub fn render_offscreen(
     let mut encoder = device.create_command_encoder(&Default::default());
     let vp = [0.0, 0.0, width as f32, height as f32];
     renderer.render(device, queue, &mut encoder, &view, (width, height), vp, camera, shading, scene);
-    if let Some((size, indices, coverage)) = ui {
-        renderer.draw_ui(device, queue, &mut encoder, &view, vp, size, indices, coverage);
+    if let Some((size, indices, coverage, list)) = ui {
+        renderer.draw_ui(device, queue, &mut encoder, &view, vp, size, indices, coverage, list, true);
     }
     let row = (width * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -802,6 +812,36 @@ pub fn render_offscreen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The recorded UI list draws at display resolution: a box, a solid glyph and an image with
+    /// a transparent texel land on the right pixels in their palette colours.
+    #[test]
+    fn ui_list_draws_boxes_glyphs_and_images() {
+        use engine_scene::scene::UiCmd;
+        let Some((device, queue)) = headless() else { return };
+        let mut r = WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let mut palette = [[0u8; 3]; 256];
+        palette[5] = [255, 0, 0];
+        palette[7] = [0, 255, 0];
+        palette[9] = [0, 0, 255];
+        r.set_palette(&device, &queue, &palette, &[[0; 256]; 16]);
+        let camera = SceneCamera { pos: [0.0; 3], angle: 0.0, pitch: 0.0, vfov_degrees: 60.0, freelook: false };
+        let shading = Shading { visibility: 1.0e9, fade_bias: 0.0, true_color: true, fullbright: false, max_object_shade: 15.0, zero_substitute: 0, modern: None };
+        // A 32x20 UI frame shown on a 64x40 target: every UI pixel is 2x2 on screen.
+        let list = [
+            UiCmd::Rect { x: 2, y: 2, w: 4, h: 4, color: 5 },
+            UiCmd::Glyph { x: 12, y: 4, scale: 1, color: 7, rows: [0xFF; 8] },
+            UiCmd::Image { x: 24, y: 4, scale: 2, width: 2, height: 1, pixels: vec![9, 0] },
+        ];
+        let (indices, coverage) = (vec![0u8; 32 * 20], vec![0u8; 32 * 20]);
+        let rgba = render_offscreen(&device, &queue, &mut r, (64, 40), &camera, &shading, &SceneFrame::default(), Some(((32, 20), &indices, &coverage, &list)));
+        let at = |x: usize, y: usize| [rgba[(y * 64 + x) * 4], rgba[(y * 64 + x) * 4 + 1], rgba[(y * 64 + x) * 4 + 2]];
+        assert_eq!(at(8, 8), [255, 0, 0], "box");
+        assert_eq!(at(32, 16), [0, 255, 0], "glyph middle");
+        assert_ne!(at(32, 30), [0, 255, 0], "below the glyph");
+        assert_eq!(at(50, 10), [0, 0, 255], "image texel");
+        assert_ne!(at(54, 10), [0, 0, 255], "transparent texel");
+    }
 
     #[test]
     fn packing_fills_layers_without_overlap() {

@@ -2,6 +2,9 @@
 //! coordinates, the camera and the lighting rules. Images are palette-indexed; texture
 //! coordinates are in texels (unwrapped), so one texel per world unit stays exact.
 
+/// Recorded UI drawing, drawn by the GPU over the view (`WorldRenderer::draw_ui`).
+pub use engine_core::frame::UiCmd;
+
 /// Texel index 0 is transparent (masked walls, sprites).
 pub const TRANSPARENT: u32 = 1;
 /// Draw the panoramic sky here instead of the texture.

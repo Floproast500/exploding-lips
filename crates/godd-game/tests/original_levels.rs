@@ -770,3 +770,23 @@ fn lips00_sounds_behind_walls_are_muffled() {
         .collect();
     assert!(!muffles.is_empty() && muffles.iter().all(|m| (0.0..=1.0).contains(m)), "{muffles:?}");
 }
+
+/// HD HUD: on the GPU path the HUD text is recorded for the GPU (not rasterised into the UI
+/// layer); with `hud_hd 0` it is drawn as pixels like before.
+#[test]
+fn lips00_hud_is_recorded_for_the_gpu() {
+    use engine_core::UiCmd;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    let (w, h) = game.ui_layer_size(1920, 1080);
+    let mut ui = godd_game::Frame::new(w, h);
+    game.gpu_frame(&mut ui, 1.0).unwrap();
+    let list = ui.ui_list.as_ref().expect("recording");
+    assert!(list.iter().filter(|c| matches!(c, UiCmd::Glyph { .. })).count() > 50, "HUD glyphs");
+    let drawn = |ui: &godd_game::Frame| ui.coverage.as_ref().unwrap().iter().filter(|&&c| c != 0).count();
+    let hd_pixels = drawn(&ui);
+    game.cvars.set("hud_hd", "0").unwrap();
+    game.gpu_frame(&mut ui, 1.0).unwrap();
+    assert!(ui.ui_list.is_none());
+    assert!(drawn(&ui) > hd_pixels + 1000, "the HUD is in the pixel layer: {} vs {hd_pixels}", drawn(&ui));
+}

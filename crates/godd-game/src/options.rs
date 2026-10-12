@@ -44,6 +44,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.int("hud_scale", "HUD scale (0 = auto)", Hud, (0, 8, 1), 0);
     c.choice("crosshair", "Crosshair", Hud, &["off", "dot", "cross", "circle"], 0);
     c.bool("hud_fps", "Show FPS", Hud, false);
+    c.bool("hud_hd", "HD HUD and menus (GPU)", Hud, true);
+    c.bool("hud_smooth", "Smooth HD text", Hud, true);
     c.bool("am_textured", "Map: textured floors", Hud, true);
     c.bool("am_rotate", "Map: rotate with view", Hud, true);
     c.float("am_zoom", "Map: zoom", Hud, (0.25, 8.0, 0.25), 1.0);

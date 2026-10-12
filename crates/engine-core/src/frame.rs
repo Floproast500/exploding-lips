@@ -16,11 +16,24 @@ pub struct Frame {
     /// When tracked: 255 where something was drawn since the last clear, 0 elsewhere. Lets a UI
     /// layer be composited over another renderer's view (index 0 is a real colour, not "empty").
     pub coverage: Option<Vec<u8>>,
+    /// When recording: UI drawing (text, boxes, menu images) is collected here instead of
+    /// rasterised, for a GPU to draw at full display resolution over the pixel layer.
+    pub ui_list: Option<Vec<UiCmd>>,
+}
+
+/// A recorded UI drawing command, in frame pixel coordinates.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiCmd {
+    Rect { x: i32, y: i32, w: u32, h: u32, color: u8 },
+    /// An 8x8 bitmap glyph (one byte per row, bit 0 leftmost) enlarged `scale` times.
+    Glyph { x: i32, y: i32, scale: u32, color: u8, rows: [u8; 8] },
+    /// Palette indices (0 transparent) enlarged `scale` times.
+    Image { x: i32, y: i32, scale: u32, width: u32, height: u32, pixels: Vec<u8> },
 }
 
 impl Frame {
     pub fn new(width: usize, height: usize) -> Self {
-        Self { width, height, pixels: vec![0; width * height], rgb: None, palette: [[0; 3]; 256], pixel_aspect: 1.0, coverage: None }
+        Self { width, height, pixels: vec![0; width * height], rgb: None, palette: [[0; 3]; 256], pixel_aspect: 1.0, coverage: None, ui_list: None }
     }
 
     pub fn resize(&mut self, width: usize, height: usize) {
@@ -40,6 +53,13 @@ impl Frame {
     /// Start or stop recording which pixels are drawn (see [`Frame::coverage`]).
     pub fn track_coverage(&mut self, enabled: bool) {
         self.coverage = enabled.then(|| vec![0; self.width * self.height]);
+    }
+
+    /// Start or stop recording UI drawing into [`Frame::ui_list`].
+    pub fn record_ui(&mut self, enabled: bool) {
+        if enabled != self.ui_list.is_some() {
+            self.ui_list = enabled.then(Vec::new);
+        }
     }
 
     pub fn set_true_color(&mut self, enabled: bool) {
@@ -63,6 +83,9 @@ impl Frame {
         }
         if let Some(c) = &mut self.coverage {
             c.fill(0);
+        }
+        if let Some(l) = &mut self.ui_list {
+            l.clear();
         }
     }
 

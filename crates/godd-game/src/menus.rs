@@ -444,15 +444,7 @@ impl Menus {
 
 /// Draw an image with index-0 transparency at integer scale.
 fn blit(frame: &mut Frame, img: &Image, x: i32, y: i32, s: usize) {
-    for v in 0..img.height * s {
-        for u in 0..img.width * s {
-            let texel = img.pixels[(v / s) * img.width + u / s];
-            let (px, py) = (x + u as i32, y + v as i32);
-            if texel != 0 && px >= 0 && py >= 0 && (px as usize) < frame.width && (py as usize) < frame.height {
-                frame.put(py as usize * frame.width + px as usize, texel);
-            }
-        }
-    }
+    crate::text::blit(frame, img.width, img.height, &img.pixels, x, y, s);
 }
 
 fn c_string(bytes: &[u8]) -> String {

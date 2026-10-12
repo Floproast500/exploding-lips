@@ -21,7 +21,7 @@ jobs:
           components: clippy, rustfmt
       - name: Linux system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev pkg-config cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev pkg-config cmake libx11-dev libxext-dev
       # Linux also checks the SDL3 gamepad backend (SDL3 built from source).
       - name: Features
         shell: bash

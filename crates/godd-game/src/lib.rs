@@ -752,6 +752,7 @@ impl Game {
         if ui.coverage.is_none() {
             ui.track_coverage(true);
         }
+        ui.record_ui(self.cvars.get_bool("hud_hd"));
         ui.clear(0);
         let epoch = self.epoch;
         let State::Playing(session) = &mut self.state else { return None };
@@ -857,6 +858,8 @@ impl Game {
     pub fn render_ui(&mut self, frame: &mut Frame) {
         if let State::Playing(session) = &self.state {
             if self.show_map {
+                // The automap draws pixel by pixel: keep it (and its labels) in the pixel layer.
+                let recording = frame.ui_list.take();
                 if self.scene_cache.as_ref().is_none_or(|(e, _)| *e != self.epoch) {
                     self.scene_cache = Some((self.epoch, scene::build(&session.level.world)));
                 }
@@ -869,6 +872,7 @@ impl Game {
                 };
                 let others: Vec<(f32, f32, f32)> = session.remote_positions();
                 self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);
+                frame.ui_list = recording;
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
             self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);
@@ -882,15 +886,9 @@ impl Game {
             let (w, h) = (saves::THUMB_W * s, saves::THUMB_H * s);
             let (x0, y0) = (frame.width.saturating_sub(w + 8 * s), (frame.height.saturating_sub(h)) / 2);
             text::fill_rect(frame, x0 as i32 - s as i32, y0 as i32 - s as i32, w + 2 * s, h + 2 * s, self.ui_colors.1);
-            for y in 0..h {
-                for x in 0..w {
-                    let texel = thumb.thumb[(y / s) * saves::THUMB_W + x / s];
-                    let (px, py) = (x0 + x, y0 + y);
-                    if px < frame.width && py < frame.height {
-                        frame.put(py * frame.width + px, texel);
-                    }
-                }
-            }
+            // Index 0 is black in the thumbnail, not transparent: draw it on a black box.
+            text::fill_rect(frame, x0 as i32, y0 as i32, w, h, 0);
+            text::blit(frame, saves::THUMB_W, saves::THUMB_H, &thumb.thumb, x0 as i32, y0 as i32, s);
         }
         if self.console.open {
             // Top half of the screen: scrollback, then the prompt.

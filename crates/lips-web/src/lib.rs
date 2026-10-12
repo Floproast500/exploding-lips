@@ -338,7 +338,9 @@ impl WebGame {
                 let vp = [0.0, 0.0, w as f32, h as f32];
                 gpu.world.render(&gpu.device, &gpu.queue, &mut encoder, &target, (w, h), vp, &view.camera, &view.shading, &view.scene);
                 if let Some(coverage) = &self.ui.coverage {
-                    gpu.world.draw_ui(&gpu.device, &gpu.queue, &mut encoder, &target, vp, (self.ui.width, self.ui.height), &self.ui.pixels, coverage);
+                    let list = self.ui.ui_list.as_deref().unwrap_or_default();
+                    let smooth = self.game.cvars.get_bool("hud_smooth");
+                    gpu.world.draw_ui(&gpu.device, &gpu.queue, &mut encoder, &target, vp, (self.ui.width, self.ui.height), &self.ui.pixels, coverage, list, smooth);
                 }
             }
             None => {
