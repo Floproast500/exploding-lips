@@ -1,0 +1,9 @@
+[package]
+name = "engine-scene"
+description = "Game-agnostic scene data for the GPU renderer: sector outlines, triangulation, meshes"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+earcut = "0.4"

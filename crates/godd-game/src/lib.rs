@@ -18,6 +18,7 @@ pub mod objects;
 pub mod options;
 pub mod player;
 pub mod render;
+pub mod scene;
 pub mod script;
 pub mod session;
 pub mod text;

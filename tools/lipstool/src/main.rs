@@ -8,6 +8,7 @@
 //!   lipstool biosfont <OUT.bin>                    IBM 8x8 glyphs 0-127 in BIOS ROM layout
 //!   lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units] [truecolor]
 //!                                                  render the player's start view headlessly
+//!   lipstool dump-mesh <GAME_DIR> <LEVEL> <OUT.obj>  triangulated floors, ceilings and walls
 
 use godd_formats::xrb::{Orb, RecordExt, Section};
 use godd_formats::{pal::Palette, pic::Pic};
@@ -25,9 +26,10 @@ fn main() -> AnyResult {
         ["map", xrb, out] => export_map(Path::new(xrb), Path::new(out)),
         ["biosfont", out] => export_bios_font(Path::new(out)),
         ["render", dir, level, out, rest @ ..] => render_view(Path::new(dir), level, Path::new(out), rest),
+        ["dump-mesh", dir, level, out] => dump_mesh(Path::new(dir), level, Path::new(out)),
         _ => {
             eprintln!(
-                "usage:\n  lipstool info <LEVEL.XRB>\n  lipstool pics <LEVEL.XRB> <PALETTE.PAL> <OUT_DIR>\n  lipstool pic <FILE.PIC> <PALETTE.PAL> <OUT.png>\n  lipstool map <LEVEL.XRB> <OUT.png>\n  lipstool biosfont <OUT.bin>\n  lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units]"
+                "usage:\n  lipstool info <LEVEL.XRB>\n  lipstool pics <LEVEL.XRB> <PALETTE.PAL> <OUT_DIR>\n  lipstool pic <FILE.PIC> <PALETTE.PAL> <OUT.png>\n  lipstool map <LEVEL.XRB> <OUT.png>\n  lipstool biosfont <OUT.bin>\n  lipstool render <GAME_DIR> <LEVEL> <OUT.png> [WxH] [turn_degrees] [forward_units]\n  lipstool dump-mesh <GAME_DIR> <LEVEL> <OUT.obj>"
             );
             std::process::exit(2);
         }
@@ -133,6 +135,65 @@ fn export_bios_font(out: &Path) -> AnyResult {
 
 /// Render a level from the player start (optionally turned and moved) through the game's own
 /// renderer, without a window. Useful for quick visual checks and golden images.
+/// Wavefront OBJ of the level as the GPU renderer will see it: each region's floor and ceiling
+/// triangulated at their heights, and wall sections (one-sided: floor to ceiling; two-sided:
+/// the upper and lower steps). Y up, -Z north, one group per region.
+fn dump_mesh(dir: &Path, level: &str, out: &Path) -> AnyResult {
+    use std::fmt::Write;
+    let vfs = godd_game::Vfs::from_dir(dir)?;
+    let lvl = godd_game::level::Level::load(vfs.read(&format!("{level}.XRB"))?, vfs.read(&format!("{level}.XPG"))?)?;
+    let w = &lvl.world;
+    let meshes = godd_game::scene::build(w);
+    let mut obj = format!("# {level}: {} regions, {} walls\n", w.regions.len(), w.walls.len());
+    let mut n = 0usize;
+    fn quad(obj: &mut String, n: &mut usize, (ax, ay): (f32, f32), (bx, by): (f32, f32), z0: f32, z1: f32) {
+        if z1 <= z0 {
+            return;
+        }
+        for (x, y, z) in [(ax, ay, z0), (bx, by, z0), (bx, by, z1), (ax, ay, z1)] {
+            let _ = writeln!(obj, "v {x} {z} {}", -y);
+        }
+        let _ = writeln!(obj, "f {} {} {} {}", *n + 1, *n + 2, *n + 3, *n + 4);
+        *n += 4;
+    }
+    let (mut floors, mut stray) = (0, 0);
+    for (r, m) in meshes.iter().enumerate() {
+        let region = &w.regions[r];
+        let _ = writeln!(obj, "g region{r}");
+        stray += (m.outline.open_edges > 0) as usize;
+        for (z, flip, skip) in [(region.floor, false, region.below.is_some()), (region.ceiling, true, region.above.is_some())] {
+            if skip {
+                continue; // see-through stacked floor/ceiling
+            }
+            for t in &m.triangles {
+                for &i in t {
+                    let (x, y) = w.vertices[i as usize];
+                    let _ = writeln!(obj, "v {x} {z} {}", -y);
+                }
+                let (a, b, c) = (n + 1, n + 2, n + 3);
+                let _ = if flip { writeln!(obj, "f {a} {c} {b}") } else { writeln!(obj, "f {a} {b} {c}") };
+                n += 3;
+                floors += 1;
+            }
+        }
+    }
+    let _ = writeln!(obj, "g walls");
+    for wall in &w.walls {
+        let (a, b) = (w.vertices[wall.a], w.vertices[wall.b]);
+        let f = &w.regions[wall.front];
+        match wall.back.map(|r| &w.regions[r]) {
+            None => quad(&mut obj, &mut n, a, b, f.floor, f.ceiling),
+            Some(back) => {
+                quad(&mut obj, &mut n, a, b, back.ceiling, f.ceiling);
+                quad(&mut obj, &mut n, a, b, f.floor, back.floor);
+            }
+        }
+    }
+    std::fs::write(out, obj)?;
+    println!("{}: {floors} flat triangles, {} vertices, {stray} regions with stray edges", out.display(), n);
+    Ok(())
+}
+
 fn render_view(dir: &Path, level: &str, out: &Path, rest: &[&str]) -> AnyResult {
     let (w, h) = match rest.first() {
         Some(size) => {

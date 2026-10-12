@@ -717,10 +717,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
+name = "earcut"
+version = "0.4.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f03dd5350900133e14471c90d513eb5ba264004cd833adecab7dfa5fb5a2974"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "engine-core"
 version = "0.1.0"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "engine-scene"
+version = "0.1.0"
+dependencies = [
+ "earcut",
 ]
 
 [[package]]
@@ -999,6 +1015,7 @@ name = "godd-game"
 version = "0.1.0"
 dependencies = [
  "engine-core",
+ "engine-scene",
  "font8x8",
  "godd-formats",
  "log",

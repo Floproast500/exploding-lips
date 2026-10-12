@@ -575,3 +575,51 @@ fn lips00_autorun_and_toggle_crouch() {
     run(&mut game, &vfs, 0.1);
     assert!(!game.session().unwrap().player.crouching);
 }
+
+/// Every region of every level triangulates: on a sample grid, a point is covered by the
+/// region's triangles exactly when the engine's own point-in-region test (even-odd over the
+/// region's walls) says it is inside. Regions with unclosed stray edges (walls that name a
+/// region they don't bound, e.g. LIPS07 region 132's lone wall 64 units east of its box) break
+/// that even-odd test, so for them the oracle is the closed outline loops instead.
+#[test]
+fn every_region_triangulates() {
+    use engine_scene::polygon::contains;
+    let Some(dir) = original_dir() else { return };
+    let vfs = godd_game::Vfs::from_dir(&dir).unwrap();
+    let (mut regions, mut samples, mut bad, mut stray) = (0, 0usize, Vec::new(), 0);
+    for level in ["LIPSTART"].into_iter().map(String::from).chain((0..18).map(|i| format!("LIPS{i:02}"))) {
+        let (Ok(xrb), Ok(xpg)) = (vfs.read(&format!("{level}.XRB")), vfs.read(&format!("{level}.XPG"))) else { continue };
+        let Ok(lvl) = godd_game::level::Level::load(xrb, xpg) else { continue };
+        let w = &lvl.world;
+        let pts = godd_game::scene::points(w);
+        for (r, m) in godd_game::scene::build(w).iter().enumerate() {
+            regions += 1;
+            stray += (m.outline.open_edges > 0) as usize;
+            let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
+            let (mut wrong, mut n) = (0, 0);
+            const STEPS: usize = 24;
+            for i in 0..STEPS {
+                for j in 0..STEPS {
+                    // Cell centres, nudged off the 1-unit grid the maps are drawn on.
+                    let x = x0 as f64 + (x1 - x0) as f64 * (i as f64 + 0.5) / STEPS as f64 + 0.013;
+                    let y = y0 as f64 + (y1 - y0) as f64 * (j as f64 + 0.5) / STEPS as f64 + 0.017;
+                    let world_says = if m.outline.open_edges == 0 {
+                        w.point_in_region(x as f32, y as f32, r)
+                    } else {
+                        m.outline.parts.iter().any(|p| contains(&pts, &p.outer, [x, y]) && !p.holes.iter().any(|h| contains(&pts, h, [x, y])))
+                    };
+                    let covered = m.triangles.iter().any(|t| contains(&pts, t, [x, y]));
+                    n += 1;
+                    wrong += (world_says != covered) as usize;
+                }
+            }
+            samples += n;
+            if wrong * 50 > n {
+                bad.push(format!("{level} region {r}: {wrong}/{n} samples disagree (open edges {})", m.outline.open_edges));
+            }
+        }
+    }
+    assert!(regions > 5000, "levels loaded ({regions} regions)");
+    assert!(bad.is_empty(), "{} of {regions} regions fail ({samples} samples):\n{}", bad.len(), bad.join("\n"));
+    assert!(stray < regions / 50, "{stray} regions have stray edges");
+}
