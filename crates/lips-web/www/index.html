@@ -26,12 +26,13 @@
   </div>
   <canvas id="screen"></canvas>
   <script type="module">
-    import init, { Loader } from "./pkg/lips_web.js";
+    import init, { Loader, create_gpu } from "./pkg/lips_web.js";
     await init();
 
     const status = document.getElementById("status");
-    const canvas = document.getElementById("screen");
-    const ctx = canvas.getContext("2d");
+    let canvas = document.getElementById("screen");
+    let ctx = null; // 2D context when there is no GPU
+    window.lipsRenderer = "starting";
 
     // Testing/hosting hook: ?data=<base url> fetches <base>/manifest.json (a list of relative
     // paths) and the files themselves instead of asking for a folder. Optional &level=LIPS00.
@@ -60,7 +61,7 @@
       boot(loader, null);
     });
 
-    function boot(loader, level) {
+    async function boot(loader, level) {
       if (!loader.ready()) {
         status.textContent = "That folder does not look like an Exploding Lips install (lips.bmp / LIPSTART.XRB missing).";
         return;
@@ -68,8 +69,9 @@
       try {
         const stored = localStorage.getItem("lips-save");
         if (stored) loader.set_save(Uint8Array.from(atob(stored), (c) => c.charCodeAt(0)));
-        const config = localStorage.getItem("lips-config");
-        if (config) loader.set_config(config);
+        // Stored options, then any ?set=NAME%20VALUE overrides (testing and links).
+        const lines = [localStorage.getItem("lips-config") ?? "", ...params.getAll("set").map((v) => `set ${v}`)];
+        loader.set_config(lines.join("\n"));
       } catch { /* storage unavailable: use the folder's save and default options */ }
       let game;
       try {
@@ -80,6 +82,26 @@
       }
       document.getElementById("setup").style.display = "none";
       canvas.style.display = "block";
+      // GPU renderer (WebGPU, else WebGL2; ?renderer=webgl forces WebGL2) unless
+      // ?renderer=software; without a GPU, a 2D canvas.
+      canvas.width = canvas.clientWidth || 640;
+      canvas.height = canvas.clientHeight || 480;
+      let gpu = null;
+      if (params.get("renderer") !== "software") {
+        try { gpu = await create_gpu(canvas, params.get("renderer") === "webgl"); } catch (e) { console.warn("GPU unavailable:", e); }
+      }
+      if (gpu) {
+        window.lipsRenderer = gpu.backend();
+        game.attach_gpu(gpu);
+      } else {
+        // A canvas that tried a GPU context cannot switch to 2D: use a fresh one.
+        const fresh = canvas.cloneNode();
+        canvas.replaceWith(fresh);
+        canvas = fresh;
+        canvas.style.display = "block";
+        ctx = canvas.getContext("2d");
+        window.lipsRenderer = "software";
+      }
       document.title = "Exploding Lips — running";
       if (params.has("join")) {
         try { game.connect(params.get("join"), params.get("name") ?? "browser"); } catch (e) { console.error(e); }
@@ -88,6 +110,10 @@
     }
 
     function run(game) {
+      // Browsers start audio only from a user gesture.
+      const startAudio = () => game.start_audio();
+      addEventListener("keydown", startAudio, { once: true });
+      addEventListener("pointerdown", startAudio, { once: true });
       const keyHandler = (down) => (e) => {
         if (down) game.type_text(e.key);
         if (game.key(e.code, down)) e.preventDefault();
@@ -113,7 +139,8 @@
         const w = Math.max(1, Math.round(canvas.clientWidth * scale));
         const h = Math.max(1, Math.round(canvas.clientHeight * scale));
         if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
-        const rgba = game.frame(now - last, w, h);
+        let rgba = null;
+        if (ctx) rgba = game.frame(now - last, w, h); else game.frame_gpu(now - last, w, h);
         const config = game.take_config();
         if (config) {
           try { localStorage.setItem("lips-config", config); } catch { /* ignore */ }
@@ -123,7 +150,7 @@
           try { localStorage.setItem("lips-save", btoa(String.fromCharCode(...save))); } catch { /* ignore */ }
         }
         last = now;
-        ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h), 0, 0);
+        if (rgba) ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h), 0, 0);
         requestAnimationFrame(frame);
       };
       requestAnimationFrame(frame);

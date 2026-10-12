@@ -25,7 +25,7 @@ the engine reads them from your install folder at runtime.
 | HUD, status messages, menus (LIPSTART), character save slots (LIPSTART.GAM) | exact original layout |
 | Audio: positional 3D sound (bots, doors, lifts, shots, explosions), room reverb sized from the surrounding space, effects/music/master volume, streamed MIDI with a built-in fallback SoundFont (`snd_spatial`, `snd_reverb`) | unit-tested (gain/pan, SoundFont parses and plays, streaming and stop) and data-tested (door sounds come from the door) |
 | Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput) |
-| Web (WASM): folder picker, saves in localStorage | working, headless-tested |
+| Web (WASM): folder picker, GPU renderer on WebGPU or WebGL2 (software canvas fallback), positional audio with streamed music, options/bindings/saves in localStorage | working; headless-tested on WebGL2 and software (headless Chromium cannot show WebGPU canvases) |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
 | Modern extras: Hor+ widescreen, FOV, true colour, F2 automap, quicksave, console, key rebinding, high-contrast HUD, long messages, mods | working |
 
@@ -97,7 +97,9 @@ coordinates, filters with mipmaps and anisotropy, and lights the normal maps.
 SoundFont the engine generates itself — so music always plays.
 
 **Web:** `./scripts/build-web.sh`, then `python3 -m http.server -d crates/lips-web/www 8080` and
-open `http://localhost:8080`; choose your game folder. Add `?join=ws://HOST:PORT&name=you` to join
+open `http://localhost:8080`; choose your game folder. The page uses WebGPU, else WebGL2, else a 2D
+canvas (`?renderer=webgl|software` forces one); sound starts with your first click or key;
+`?set=r_lighting%20classic` sets any option. A `.sf2` in the game folder is used for music. Add `?join=ws://HOST:PORT&name=you` to join
 a desktop host started with `--host --ws-port PORT`.
 
 ### Controls

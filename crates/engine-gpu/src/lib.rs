@@ -5,8 +5,10 @@
 
 use engine_scene::scene::{HdTexture, IndexedImage, SceneCamera, SceneFrame, Shading};
 
+mod frame;
 mod hd;
 mod post;
+pub use frame::{CpuFrame, FramePresenter, letterbox};
 use hd::HdSet;
 use post::Post;
 

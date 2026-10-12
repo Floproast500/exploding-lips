@@ -1,6 +1,9 @@
 // Smoke-test the WebAssembly build in headless Brave/Chromium via puppeteer-core.
 //
 //   node tools/pilot/web_pilot.mjs --level LIPS00 --out re/shots/web/lips00.png [--keys ArrowUp:1000]
+//     [--query renderer=software|webgl] [--renderer Gl|BrowserWebGpu|software]   (expect a renderer)
+//   Headless Chromium cannot show WebGPU canvases (even a plain clear stays white), so tests
+//   force WebGL2 for the GPU path; the renderer code is the same.
 //
 // Serves crates/lips-web/www and the game files from original/ (with a generated manifest),
 // opens index.html?data=/game&level=..., optionally holds keys, screenshots the canvas and
@@ -48,15 +51,25 @@ await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const port = server.address().port;
 
 const executablePath = ["/usr/bin/brave", "/usr/bin/chromium", "/usr/bin/google-chrome"].find((p) => fs.existsSync(p));
-const browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-first-run", "--use-gl=swiftshader", "--enable-unsafe-swiftshader"] });
+const browser = await puppeteer.launch({
+  executablePath,
+  headless: true,
+  args: ["--no-first-run", "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--enable-unsafe-webgpu"],
+});
 const errors = [];
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 720 });
   page.on("pageerror", (e) => errors.push(String(e)));
-  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  page.on("console", (m) => {
+    if (m.type() === "error") errors.push(m.text());
+    if (args.verbose) console.log(`[${m.type()}] ${m.text()}`);
+  });
   await page.goto(`http://127.0.0.1:${port}/index.html?data=/game&level=${level}${args.query ? "&" + args.query : ""}`);
   await page.waitForFunction(() => document.title.includes("running"), { timeout: 60000 });
+  const renderer = await page.evaluate(() => window.lipsRenderer);
+  console.log(`renderer: ${renderer}`);
+  if (args.renderer && args.renderer !== renderer) errors.push(`expected renderer ${args.renderer}, got ${renderer}`);
   await new Promise((r) => setTimeout(r, 1500));
   for (const spec of (args.keys ?? "").split(",").filter(Boolean)) {
     const [key, ms] = spec.split(":");

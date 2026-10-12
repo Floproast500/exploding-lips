@@ -21,7 +21,8 @@ echo "== wasm"
 ./scripts/build-web.sh >/dev/null
 if [ -d tools/pilot/node_modules ]; then
     echo "== web smoke test"
-    node tools/pilot/web_pilot.mjs --level LIPS00 --out re/shots/web/lips00.png --keys ArrowLeft:400
+    node tools/pilot/web_pilot.mjs --level LIPS00 --out re/shots/web/lips00.png --keys ArrowLeft:400 --query renderer=webgl --renderer Gl
+    node tools/pilot/web_pilot.mjs --level LIPS00 --out re/shots/web/lips00-software.png --query renderer=software --renderer software
 fi
 if [ "${1:-}" = "--original" ]; then
     echo "== golden comparison against lips.exe (Wine)"

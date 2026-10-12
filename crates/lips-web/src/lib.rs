@@ -1,6 +1,11 @@
 //! WebAssembly front end. The page loads the user's game folder into a [`Loader`], starts a
-//! [`WebGame`], then each animation frame calls [`WebGame::frame`] and draws the returned RGBA
-//! pixels to a canvas. Input arrives as `KeyboardEvent.code` strings.
+//! [`WebGame`] and, when the browser offers WebGPU or WebGL2, attaches a [`GpuContext`] made by
+//! [`create_gpu`] for the GPU renderer (modern lighting); then each animation frame calls
+//! [`WebGame::frame_gpu`]. Without a GPU, [`WebGame::frame`] returns RGBA pixels for a 2D
+//! canvas. Input arrives as `KeyboardEvent.code` strings; audio starts on the first gesture
+//! ([`WebGame::start_audio`]).
+
+#![cfg(target_arch = "wasm32")]
 
 use godd_game::{FixedClock, Frame, Game, Input, TICK_RATE, Vfs};
 use godd_net::{Message, PROTOCOL_VERSION, PlayerState};
@@ -65,8 +70,11 @@ impl Loader {
             input: Input::default(),
             clock: FixedClock::new(TICK_RATE),
             frame: Frame::new(640, 480),
+            ui: Frame::new(640, 480),
             rgba: Vec::new(),
             net: None,
+            gpu: None,
+            audio: None,
         })
     }
 }
@@ -78,8 +86,86 @@ pub struct WebGame {
     input: Input,
     clock: FixedClock,
     frame: Frame,
+    /// UI layer over the GPU world view.
+    ui: Frame,
     rgba: Vec<u8>,
     net: Option<WebNet>,
+    gpu: Option<GpuContext>,
+    audio: Option<engine_audio::Audio>,
+}
+
+/// The canvas's GPU device (WebGPU, or WebGL2 where WebGPU is missing).
+#[wasm_bindgen]
+pub struct GpuContext {
+    /// Kept alive: on WebGPU the surface depends on it.
+    _instance: wgpu::Instance,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    frames: engine_gpu::FramePresenter,
+    world: engine_gpu::WorldRenderer,
+    /// Level epoch whose images the world renderer holds.
+    loaded: u64,
+    backend: String,
+}
+
+#[wasm_bindgen]
+impl GpuContext {
+    /// "WebGpu" or "Gl" (WebGL2).
+    pub fn backend(&self) -> String {
+        self.backend.clone()
+    }
+}
+
+/// Set up the GPU on `canvas`. Fails when the browser has neither WebGPU nor WebGL2 (the page
+/// then uses a fresh canvas with a 2D context).
+#[wasm_bindgen]
+pub async fn create_gpu(canvas: web_sys::HtmlCanvasElement, webgl_only: bool) -> Result<GpuContext, JsError> {
+    let (width, height) = (canvas.width().max(1), canvas.height().max(1));
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = if webgl_only { wgpu::Backends::GL } else { wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL };
+    let instance = wgpu::util::new_instance_with_webgpu_detection(desc).await;
+    let surface = instance.create_surface(wgpu::SurfaceTarget::Canvas(canvas)).map_err(|e| JsError::new(&e.to_string()))?;
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        })
+        .await
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let backend = format!("{:?}", adapter.get_info().backend);
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor { label: Some("lips-web"), required_limits: engine_gpu::limits_for(&adapter), ..Default::default() })
+        .await
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    let caps = surface.get_capabilities(&adapter);
+    let format = caps.formats.iter().copied().find(|f| !f.is_srgb()).unwrap_or(caps.formats[0]);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        color_space: wgpu::SurfaceColorSpace::Auto,
+        width,
+        height,
+        present_mode: wgpu::PresentMode::AutoVsync,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: caps.alpha_modes[0],
+        view_formats: vec![],
+    };
+    surface.configure(&device, &config);
+    Ok(GpuContext {
+        frames: engine_gpu::FramePresenter::new(&device, format),
+        world: engine_gpu::WorldRenderer::new(&device, format),
+        _instance: instance,
+        surface,
+        device,
+        queue,
+        config,
+        loaded: u64::MAX,
+        backend,
+    })
 }
 
 /// Netplay over WebSocket (the desktop host runs with `--host --ws-port N`).
@@ -166,13 +252,112 @@ impl WebGame {
         }
     }
 
-    /// Advance by `elapsed_ms` and render at `width`x`height`. Returns RGBA bytes.
-    pub fn frame(&mut self, elapsed_ms: f64, width: usize, height: usize) -> Vec<u8> {
+    /// Use the GPU renderer from now on (see [`create_gpu`]).
+    pub fn attach_gpu(&mut self, gpu: GpuContext) {
+        self.gpu = Some(gpu);
+    }
+
+    /// Start audio. Browsers allow it only from a user gesture: call from a click or key handler.
+    pub fn start_audio(&mut self) {
+        if self.audio.is_some() {
+            return;
+        }
+        // A SoundFont in the game folder is used for music; otherwise the built-in one.
+        let font = self.vfs.names().find(|n| n.to_ascii_lowercase().ends_with(".sf2")).map(str::to_string).and_then(|n| self.vfs.read(&n).ok().map(<[u8]>::to_vec));
+        self.audio = engine_audio::Audio::new(font);
+    }
+
+    fn advance(&mut self, elapsed_ms: f64) {
         self.update_net(elapsed_ms);
         for _ in 0..self.clock.advance(elapsed_ms / 1000.0) {
             self.game.tick(&self.vfs, &self.input);
             self.input.end_tick();
         }
+        let events = self.game.drain_audio();
+        if let Some(audio) = &mut self.audio {
+            audio.set_volumes(self.game.options.volume);
+            audio.spatial = self.game.cvars.get_bool("snd_spatial");
+            let vfs = &self.vfs;
+            let load = |asset: engine_audio::Asset| {
+                let path = match asset {
+                    engine_audio::Asset::Sound(n) => godd_game::sound_path(n),
+                    engine_audio::Asset::Music(n) => godd_game::music_path(n),
+                };
+                vfs.read(&path).ok().map(<[u8]>::to_vec)
+            };
+            for e in &events {
+                audio.handle(&load, e);
+            }
+        }
+    }
+
+    /// GPU path: advance by `elapsed_ms` and draw into the canvas (`width`x`height` pixels).
+    pub fn frame_gpu(&mut self, elapsed_ms: f64, width: u32, height: u32) {
+        self.advance(elapsed_ms);
+        let Some(gpu) = &mut self.gpu else { return };
+        let (w, h) = (width.max(1), height.max(1));
+        if (gpu.config.width, gpu.config.height) != (w, h) {
+            gpu.config.width = w;
+            gpu.config.height = h;
+            gpu.surface.configure(&gpu.device, &gpu.config);
+        }
+        let output = match gpu.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            other => {
+                web_sys::console::warn_1(&format!("surface: {other:?}").into());
+                gpu.surface.configure(&gpu.device, &gpu.config);
+                return;
+            }
+        };
+        let target = output.texture.create_view(&Default::default());
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        self.game.preview_look(&self.input);
+        let (uw, uh) = self.game.ui_layer_size(w as usize, h as usize);
+        self.ui.resize(uw, uh);
+        match self.game.gpu_frame(&mut self.ui, self.clock.alpha()) {
+            Some(view) => {
+                if gpu.loaded != view.epoch {
+                    gpu.world.set_palette(&gpu.device, &gpu.queue, self.game.palette(), self.game.shade_rows());
+                    gpu.world.set_images(&gpu.device, &gpu.queue, &self.game.world_images());
+                    gpu.loaded = view.epoch;
+                }
+                for &i in &view.scene.dirty_images {
+                    if let Some(img) = self.game.world_image(i) {
+                        gpu.world.update_image(&gpu.queue, i, img);
+                    }
+                }
+                let vp = [0.0, 0.0, w as f32, h as f32];
+                gpu.world.render(&gpu.device, &gpu.queue, &mut encoder, &target, (w, h), vp, &view.camera, &view.shading, &view.scene);
+                if let Some(coverage) = &self.ui.coverage {
+                    gpu.world.draw_ui(&gpu.device, &gpu.queue, &mut encoder, &target, vp, (self.ui.width, self.ui.height), &self.ui.pixels, coverage);
+                }
+            }
+            None => {
+                // Title screen and classic 320x200: the software renderer, shown on the GPU.
+                let classic = self.game.options.classic;
+                let (fw, fh) = if classic { (godd_game::CLASSIC_WIDTH, godd_game::CLASSIC_HEIGHT) } else { (w as usize, h as usize) };
+                self.frame.resize(fw, fh);
+                self.frame.pixel_aspect = if classic { godd_game::CLASSIC_PIXEL_ASPECT } else { 1.0 };
+                self.frame.set_true_color(self.game.options.true_color);
+                self.game.render(&mut self.frame, self.clock.alpha());
+                let cpu = engine_gpu::CpuFrame {
+                    width: self.frame.width as u32,
+                    height: self.frame.height as u32,
+                    indices: &self.frame.pixels,
+                    rgb: self.frame.rgb.as_deref(),
+                    palette: self.game.palette(),
+                };
+                let vp = engine_gpu::letterbox(w, h, self.frame.display_aspect());
+                gpu.frames.present(&gpu.device, &gpu.queue, &mut encoder, &target, vp, &cpu);
+            }
+        }
+        gpu.queue.submit([encoder.finish()]);
+        gpu.queue.present(output);
+    }
+
+    /// Software path: advance by `elapsed_ms` and render at `width`x`height`. Returns RGBA bytes.
+    pub fn frame(&mut self, elapsed_ms: f64, width: usize, height: usize) -> Vec<u8> {
+        self.advance(elapsed_ms);
         self.frame.resize(width.max(1), height.max(1));
         self.frame.set_true_color(self.game.options.true_color);
         self.game.preview_look(&self.input);
