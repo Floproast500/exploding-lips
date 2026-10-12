@@ -26,3 +26,5 @@ winit = "0.30"
 [features]
 # SDL3 gamepads: gyro aiming and rumble (needs the system SDL3 library).
 sdl = ["dep:sdl3-sys"]
+# The same, building SDL3 from source (CI runners have no SDL3 package).
+sdl-build = ["sdl", "sdl3-sys/build-from-source"]

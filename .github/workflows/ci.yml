@@ -21,10 +21,14 @@ jobs:
           components: clippy, rustfmt
       - name: Linux system libraries
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libdbus-1-dev pkg-config cmake
+      # Linux also checks the SDL3 gamepad backend (SDL3 built from source).
+      - name: Features
+        shell: bash
+        run: echo "FEATURES=godd-net/game${{ runner.os == 'Linux' && ',lips-desktop/sdl-build' || '' }}" >> "$GITHUB_ENV"
       # Tests that need the original game files skip themselves when original/ is absent.
-      - run: cargo test --workspace --all-features
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --features ${{ env.FEATURES }}
+      - run: cargo clippy --workspace --all-targets --features ${{ env.FEATURES }} -- -D warnings
 
   wasm:
     runs-on: ubuntu-latest

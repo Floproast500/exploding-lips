@@ -4,9 +4,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 echo "== cargo test"
-cargo test --workspace --all-features --quiet
+cargo test --workspace --features godd-net/game,lips-desktop/sdl --quiet
 echo "== clippy"
-cargo clippy --workspace --all-targets --all-features --quiet -- -D warnings
+cargo clippy --workspace --all-targets --features godd-net/game,lips-desktop/sdl --quiet -- -D warnings
 echo "== release tools"
 cargo build --release --quiet -p lipstool -p lips-desktop
 if rustup target list --installed 2>/dev/null | grep -q x86_64-pc-windows-gnu && command -v x86_64-w64-mingw32-gcc >/dev/null; then
