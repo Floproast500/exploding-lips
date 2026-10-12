@@ -27,7 +27,11 @@ the engine reads them from your install folder at runtime.
 | Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput) |
 | Web (WASM): folder picker, GPU renderer on WebGPU or WebGL2 (software canvas fallback), positional audio with streamed music, options/bindings/saves in localStorage | working; headless-tested on WebGL2 and software (headless Chromium cannot show WebGPU canvases) |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
-| Modern extras: Hor+ widescreen, FOV, true colour, F2 automap, quicksave, console, key rebinding, high-contrast HUD, long messages, mods | working |
+| Modern extras: Hor+ widescreen, FOV, true colour, quicksave, key rebinding, high-contrast HUD, long messages | working |
+| Automap (F2/Tab): explored regions only, textured floors, zoom (+/-, wheel), north-up or rotating, markers (M), other players | working |
+| Save slots (F10 > Save/Load game): 8 slots with view thumbnails, stored in the config folder / browser storage | data-tested round trip |
+| Console (`~`): config commands, Tab completion, history, scrollback, INI commands, `warp` | unit-tested |
+| Mods & packs (F10): pick a texture pack, toggle mod folders from `mods/` (applied on restart), `--mod DIR` | working |
 
 Reverse-engineering notes live in [`re/`](re/): file formats in `re/formats/`, engine behaviour
 in `re/engine/` (renderer, physics, script, movers, combat, HUD, object and world effects).

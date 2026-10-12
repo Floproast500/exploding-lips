@@ -24,6 +24,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.float("r_exposure", "Exposure", Video, (0.25, 4.0, 0.05), 1.0);
     // HD texture pack folder (built with tools/packbuilder from your own files); "" = none.
     c.string("r_texpack", "Texture pack", Video, "");
+    // Mod folders overlaid on the game data at start-up, separated by ';'.
+    c.string("fs_mods", "Mods", Game, "");
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);
@@ -39,6 +41,9 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.int("hud_scale", "HUD scale (0 = auto)", Hud, (0, 8, 1), 0);
     c.choice("crosshair", "Crosshair", Hud, &["off", "dot", "cross", "circle"], 0);
     c.bool("hud_fps", "Show FPS", Hud, false);
+    c.bool("am_textured", "Map: textured floors", Hud, true);
+    c.bool("am_rotate", "Map: rotate with view", Hud, true);
+    c.float("am_zoom", "Map: zoom", Hud, (0.25, 8.0, 0.25), 1.0);
     c.bool("hud_highcontrast", "High-contrast HUD", Accessibility, false);
     c.bool("msg_long", "Long messages", Accessibility, false);
 }
@@ -148,6 +153,11 @@ const COMMON: &[(&str, &str)] = &[
     ("key:Digit7", "Tool7"),
     ("key:Digit8", "Tool8"),
     ("key:Digit9", "Tool9"),
+    ("key:Equal", "MapZoomIn"),
+    ("key:NumpadAdd", "MapZoomIn"),
+    ("key:Minus", "MapZoomOut"),
+    ("key:NumpadSubtract", "MapZoomOut"),
+    ("key:KeyM", "MapMark"),
 ];
 
 /// Modern layout: WASD + mouse look, wheel switches tools.
@@ -223,7 +233,7 @@ pub fn default_binds(profile: Profile) -> BindTable {
 }
 
 /// Actions offered on the key-bindings page.
-pub const REBINDABLE: [(Action, &str); 20] = [
+pub const REBINDABLE: [(Action, &str); 21] = [
     (Action::Forward, "Forward"),
     (Action::Back, "Back"),
     (Action::StrafeLeft, "Strafe left"),
@@ -240,6 +250,7 @@ pub const REBINDABLE: [(Action, &str); 20] = [
     (Action::LookDown, "Look down"),
     (Action::CenterView, "Centre view"),
     (Action::Map, "Map"),
+    (Action::MapMark, "Map marker"),
     (Action::StrafeModifier, "Strafe modifier"),
     (Action::QuickSave, "Quick save"),
     (Action::QuickLoad, "Quick load"),
@@ -251,7 +262,18 @@ enum Page {
     #[default]
     Main,
     Category(Category),
+    /// Save slots: `true` to load, `false` to save.
+    Slots(bool),
+    /// Texture pack and mod folders.
+    Packs,
     Bindings,
+}
+
+/// A save-slot choice made in the menu, for the game to carry out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotRequest {
+    pub load: bool,
+    pub slot: usize,
 }
 
 #[derive(Debug, Default)]
@@ -261,6 +283,23 @@ pub struct OptionsMenu {
     selected: usize,
     /// Waiting for a key, button or wheel turn to bind to this action.
     capturing: Option<Action>,
+    /// Labels of the save slots ("" = empty), kept up to date by the game.
+    pub slot_labels: Vec<String>,
+    /// Whether a game is running (saving needs one).
+    pub can_save: bool,
+    pub request: Option<SlotRequest>,
+    /// Texture pack folders and mod folders found by the front end.
+    pub packs: Vec<String>,
+    pub mods: Vec<String>,
+}
+
+/// Mods enabled in `fs_mods` (';'-separated folders).
+pub fn enabled_mods(c: &CvarRegistry) -> Vec<String> {
+    c.get_str("fs_mods").split(';').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect()
+}
+
+fn short(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Categories that have at least one visible cvar, in menu order.
@@ -275,6 +314,11 @@ fn items(c: &CvarRegistry, cat: Category) -> Vec<&'static str> {
 impl OptionsMenu {
     pub fn is_capturing(&self) -> bool {
         self.capturing.is_some()
+    }
+
+    /// The save slot under the cursor on a slots page (for its thumbnail).
+    pub fn selected_slot(&self) -> Option<usize> {
+        matches!(self.page, Page::Slots(_)).then_some(self.selected).filter(|&i| i < self.slot_labels.len() && self.open)
     }
 
     /// Handle input while open. Returns true if the menu consumed the input (the game pauses).
@@ -300,7 +344,9 @@ impl OptionsMenu {
         let cats = categories(cvars);
         let back_to_main = |page: Page| match page {
             Page::Category(c) => cats.iter().position(|&x| x == c).unwrap_or(0),
-            _ => cats.len(),
+            Page::Slots(load) => cats.len() + load as usize,
+            Page::Packs => cats.len() + 2,
+            _ => cats.len() + 3,
         };
         if input.pressed(Action::Menu) {
             match self.page {
@@ -313,8 +359,10 @@ impl OptionsMenu {
             return true;
         }
         let count = match self.page {
-            Page::Main => cats.len() + 2,
+            Page::Main => cats.len() + 5,
             Page::Category(cat) => items(cvars, cat).len() + 1,
+            Page::Slots(_) => self.slot_labels.len() + 1,
+            Page::Packs => self.mods.len() + 2,
             Page::Bindings => REBINDABLE.len() + 3,
         };
         if input.pressed(Action::MenuUp) {
@@ -330,7 +378,10 @@ impl OptionsMenu {
             Page::Main if select => {
                 self.page = match self.selected {
                     i if i < cats.len() => Page::Category(cats[i]),
-                    i if i == cats.len() => Page::Bindings,
+                    i if i == cats.len() => Page::Slots(false),
+                    i if i == cats.len() + 1 => Page::Slots(true),
+                    i if i == cats.len() + 2 => Page::Packs,
+                    i if i == cats.len() + 3 => Page::Bindings,
                     _ => {
                         self.open = false;
                         Page::Main
@@ -338,6 +389,21 @@ impl OptionsMenu {
                 };
                 self.selected = 0;
             }
+            Page::Slots(load) if select => match self.selected {
+                i if i < self.slot_labels.len() => {
+                    let usable = if load { !self.slot_labels[i].is_empty() } else { self.can_save };
+                    if usable {
+                        self.request = Some(SlotRequest { load, slot: i });
+                        if load {
+                            self.open = false;
+                        }
+                    }
+                }
+                _ => {
+                    self.selected = back_to_main(self.page);
+                    self.page = Page::Main;
+                }
+            },
             Page::Category(cat) => {
                 let names = items(cvars, cat);
                 match names.get(self.selected) {
@@ -350,6 +416,32 @@ impl OptionsMenu {
                     _ => {}
                 }
             }
+            Page::Packs if select || left || right => match self.selected {
+                0 => {
+                    // Cycle: none, then each pack.
+                    let current = cvars.get_str("r_texpack");
+                    let n = self.packs.len() + 1;
+                    let at = self.packs.iter().position(|p| *p == current).map_or(0, |i| i + 1);
+                    let next = (at as isize + if left { -1 } else { 1 }).rem_euclid(n as isize) as usize;
+                    let _ = cvars.set("r_texpack", if next == 0 { "" } else { &self.packs[next - 1] });
+                }
+                i if i <= self.mods.len() => {
+                    let m = &self.mods[i - 1];
+                    let mut on = enabled_mods(cvars);
+                    match on.iter().position(|x| x == m) {
+                        Some(k) => {
+                            on.remove(k);
+                        }
+                        None => on.push(m.clone()),
+                    }
+                    let _ = cvars.set("fs_mods", &on.join(";"));
+                }
+                _ if select => {
+                    self.selected = back_to_main(self.page);
+                    self.page = Page::Main;
+                }
+                _ => {}
+            },
             Page::Bindings if select => match self.selected {
                 i if i < REBINDABLE.len() => self.capturing = Some(REBINDABLE[i].0),
                 i if i == REBINDABLE.len() => *binds = default_binds(Profile::Modern),
@@ -375,7 +467,16 @@ impl OptionsMenu {
                 categories(cvars)
                     .iter()
                     .map(|c| format!("{}...", c.label()))
-                    .chain(["Key bindings...".to_string(), back()])
+                    .chain(["Save game...".to_string(), "Load game...".to_string(), "Mods & packs...".to_string(), "Key bindings...".to_string(), back()])
+                    .collect(),
+            ),
+            Page::Slots(load) => (
+                if load { "Load game".into() } else if self.can_save { "Save game".into() } else { "Save game (start a game first)".into() },
+                self.slot_labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| format!("{}  {}", i + 1, if l.is_empty() { "- empty -" } else { l }))
+                    .chain(std::iter::once(back()))
                     .collect(),
             ),
             Page::Category(cat) => {
@@ -390,6 +491,17 @@ impl OptionsMenu {
                         .chain(std::iter::once(back()))
                         .collect(),
                 )
+            }
+            Page::Packs => {
+                let pack = cvars.get_str("r_texpack");
+                let on = enabled_mods(cvars);
+                let mut rows = vec![format!("Texture pack   {}", if pack.is_empty() { "none" } else { short(&pack) })];
+                rows.extend(self.mods.iter().map(|m| format!("Mod {:<20}{:>5}", short(m), if on.contains(m) { "on" } else { "off" })));
+                if self.mods.is_empty() {
+                    rows.push("(no mods: put folders in mods/)".into());
+                }
+                rows.push(back());
+                ("Mods & packs (mods apply on restart)".into(), rows)
             }
             Page::Bindings => (
                 if self.capturing.is_some() { "Press a key, button or wheel (Esc cancels)".into() } else { "Key bindings".into() },
@@ -482,9 +594,33 @@ mod tests {
         m.update(&press(Action::MenuSelect), &mut c, &mut b);
         assert!(c.get_bool("r_truecolor"));
         m.update(&press(Action::Menu), &mut c, &mut b); // back to main
+        // Main: 5 categories, Save game, Load game, Key bindings, Back.
         for _ in 0..5 {
             m.update(&press(Action::MenuDown), &mut c, &mut b);
         }
+        m.slot_labels = vec![String::new(); 8];
+        m.can_save = true;
+        m.update(&press(Action::MenuSelect), &mut c, &mut b); // Save game
+        m.update(&press(Action::MenuDown), &mut c, &mut b);
+        m.update(&press(Action::MenuSelect), &mut c, &mut b); // slot 2
+        assert_eq!(m.request.take(), Some(SlotRequest { load: false, slot: 1 }));
+        m.update(&press(Action::Menu), &mut c, &mut b);
+        m.update(&press(Action::MenuDown), &mut c, &mut b); // Load game
+        m.update(&press(Action::MenuSelect), &mut c, &mut b);
+        m.update(&press(Action::MenuSelect), &mut c, &mut b);
+        assert_eq!(m.request, None, "empty slots can't be loaded");
+        m.update(&press(Action::Menu), &mut c, &mut b);
+        m.update(&press(Action::MenuDown), &mut c, &mut b); // Mods & packs
+        m.packs = vec!["packs/hd".into()];
+        m.mods = vec!["mods/a".into()];
+        m.update(&press(Action::MenuSelect), &mut c, &mut b);
+        m.update(&press(Action::MenuSelect), &mut c, &mut b);
+        assert_eq!(c.get_str("r_texpack"), "packs/hd");
+        m.update(&press(Action::MenuDown), &mut c, &mut b);
+        m.update(&press(Action::MenuSelect), &mut c, &mut b);
+        assert_eq!(enabled_mods(&c), ["mods/a"]);
+        m.update(&press(Action::Menu), &mut c, &mut b);
+        m.update(&press(Action::MenuDown), &mut c, &mut b);
         m.update(&press(Action::MenuSelect), &mut c, &mut b); // Key bindings, row 0 = Forward
         m.update(&press(Action::MenuSelect), &mut c, &mut b);
         assert!(m.is_capturing());

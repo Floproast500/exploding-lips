@@ -26,6 +26,7 @@ pub struct Loader {
     vfs: Vfs,
     save: Option<Vec<u8>>,
     config: Option<String>,
+    slots: Vec<(usize, String)>,
 }
 
 #[wasm_bindgen]
@@ -51,6 +52,11 @@ impl Loader {
         self.config = Some(text);
     }
 
+    /// A stored save slot (0-based) from browser storage.
+    pub fn set_slot(&mut self, n: usize, text: String) {
+        self.slots.push((n, text));
+    }
+
     /// True once the files needed to boot are present.
     pub fn ready(&self) -> bool {
         self.vfs.contains("lips.bmp") && self.vfs.contains("lipstart.xrb")
@@ -63,6 +69,9 @@ impl Loader {
             for e in game.exec_config(text) {
                 web_sys::console::warn_1(&format!("config: {e}").into());
             }
+        }
+        for (n, text) in &self.slots {
+            game.set_slot(*n, text);
         }
         Ok(WebGame {
             game,
@@ -399,6 +408,16 @@ impl WebGame {
         self.input.release_all();
     }
 
+    /// Save slots that changed, as `[slot, text, slot, text, ...]` (the page stores them).
+    pub fn take_slots(&mut self) -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for (n, text) in self.game.take_slots() {
+            out.push(&JsValue::from(n as u32));
+            out.push(&JsValue::from(text));
+        }
+        out
+    }
+
     /// Options and bindings as config text when they changed (the page stores it).
     pub fn take_config(&mut self) -> Option<String> {
         self.game.take_config()
@@ -408,6 +427,8 @@ impl WebGame {
     pub fn type_text(&mut self, key: &str) {
         if key == "Backspace" {
             self.input.text.push('\u{8}');
+        } else if key == "Tab" {
+            self.input.text.push('\t');
         } else if key.chars().count() == 1 {
             self.input.text.push_str(key);
         }

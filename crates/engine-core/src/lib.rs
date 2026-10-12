@@ -7,6 +7,7 @@ pub mod audio;
 pub mod bind;
 pub mod clock;
 pub mod config;
+pub mod console;
 pub mod cvar;
 pub mod frame;
 pub mod pack;

@@ -42,6 +42,10 @@ pub enum Action {
     /// Previous / next selectable tool (gamepad bumpers and D-pad).
     ToolPrev,
     ToolNext,
+    /// Automap zoom and markers.
+    MapZoomIn,
+    MapZoomOut,
+    MapMark,
     /// Engine console (~).
     Console,
     QuickSave,
@@ -56,7 +60,8 @@ impl Action {
         [
             Forward, Back, TurnLeft, TurnRight, StrafeLeft, StrafeRight, StrafeModifier, Run, Jump, Crouch, LookUp,
             LookDown, CenterView, Use, Menu, MenuUp, MenuDown, MenuSelect, Map, Brighten, Darken, Options, Tool0, Tool1,
-            Tool2, Tool3, Tool4, Tool5, Tool6, Tool7, Tool8, Tool9, ToolPrev, ToolNext, Console, QuickSave, QuickLoad,
+            Tool2, Tool3, Tool4, Tool5, Tool6, Tool7, Tool8, Tool9, ToolPrev, ToolNext, MapZoomIn, MapZoomOut, MapMark, Console, QuickSave,
+            QuickLoad,
         ]
     };
 
@@ -147,6 +152,12 @@ impl Input {
         for action in binds.actions(source).filter_map(Action::from_name) {
             self.pressed[action as usize] = true;
         }
+    }
+
+    /// Forget a press this tick (the automap takes the wheel from tool switching).
+    pub fn clear(&mut self, action: Action) {
+        self.pressed[action as usize] = false;
+        self.held[action as usize] = false;
     }
 
     /// Release everything (focus loss).

@@ -72,6 +72,10 @@
         // Stored options, then any ?set=NAME%20VALUE overrides (testing and links).
         const lines = [localStorage.getItem("lips-config") ?? "", ...params.getAll("set").map((v) => `set ${v}`)];
         loader.set_config(lines.join("\n"));
+        for (let n = 0; n < 8; n++) {
+          const slot = localStorage.getItem(`lips-slot-${n}`);
+          if (slot) loader.set_slot(n, slot);
+        }
       } catch { /* storage unavailable: use the folder's save and default options */ }
       let game;
       try {
@@ -144,6 +148,10 @@
         const config = game.take_config();
         if (config) {
           try { localStorage.setItem("lips-config", config); } catch { /* ignore */ }
+        }
+        const slots = game.take_slots();
+        for (let i = 0; i + 1 < slots.length; i += 2) {
+          try { localStorage.setItem(`lips-slot-${slots[i]}`, slots[i + 1]); } catch { /* ignore */ }
         }
         const save = game.take_save();
         if (save) {

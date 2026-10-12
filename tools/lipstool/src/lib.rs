@@ -66,6 +66,17 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
             let region = s.level.world.region_at(x, y);
             s.objects.spawn_explosion((x, y, p.z + 8.0), 32.0, 48.0, 0.5, region);
         }
+    // "map": walk around a little (to reveal), then show the automap.
+    if rest.contains(&"map") {
+        let mut walk = godd_game::Input::default();
+        walk.set(godd_game::Action::Forward, true);
+        for _ in 0..60 {
+            game.tick(&vfs, &walk);
+        }
+        let mut open = godd_game::Input::default();
+        open.set(godd_game::Action::Map, true);
+        game.tick(&vfs, &open);
+    }
     // GPU renders use the original lighting (parity with `render`) unless asked for "modern".
     let _ = game.cvars.set("r_lighting", if rest.contains(&"modern") { "modern" } else { "classic" });
     Ok((vfs, game, w, h))

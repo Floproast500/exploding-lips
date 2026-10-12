@@ -654,3 +654,38 @@ fn lips00_door_sounds_are_positional() {
     });
     assert!(reverb.is_some_and(|r| (0.0..=1.0).contains(&r)), "listener with reverb {reverb:?}");
 }
+
+/// Save slots: saving records level, position and states plus a thumbnail of the view; the
+/// file text round-trips; loading restores them after moving and changing states.
+#[test]
+fn lips00_save_slot_round_trip() {
+    use godd_game::{Action, Input, script::MONEY};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let at = |g: &godd_game::Game| {
+        let p = g.session().unwrap().player;
+        (p.x, p.y)
+    };
+    let saved_at = at(&game);
+    game.session_mut().unwrap().script.states[MONEY] = 1234;
+    game.save_slot(2);
+    let files = game.take_slots();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].0, 2);
+    let slot = godd_game::saves::SaveSlot::parse(&files[0].1).unwrap();
+    assert!(slot.label.starts_with("LIPS00"), "{}", slot.label);
+    assert!(slot.thumb.iter().filter(|&&t| t != 0).count() > 1000, "the thumbnail shows the view");
+    // Walk away and spend the money, then load.
+    let mut fwd = Input::default();
+    fwd.set(Action::Forward, true);
+    for _ in 0..30 {
+        game.tick(&vfs, &fwd);
+    }
+    game.session_mut().unwrap().script.states[MONEY] = 0;
+    assert_ne!(at(&game), saved_at);
+    let mut restored = start("LIPS00").unwrap().1;
+    restored.set_slot(2, &files[0].1);
+    restored.load_slot(&vfs, 2);
+    assert!((at(&restored).0 - saved_at.0).abs() < 1.0 && (at(&restored).1 - saved_at.1).abs() < 1.0);
+    assert_eq!(restored.session().unwrap().script.states[MONEY], 1234);
+}

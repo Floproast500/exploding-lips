@@ -154,6 +154,14 @@ impl App {
         if let Some(text) = self.game.take_config() {
             config::save(&text);
         }
+        if let Some(dir) = config::dir().map(|d| d.join("saves")) {
+            for (n, text) in self.game.take_slots() {
+                let _ = std::fs::create_dir_all(&dir);
+                if let Err(e) = std::fs::write(dir.join(format!("slot{}.sav", n + 1)), text) {
+                    log::warn!("cannot write save slot {}: {e}", n + 1);
+                }
+            }
+        }
         if self.game.quit_requested() {
             self.save_settings();
             std::process::exit(0);
@@ -221,6 +229,8 @@ impl App {
         if down {
             if code == KeyCode::Backspace {
                 self.input.text.push('\u{8}');
+            } else if code == KeyCode::Tab {
+                self.input.text.push('\t'); // console completion
             } else if let Some(text) = &event.text {
                 self.input.text.extend(text.chars().filter(|c| !c.is_control()));
             }
@@ -370,7 +380,9 @@ fn main() {
         std::process::exit(1);
     });
     let _ = cvars.set("fs_data", &data.display().to_string());
-    for dir in &opts.mods {
+    // Mods: --mod folders plus those enabled in the options (fs_mods).
+    let enabled: Vec<PathBuf> = godd_game::options::enabled_mods(&cvars).into_iter().map(PathBuf::from).collect();
+    for dir in opts.mods.iter().chain(&enabled) {
         match vfs.overlay_dir(dir) {
             Ok(n) => log::info!("mod {}: {n} files override the game data", dir.display()),
             Err(e) => log::warn!("mod {}: {e}", dir.display()),
@@ -384,9 +396,17 @@ fn main() {
     });
     let soundfont = Some(cvars.get_str("snd_soundfont")).filter(|s| !s.is_empty()).map(PathBuf::from);
     game.adopt_config(cvars, binds);
+    let (packs, mods) = find_packs_and_mods();
+    game.options_menu.packs = packs;
+    game.options_menu.mods = mods;
     let audio = if opts.mute { None } else { audio::Audio::new(soundfont.as_deref()) };
     if let Some(text) = config::dir().and_then(|d| std::fs::read_to_string(d.join("quick.sav")).ok()) {
         game.set_quicksave(text);
+    }
+    for n in 0..godd_game::saves::SLOTS {
+        if let Some(text) = config::dir().and_then(|d| std::fs::read_to_string(d.join("saves").join(format!("slot{}.sav", n + 1))).ok()) {
+            game.set_slot(n, &text);
+        }
     }
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
@@ -435,4 +455,24 @@ fn main() {
         }
     }
     event_loop.run_app(&mut app).expect("event loop");
+}
+
+/// Texture packs (folders with pack.txt) and mod folders in ./packs, ./mods and the config
+/// directory's packs/ and mods/.
+fn find_packs_and_mods() -> (Vec<String>, Vec<String>) {
+    let roots: Vec<PathBuf> = [Some(PathBuf::from(".")), config::dir()].into_iter().flatten().collect();
+    let list = |sub: &str, want_manifest: bool| -> Vec<String> {
+        let mut out: Vec<String> = roots
+            .iter()
+            .filter_map(|r| std::fs::read_dir(r.join(sub)).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && (!want_manifest || p.join("pack.txt").is_file()))
+            .map(|p| p.display().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+    (list("packs", true), list("mods", false))
 }

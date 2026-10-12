@@ -237,6 +237,11 @@ impl Session {
         size * (1.0 - 0.8 * sky / area)
     }
 
+    /// Positions and facings of other players (netplay), for the automap.
+    pub fn remote_positions(&self) -> Vec<(f32, f32, f32)> {
+        self.remote_players.values().filter_map(|&i| self.level.world.sprites.get(i)).map(|s| (s.x, s.y, s.angle)).collect()
+    }
+
     pub fn drain_audio(&mut self) -> std::vec::Drain<'_, AudioEvent> {
         self.audio.drain(..)
     }

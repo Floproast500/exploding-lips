@@ -5,6 +5,7 @@
 //! [`Game::render`] fills, using [`Game::palette`] to turn indices into colours.
 
 pub mod anim;
+pub mod automap;
 mod audio;
 pub use engine_core::clock;
 pub mod effects;
@@ -18,6 +19,7 @@ pub mod objects;
 pub mod options;
 pub mod player;
 pub mod render;
+pub mod saves;
 pub mod scene;
 pub mod script;
 pub mod session;
@@ -104,12 +106,17 @@ pub struct Game {
     save: godd_formats::gam::SaveFile,
     current_slot: Option<usize>,
     save_dirty: bool,
-    console: Console,
+    /// The engine console (~): config commands, `warp LEVEL`, and INI commands like the original.
+    console: engine_core::console::Console,
+    /// Save slots and which changed since the front end last stored them.
+    slots: [Option<saves::SaveSlot>; saves::SLOTS],
+    slots_dirty: [bool; saves::SLOTS],
     /// Quicksave contents and whether they changed since the front end last stored them.
     quicksave: Option<String>,
     quicksave_dirty: bool,
     /// F2 automap overlay.
     show_map: bool,
+    automap: automap::Automap,
 }
 
 /// One frame for a GPU renderer (see [`Game::gpu_frame`]).
@@ -121,13 +128,6 @@ pub struct GpuView {
     pub epoch: u64,
 }
 
-/// The engine console (~): runs INI commands like the original, plus `warp LEVEL`.
-#[derive(Default)]
-struct Console {
-    open: bool,
-    line: String,
-    output: Vec<String>,
-}
 
 #[derive(Default)]
 struct FpsCounter {
@@ -183,10 +183,13 @@ impl Game {
                 .unwrap_or_default(),
             current_slot: None,
             save_dirty: false,
-            console: Console::default(),
+            console: engine_core::console::Console::default(),
+            slots: Default::default(),
+            slots_dirty: [false; saves::SLOTS],
             quicksave: None,
             quicksave_dirty: false,
             show_map: false,
+            automap: automap::Automap::default(),
         };
         game.saved_config = (game.cvars.generation(), game.binds.clone());
         if let Some(name) = &options.start_level {
@@ -282,28 +285,34 @@ impl Game {
         let session = Session::start(vfs, name, entry, carried, save, self.current_slot)?;
         self.state = State::Playing(Box::new(session));
         self.epoch += 1;
+        let regions = self.session().map_or(0, |s| s.level.world.regions.len());
+        self.automap.reset(regions);
         Ok(())
     }
 
     fn console_input(&mut self, vfs: &Vfs, input: &Input) {
-        for c in input.text.chars() {
-            match c {
-                '\u{8}' => {
-                    self.console.line.pop();
-                }
-                '`' | '~' => {}
-                c if !c.is_control() => self.console.line.push(c),
-                _ => {}
-            }
-        }
+        const COMMANDS: [&str; 10] = ["set", "get", "toggle", "reset", "cvarlist", "bind", "unbind", "unbindall", "warp", "help"];
+        let words: Vec<&str> = COMMANDS.iter().copied().chain(self.cvars.iter().map(|v| v.name)).collect();
+        self.console.edit(&input.text, &words);
         if input.pressed(Action::Menu) {
             self.console.open = false;
         }
-        if !input.pressed(Action::MenuSelect) || self.console.line.trim().is_empty() {
+        if input.pressed(Action::MenuUp) {
+            self.console.history(true);
+        }
+        if input.pressed(Action::MenuDown) {
+            self.console.history(false);
+        }
+        if input.pressed(Action::LookUp) {
+            self.console.scroll_by(5);
+        }
+        if input.pressed(Action::LookDown) {
+            self.console.scroll_by(-5);
+        }
+        if !input.pressed(Action::MenuSelect) {
             return;
         }
-        let line = std::mem::take(&mut self.console.line);
-        self.console.output.push(format!("> {line}"));
+        let Some(line) = self.console.submit() else { return };
         use engine_core::config::{Outcome, exec_line};
         match exec_line(&mut self.cvars, &mut self.binds, &line) {
             Outcome::Unknown => {}
@@ -314,10 +323,8 @@ impl Game {
                     Outcome::Error(e) => e,
                     Outcome::Unknown => unreachable!(),
                 };
-                self.console.output.extend(reply.lines().map(str::to_string));
+                self.console.print(&reply);
                 self.options = options::GameOptions::from_cvars(&self.cvars);
-                let excess = self.console.output.len().saturating_sub(6);
-                self.console.output.drain(..excess);
                 return;
             }
         }
@@ -330,7 +337,7 @@ impl Game {
                 },
                 None => "usage: warp LIPSnn".into(),
             },
-            Some("help") => "warp LEVEL | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500".into(),
+            Some("help") => "warp LEVEL | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500 | Tab completes, Up/Down history, PgUp/PgDn scroll".into(),
             _ => match self.session_mut() {
                 Some(s) => {
                     s.run_command(&line);
@@ -339,18 +346,43 @@ impl Game {
                 None => "no level loaded".into(),
             },
         };
-        self.console.output.push(reply);
-        let excess = self.console.output.len().saturating_sub(6);
-        self.console.output.drain(..excess);
+        self.console.print(&reply);
+    }
+
+    /// The current level, position, states and inventory as text (quicksave and save slots).
+    fn snapshot(&self) -> Option<String> {
+        let s = self.session()?;
+        let p = &s.player;
+        let states: Vec<String> = s.script.states.iter().map(i32::to_string).collect();
+        let inventory: Vec<String> = s.objects.inventory.iter().map(|&i| s.objects.list[i].name.clone()).collect();
+        Some(format!("{} {} {} {} {} {} | {}", s.name, p.x, p.y, p.z, p.angle, states.join(" "), inventory.join(" ")))
+    }
+
+    /// Restart the snapshot's level, then put back position, states and inventory.
+    fn restore(&mut self, vfs: &Vfs, text: &str) -> bool {
+        let (head, inventory) = text.split_once('|').unwrap_or((text, ""));
+        let parts: Vec<&str> = head.split_whitespace().collect();
+        if parts.len() < 5 + script::STATE_COUNT {
+            return false;
+        }
+        let f = |i: usize| parts[i].parse::<f32>().unwrap_or(0.0);
+        if self.start_level(vfs, parts[0], Entry::Fresh).is_err() {
+            return false;
+        }
+        let Some(s) = self.session_mut() else { return false };
+        for (k, v) in parts[5..5 + script::STATE_COUNT].iter().enumerate() {
+            s.script.states[k] = v.parse().unwrap_or(0);
+        }
+        s.restore_position(f(1), f(2), f(3), f(4));
+        let items: Vec<String> = inventory.split_whitespace().map(str::to_string).collect();
+        s.restore_inventory(&items);
+        true
     }
 
     /// F6: remember the current level, position, states and inventory.
     fn quick_save(&mut self) {
-        let Some(s) = self.session() else { return };
-        let p = &s.player;
-        let states: Vec<String> = s.script.states.iter().map(i32::to_string).collect();
-        let inventory: Vec<String> = s.objects.inventory.iter().map(|&i| s.objects.list[i].name.clone()).collect();
-        self.quicksave = Some(format!("{} {} {} {} {} {} | {}", s.name, p.x, p.y, p.z, p.angle, states.join(" "), inventory.join(" ")));
+        let Some(text) = self.snapshot() else { return };
+        self.quicksave = Some(text);
         self.quicksave_dirty = true;
         if let Some(s) = self.session_mut() {
             s.show_message(script::DEFAULT_MESSAGE_COLOR, "Quick saved");
@@ -360,23 +392,55 @@ impl Game {
     /// F7: restore the quicksave (the level restarts, then position/states/inventory return).
     fn quick_load(&mut self, vfs: &Vfs) {
         let Some(text) = self.quicksave.clone() else { return };
-        let (head, inventory) = text.split_once('|').unwrap_or((&text, ""));
-        let parts: Vec<&str> = head.split_whitespace().collect();
-        if parts.len() < 5 + script::STATE_COUNT {
+        if self.restore(vfs, &text)
+            && let Some(s) = self.session_mut() {
+                s.show_message(script::DEFAULT_MESSAGE_COLOR, "Quick loaded");
+            }
+    }
+
+    /// Save into slot `n` (0-based) with a thumbnail of the current view.
+    pub fn save_slot(&mut self, n: usize) {
+        if n >= saves::SLOTS {
             return;
         }
-        let f = |i: usize| parts[i].parse::<f32>().unwrap_or(0.0);
-        if self.start_level(vfs, parts[0], Entry::Fresh).is_err() {
-            return;
+        let Some(snapshot) = self.snapshot() else { return };
+        let State::Playing(s) = &self.state else { return };
+        let label = format!("{}  {}", s.name, s.level.title.trim());
+        let mut thumb = Frame::new(saves::THUMB_W, saves::THUMB_H);
+        thumb.palette = self.game_palette;
+        let cam = camera(s, &self.physics, 1.0, (0.0, 0.0));
+        let settings = RenderSettings { true_color: false, ..self.settings };
+        let vp = Viewport { x: 0, y: 0, width: saves::THUMB_W, height: saves::THUMB_H };
+        self.renderer.render(&s.level.world, &cam, &Shading { rows: &self.shade_rows }, &settings, &mut thumb, vp);
+        self.slots[n] = Some(saves::SaveSlot { label, snapshot, thumb: thumb.pixels });
+        self.slots_dirty[n] = true;
+        if let Some(s) = self.session_mut() {
+            s.show_message(script::DEFAULT_MESSAGE_COLOR, format!("Saved to slot {}", n + 1));
         }
-        let Some(s) = self.session_mut() else { return };
-        for (k, v) in parts[5..5 + script::STATE_COUNT].iter().enumerate() {
-            s.script.states[k] = v.parse().unwrap_or(0);
+    }
+
+    /// Load slot `n` (0-based).
+    pub fn load_slot(&mut self, vfs: &Vfs, n: usize) {
+        let Some(text) = self.slots.get(n).cloned().flatten().map(|s| s.snapshot) else { return };
+        if self.restore(vfs, &text)
+            && let Some(s) = self.session_mut() {
+                s.show_message(script::DEFAULT_MESSAGE_COLOR, format!("Loaded slot {}", n + 1));
+            }
+    }
+
+    /// Slots whose contents changed: (index, file text) for front ends to persist.
+    pub fn take_slots(&mut self) -> Vec<(usize, String)> {
+        (0..saves::SLOTS)
+            .filter(|&i| std::mem::take(&mut self.slots_dirty[i]))
+            .filter_map(|i| self.slots[i].as_ref().map(|s| (i, s.to_text())))
+            .collect()
+    }
+
+    /// A stored slot (front ends call this at start-up).
+    pub fn set_slot(&mut self, n: usize, text: &str) {
+        if n < saves::SLOTS {
+            self.slots[n] = saves::SaveSlot::parse(text);
         }
-        s.restore_position(f(1), f(2), f(3), f(4));
-        let items: Vec<String> = inventory.split_whitespace().map(str::to_string).collect();
-        s.restore_inventory(&items);
-        s.show_message(script::DEFAULT_MESSAGE_COLOR, "Quick loaded");
     }
 
     /// Quicksave text when it changed (front ends persist it), and restoring a stored one.
@@ -490,8 +554,17 @@ impl Game {
             self.fps.frames = 0;
             self.fps.ticks = 0;
         }
+        self.options_menu.slot_labels = self.slots.iter().map(|s| s.as_ref().map_or_else(String::new, |s| s.label.clone())).collect();
+        self.options_menu.can_save = self.session().is_some();
         let paused = self.options_menu.update(input, &mut self.cvars, &mut self.binds);
         self.options = options::GameOptions::from_cvars(&self.cvars);
+        if let Some(req) = self.options_menu.request.take() {
+            if req.load {
+                self.load_slot(vfs, req.slot);
+            } else {
+                self.save_slot(req.slot);
+            }
+        }
         if paused {
             return; // the overlay pauses the game
         }
@@ -509,6 +582,32 @@ impl Game {
         if input.pressed(Action::Map) {
             self.show_map = !self.show_map;
         }
+        let input = &{
+            let mut i = input.clone();
+            if self.show_map {
+                // The wheel and +/- zoom the map instead of switching tools.
+                let zoom = self.cvars.get_float("am_zoom");
+                let step = |z: f64, up: bool| if up { (z * 1.25).min(8.0) } else { (z / 1.25).max(0.25) };
+                if i.pressed(Action::MapZoomIn) || i.pressed(Action::ToolNext) {
+                    self.cvars.set_float("am_zoom", step(zoom, true));
+                }
+                if i.pressed(Action::MapZoomOut) || i.pressed(Action::ToolPrev) {
+                    self.cvars.set_float("am_zoom", step(zoom, false));
+                }
+                i.clear(Action::ToolNext);
+                i.clear(Action::ToolPrev);
+            }
+            if i.pressed(Action::MapMark)
+                && let Some(s) = self.session() {
+                    self.automap.marks.push((s.player.x, s.player.y));
+                }
+            i
+        };
+        if self.uptime_ticks.is_multiple_of(4)
+            && let State::Playing(s) = &self.state {
+                let cam = camera(s, &self.physics, 1.0, (0.0, 0.0));
+                self.automap.reveal(&s.level.world, &cam);
+            }
         if input.pressed(Action::QuickSave) {
             self.quick_save();
         }
@@ -705,7 +804,18 @@ impl Game {
     pub fn render_ui(&mut self, frame: &mut Frame) {
         if let State::Playing(session) = &self.state {
             if self.show_map {
-                draw_automap(frame, session, self.ui_colors);
+                if self.scene_cache.as_ref().is_none_or(|(e, _)| *e != self.epoch) {
+                    self.scene_cache = Some((self.epoch, scene::build(&session.level.world)));
+                }
+                let style = automap::Style {
+                    textured: self.cvars.get_bool("am_textured"),
+                    rotate: self.cvars.get_bool("am_rotate"),
+                    zoom: self.cvars.get_float("am_zoom") as f32,
+                    floor_row: 7,
+                    colors: self.ui_colors,
+                };
+                let others: Vec<(f32, f32, f32)> = session.remote_positions();
+                self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
             self.hud.draw(frame, session, session.tool, uptime, self.options.high_contrast, self.options.hud_scale);
@@ -713,16 +823,36 @@ impl Game {
             session.menus.draw(frame, &session.save);
         }
         self.options_menu.draw(frame, &self.cvars, &self.binds, self.ui_colors);
+        if let Some(thumb) = self.options_menu.selected_slot().and_then(|i| self.slots[i].as_ref()) {
+            // Thumbnail of the slot under the cursor, framed, at the right of the screen.
+            let s = (frame.height / CLASSIC_HEIGHT).max(1);
+            let (w, h) = (saves::THUMB_W * s, saves::THUMB_H * s);
+            let (x0, y0) = (frame.width.saturating_sub(w + 8 * s), (frame.height.saturating_sub(h)) / 2);
+            text::fill_rect(frame, x0 as i32 - s as i32, y0 as i32 - s as i32, w + 2 * s, h + 2 * s, self.ui_colors.1);
+            for y in 0..h {
+                for x in 0..w {
+                    let texel = thumb.thumb[(y / s) * saves::THUMB_W + x / s];
+                    let (px, py) = (x0 + x, y0 + y);
+                    if px < frame.width && py < frame.height {
+                        frame.put(py * frame.width + px, texel);
+                    }
+                }
+            }
+        }
         if self.console.open {
+            // Top half of the screen: scrollback, then the prompt.
             let s = (frame.height / CLASSIC_HEIGHT).max(1);
             let line_h = (text::GLYPH + 2) * s;
-            let rows = self.console.output.len() + 1;
-            text::fill_rect(frame, 0, 0, frame.width, line_h * rows + 2 * s, self.ui_colors.0);
-            for (i, l) in self.console.output.iter().enumerate() {
-                text::draw_text(frame, 2 * s as i32, (i * line_h + s) as i32, s, self.ui_colors.2, l);
+            let rows = (frame.height / 2 / line_h).saturating_sub(1).max(1);
+            let lines = self.console.visible(rows);
+            text::fill_rect(frame, 0, 0, frame.width, line_h * (rows + 1) + 2 * s, self.ui_colors.0);
+            let top = rows - lines.len();
+            for (i, l) in lines.iter().enumerate() {
+                text::draw_text(frame, 2 * s as i32, ((top + i) * line_h + s) as i32, s, self.ui_colors.2, l);
             }
-            let prompt = format!("] {}_", self.console.line);
-            text::draw_text(frame, 2 * s as i32, (self.console.output.len() * line_h + s) as i32, s, self.ui_colors.3, &prompt);
+            let marker = if self.console.scroll > 0 { "^ " } else { "" };
+            let prompt = format!("{marker}] {}_", self.console.line);
+            text::draw_text(frame, 2 * s as i32, (rows * line_h + s) as i32, s, self.ui_colors.3, &prompt);
         }
         if self.options.show_fps {
             let s = (frame.height / CLASSIC_HEIGHT).max(1);
@@ -880,53 +1010,6 @@ fn draw_overlays(frame: &mut Frame, session: &Session) {
 }
 
 /// F2 automap: walls within view, centred on the player and rotated so "up" is forward.
-fn draw_automap(frame: &mut Frame, session: &Session, colors: (u8, u8, u8, u8)) {
-    let world = &session.level.world;
-    let p = &session.player;
-    let scale = frame.height as f32 / 1600.0; // ~1600 map units fill the screen height
-    let (cx, cy) = (frame.width as f32 / 2.0, frame.height as f32 / 2.0);
-    let (sin, cos) = (p.angle - std::f32::consts::FRAC_PI_2).sin_cos();
-    let to_screen = |x: f32, y: f32| {
-        let (dx, dy) = (x - p.x, y - p.y);
-        let (rx, ry) = (dx * cos + dy * sin, -dx * sin + dy * cos);
-        (cx + rx * scale, cy - ry * scale)
-    };
-    let (_, _, portal, solid) = colors;
-    for wall in &world.walls {
-        // Only walls of regions at roughly the player's level.
-        let near_level = |r: usize| world.regions.get(r).is_some_and(|reg| reg.floor <= p.z + 64.0 && reg.ceiling >= p.z);
-        if !near_level(wall.front) && !wall.back.is_some_and(near_level) {
-            continue;
-        }
-        let (ax, ay) = world.vertices[wall.a];
-        let (bx, by) = world.vertices[wall.b];
-        let (x0, y0) = to_screen(ax, ay);
-        let (x1, y1) = to_screen(bx, by);
-        let color = if wall.back.is_some_and(|b| b != wall.front) { portal } else { solid };
-        let steps = (x1 - x0).abs().max((y1 - y0).abs()).ceil().max(1.0) as usize;
-        if steps > 4000 {
-            continue;
-        }
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            let (x, y) = (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t);
-            if x >= 0.0 && y >= 0.0 && (x as usize) < frame.width && (y as usize) < frame.height {
-                frame.put(y as usize * frame.width + x as usize, color);
-            }
-        }
-    }
-    // The player: a small arrow pointing up (forward).
-    let s = (frame.height / CLASSIC_HEIGHT).max(1) as i32;
-    for k in 0..4 * s {
-        for w in -k / 2..=k / 2 {
-            let (x, y) = (cx as i32 + w, cy as i32 - 2 * s + k);
-            if x >= 0 && y >= 0 && (x as usize) < frame.width && (y as usize) < frame.height {
-                frame.put(y as usize * frame.width + x as usize, solid);
-            }
-        }
-    }
-}
-
 /// First-person tool picture: full bright, centred, bottom row at y = 208 of the 320x200 screen
 /// (so the last 8 rows are off-screen), scaled with the frame height (combat.md §5.2).
 fn draw_weapon(frame: &mut Frame, session: &Session, shade_rows: &[[u8; 256]]) {
