@@ -20,7 +20,7 @@ the engine reads them from your install folder at runtime.
 | Objects: bots (mover scripts), pickups, text, looping/positional sounds and sound sequences, wall/object morphs, flying, TV views, overlays, lightning, switches, timers, counters, teleports, level exits | implemented; data-driven tests |
 | Combat: tools 0–9, projectiles, explosions (bomb multi-hit), bot attacks, first-person weapon | implemented; shots-to-kill and fire rate confirmed against `lips.exe` |
 | HUD, status messages, menus (LIPSTART), character save slots (LIPSTART.GAM) | exact original layout |
-| Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad mapping unit-tested (no real pad here) |
+| Desktop: wgpu palette shader + CPU fallback, mouse, gamepad/Steam Deck, audio (WAV + MIDI via SoundFont) | Linux tested; Windows build cross-compiled and run under Wine; macOS type-checked; gamepad tested end to end with a virtual Xbox 360 pad (`tools/pilot/gamepad_pilot.py`, uinput) |
 | Web (WASM): folder picker, saves in localStorage | working, headless-tested |
 | Netplay: UDP host/join, WebSocket for browsers, shared doors/switches, remote players | working |
 | Modern extras: Hor+ widescreen, FOV, true colour, F2 automap, quicksave, console, key rebinding, high-contrast HUD, long messages, mods | working |
