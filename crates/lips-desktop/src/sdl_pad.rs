@@ -45,6 +45,13 @@ pub struct SdlPads {
     frames: u32,
 }
 
+/// Look change (radians, in `Input::look_delta`'s convention: positive turns right / looks
+/// down) from the gyro's angular velocity `g` (rad/s; x pitches up, y yaws left) over `dt`:
+/// the view turns as far as the controller did, times `speed`.
+pub fn gyro_look(g: [f32; 3], dt: f32, speed: f32) -> (f32, f32) {
+    (-g[1] * dt * speed, -g[0] * dt * speed)
+}
+
 fn deadzone(v: f32) -> f32 {
     if v.abs() < DEADZONE { 0.0 } else { (v - DEADZONE * v.signum()) / (1.0 - DEADZONE) }
 }
@@ -130,9 +137,9 @@ impl SdlPads {
                 if let (true, Some(speed)) = (pad.gyro, gyro_speed) {
                     let mut g = [0.0f32; 3];
                     if SDL_GetGamepadSensorData(pad.handle, SDL_SENSOR_GYRO, g.as_mut_ptr(), 3) {
-                        // rad/s: x pitches (up positive), y yaws (left positive).
-                        input.look_delta.0 -= g[1] * dt * speed;
-                        input.look_delta.1 -= g[0] * dt * speed;
+                        let (yaw, pitch) = gyro_look(g, dt, speed);
+                        input.look_delta.0 += yaw;
+                        input.look_delta.1 += pitch;
                     }
                 }
             }
@@ -185,5 +192,38 @@ impl SdlPads {
                 SDL_RumbleGamepad(pad.handle, low, high, (h.seconds * 1000.0) as u32);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gyro_look;
+
+    /// Turning the controller a quarter turn left over a second (120 frames) turns the player a
+    /// quarter turn left in the real game; tilting it up looks up.
+    #[test]
+    fn gyro_turns_the_player_like_the_controller() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../original");
+        if !dir.join("LIPS00.XRB").exists() {
+            return;
+        }
+        let vfs = godd_game::Vfs::from_dir(&dir).unwrap();
+        let mut game = godd_game::Game::new(&vfs, &godd_game::Options { start_level: Some("LIPS00".into()), save: None }).unwrap();
+        let idle = godd_game::Input::default();
+        for _ in 0..10 {
+            game.tick(&vfs, &idle);
+        }
+        let before = game.session().unwrap().player;
+        let mut input = godd_game::Input::default();
+        for _ in 0..120 {
+            let (yaw, pitch) = gyro_look([0.3, std::f32::consts::FRAC_PI_2, 0.0], 1.0 / 120.0, 1.0);
+            input.look_delta.0 += yaw;
+            input.look_delta.1 += pitch;
+        }
+        game.tick(&vfs, &input);
+        let after = game.session().unwrap().player;
+        let turned = (after.angle - before.angle).rem_euclid(std::f32::consts::TAU);
+        assert!((turned - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "turned {turned} rad");
+        assert!(after.look > before.look, "tilting up looks up ({} -> {})", before.look, after.look);
     }
 }
