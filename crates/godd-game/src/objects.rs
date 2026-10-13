@@ -1061,6 +1061,11 @@ impl Objects {
 
     /// ODROP: take the named item out of the inventory and place it at the named point (or
     /// at the dropper), visible again; then fire int0.
+    /// A named Point's position (ODROP destinations, teleport targets …).
+    pub fn point(&self, name: &str) -> Option<(f32, f32, f32)> {
+        self.point_names.get(&name.to_ascii_uppercase()).and_then(|&p| self.points.get(p).copied())
+    }
+
     fn drop_item(&mut self, i: usize, item: Option<String>, point: Option<String>, tag: i32, sound: Option<String>) {
         let Some(item) = item else { return };
         let upper = item.to_ascii_uppercase();

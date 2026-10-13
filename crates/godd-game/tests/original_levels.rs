@@ -1281,3 +1281,44 @@ fn lips00_corner_never_drops_into_the_cellar() {
     let p = game.session().unwrap().player;
     assert!(p.z > -1.0 && p.region != 521, "at ({}, {}, {}) r{}", p.x, p.y, p.z, p.region);
 }
+
+/// LIPS06's green lock: walking into r71 with GREENKEY fires tag 62 (DROPGRN), which opens
+/// the green door r147.
+#[test]
+fn lips06_green_key_opens_the_green_door() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS06") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        let key = s.objects.list.iter().position(|o| o.name == "GREENKEY").unwrap();
+        s.objects.list[key].hidden = true;
+        s.objects.inventory.push(key);
+        let z = s.level.world.regions[77].floor;
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (15200.0, 14950.0, z, 77);
+        s.previous = s.player;
+    }
+    hold(&mut game, &vfs, &[Action::Forward], 60, 0.0);
+    run(&mut game, &vfs, 3.0);
+    let s = game.session().unwrap();
+    let door = &s.level.world.regions[147];
+    assert!(door.ceiling > door.floor + 60.0, "green door r147: floor {} ceiling {}; player r{}", door.floor, door.ceiling, s.player.region);
+}
+
+/// LIPS09's door r533 (toggle, tag 22) is opened by the thin trigger strip r532 in front of it
+/// and by r257 behind; walking at it from r169 gets the player through.
+#[test]
+fn lips09_thin_strip_door_lets_the_player_through() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS09") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (13248.0, 18740.0, 4.0, 169);
+        s.previous = s.player;
+    }
+    let south = -std::f32::consts::FRAC_PI_2;
+    hold(&mut game, &vfs, &[Action::Forward], 120, south);
+    let p = game.session().unwrap().player;
+    assert!(p.y < 18680.0, "through the door: ({}, {}) r{}", p.x, p.y, p.region);
+}

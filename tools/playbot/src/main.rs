@@ -706,7 +706,11 @@ impl<'a> Bot<'a> {
                     let ((x0, y0), (x1, y1)) = reg.bounds;
                     q.region != r && (reg.floor - q.z).abs() < 1.0 && q.x > x0 - 8.0 && q.x < x1 + 8.0 && q.y > y0 - 8.0 && q.y < y1 + 8.0
                 });
-                let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 };
+                // Spots on the brink of a deadly drop: the walk drifts a few units off the plan.
+                let brink = [(14.0f32, 0.0f32), (-14.0, 0.0), (0.0, 14.0), (0.0, -14.0), (10.0, 10.0), (10.0, -10.0), (-10.0, 10.0), (-10.0, -10.0)].iter().any(|&(ox, oy)| {
+                    world.region_at_z(q.x + ox, q.y + oy, Some(q.z + 1.0)).is_some_and(|r| r != q.region && deadly_land.contains(&r) && q.z - world.regions[r].floor > physics.step_height)
+                });
+                let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 } + if brink { 24.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
                     came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch }))));
                     open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
@@ -800,7 +804,10 @@ impl<'a> Bot<'a> {
                 // Held up just short of a precise spot before a drop (a wall in the way from
                 // this side): close enough. Not before a jump, which needs its run-up spot.
                 let next_jump = steps.get(k + 1).is_some_and(|n| n.jump);
-                if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level {
+                // (A region goal counts only from inside: a thin trigger strip lies within the
+                // "close enough" of its centre.)
+                let need_inside = k == last && inside.is_some();
+                if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level && !need_inside {
                     break;
                 }
                 if d < close && dz > 40.0 && p.on_ground && k > 0 {
@@ -823,7 +830,7 @@ impl<'a> Bot<'a> {
                             println!("     stalled at step {k}/{last}: player r{} z {:.0} → ({:.0}, {:.0}) r{:?} floor {:?} ceil {:?}, d {d:.0}", p.region, p.z, step.to.0, step.to.1, to, to.map(|r| w.regions[r].floor), to.map(|r| w.regions[r].ceiling));
                         }
                         // Within reach of the goal counts.
-                        if k == last && d < 32.0 {
+                        if k == last && d < 32.0 && inside.is_none() {
                             return true;
                         }
                         self.mark_bad(steps, k);
@@ -869,7 +876,7 @@ impl<'a> Bot<'a> {
                 let r = &s.level.world.regions[s.player.region];
                 let now = (s.player.region, r.floor.to_bits());
                 // (Also anything it set moving elsewhere: a bridge that rises ahead of us.)
-                let busy = s.objects.any_height_motion();
+                let busy = s.objects.any_height_motion() || s.effects.doors_moving();
                 still = if Some(now) == last && !busy { still + 1 } else { 0 };
                 last = Some(now);
                 if still > 20 {
@@ -1302,9 +1309,22 @@ impl<'a> Bot<'a> {
             // is spent; plan afresh from wherever we landed.
             if self.teleported && !reached {
                 self.teleported = false;
-                self.used.insert(goal.target);
+                // (A pickup still lying there is not spent: we fell into a trap short of it.)
+                let still_there = matches!(goal.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OPICKUP && !o.hidden && !o.destroyed));
+                if still_there {
+                    *self.failures.entry(goal.target).or_default() += 1;
+                } else {
+                    self.used.insert(goal.target);
+                }
                 self.edges.clear();
                 self.note("     teleported on the way".into());
+                if self.verbose {
+                    let s = self.session();
+                    let w = &s.level.world;
+                    let inv: Vec<&str> = s.objects.inventory.iter().map(|&k| s.objects.list[k].name.as_str()).collect();
+                    let path: Vec<String> = steps.iter().map(|st| format!("({:.0},{:.0},{:?}{}) r{:?}", st.to.0, st.to.1, st.z, if st.jump { " J" } else { "" }, w.region_at_z(st.to.0, st.to.1, st.z.map(|z| z + 1.0)))).collect();
+                    println!("       carrying {inv:?}; path {}", path.join(" "));
+                }
                 continue;
             }
             // A pickup only counts once it is actually picked up (the walk's "close enough"

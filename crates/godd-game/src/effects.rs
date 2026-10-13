@@ -222,6 +222,11 @@ impl Effects {
         }).collect()
     }
 
+    /// Whether any door (RTDOOR) is opening or closing now.
+    pub fn doors_moving(&self) -> bool {
+        self.regions.iter().any(|r| matches!(r.kind, RegionKind::Door { moving: true, .. }))
+    }
+
     /// Perpetual lifts (RFUP1): (region, bottom floor).
     pub fn lifts(&self) -> Vec<(usize, f32)> {
         self.regions.iter().filter_map(|r| match r.kind {
