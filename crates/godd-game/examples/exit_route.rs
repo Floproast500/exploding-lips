@@ -108,29 +108,48 @@ fn main() {
     // Forward, with the flying state.
     let ahead = {
         let mut seen = vec![[false; 2]; w.regions.len()];
+        let mut parent: Vec<Option<(usize, &'static str)>> = vec![None; w.regions.len()];
         seen[from][0] = true;
         let mut queue = VecDeque::from([(from, false)]);
         while let Some((r, fly)) = queue.pop_front() {
-            let mut next: Vec<(usize, bool)> = links(r)
+            let mut next: Vec<(usize, bool, &'static str)> = links(r)
                 .into_iter()
                 .filter(|(o, x)| match blocked(r, *o, x) {
                     None => true,
                     Some("too high") | Some("no headroom") => fly,
                     _ => false,
                 })
-                .map(|(o, _)| (o, fly))
+                .map(|(o, x)| (o, fly, if doors.contains(&o) { "door" } else if x.blocking { "wall door" } else if lifts.contains(&o) || floors[o].len() > 1 { "lift" } else { "walk" }))
                 .collect();
-            next.extend(teleports.iter().filter(|t| t.0 == r).map(|t| (t.1, t.2)));
+            next.extend(teleports.iter().filter(|t| t.0 == r).map(|t| (t.1, t.2, "teleport")));
             // Stacked levels: drop through a see-through floor; climb into the one above when
             // it is in reach.
             let reg = &w.regions[r];
-            next.extend(reg.below.filter(|b| !deadly.contains(b)).map(|b| (b, fly)));
-            next.extend(reg.above.filter(|&a| fly || rise(r, a) <= climb(r)).map(|a| (a, fly)));
-            for (o, f) in next {
+            next.extend(reg.below.filter(|b| !deadly.contains(b)).map(|b| (b, fly, "drop")));
+            next.extend(reg.above.filter(|&a| fly || rise(r, a) <= climb(r)).map(|a| (a, fly, "climb")));
+            for (o, f, how) in next {
                 if !seen[o][f as usize] {
                     seen[o][f as usize] = true;
+                    if parent[o].is_none() && o != from {
+                        parent[o] = Some((r, how));
+                    }
                     queue.push_back((o, f));
                 }
+            }
+        }
+        // PATH_TO=1: the way found to the first target, with how each step is made (not walking).
+        if std::env::var("PATH_TO").is_ok()
+            && let Some(&t) = exits.first()
+        {
+            let mut steps = Vec::new();
+            let mut r = t;
+            while let Some((p, how)) = parent[r] {
+                steps.push((p, r, how));
+                r = p;
+            }
+            steps.reverse();
+            for (p, r, how) in steps.iter().filter(|s| s.2 != "walk") {
+                println!("  r{p} -> r{r}: {how}");
             }
         }
         seen.iter().map(|s| s[0] || s[1]).collect::<Vec<bool>>()
