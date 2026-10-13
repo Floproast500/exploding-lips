@@ -14,7 +14,10 @@ fn main() {
     let s = game.session().unwrap();
     let w = &s.level.world;
     let from = s.player.region;
-    let exits: Vec<usize> = s.effects.switches().iter().filter(|sw| sw.tags.contains(&500)).map(|sw| w.walls[sw.wall].front).collect();
+    let exits: Vec<usize> = match std::env::var("TARGET").ok().and_then(|t| t.parse().ok()) {
+        Some(t) => vec![t],
+        None => s.effects.switches().iter().filter(|sw| sw.tags.contains(&500)).map(|sw| w.walls[sw.wall].front).collect(),
+    };
     let death: Vec<i32> = s.objects.list.iter().filter(|o| o.effect == 15 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag).collect();
     let deadly: Vec<usize> = s.effects.triggers().iter().filter(|(_, t)| death.contains(&t[0]) || death.contains(&t[2])).map(|(r, _)| *r).collect();
     let lifts: Vec<usize> = s.effects.lifts().iter().map(|l| l.0).collect();
@@ -53,7 +56,12 @@ fn main() {
         })
         .collect();
     // Why the step from region r into o is not possible (None: it is).
+    // CLOSED=4,7: doors that stay shut; TARGET=2: check that region instead of the exit.
+    let closed: Vec<usize> = std::env::var("CLOSED").map(|v| v.split(',').filter_map(|c| c.parse().ok()).collect()).unwrap_or_default();
     let blocked = |r: usize, o: usize, x: &godd_game::world::Wall| -> Option<&'static str> {
+        if closed.contains(&o) {
+            return Some("closed door");
+        }
         let door = doors.contains(&o) || doors.contains(&r);
         let wall_door = w.walls.iter().position(|y| std::ptr::eq(y, x)).is_some_and(|i| opened.contains(&i));
         if x.blocking && !door && !wall_door {

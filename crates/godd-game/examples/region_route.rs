@@ -34,6 +34,10 @@ fn main() {
             if solid && (deadly.contains(&o) || w.regions[o].floor - w.regions[r].floor > 48.0 || w.regions[o].ceiling - w.regions[o].floor < 12.0) {
                 continue;
             }
+            // CLOSED=4,7: treat those (door) regions as shut.
+            if std::env::var("CLOSED").is_ok_and(|v| v.split(',').any(|c| c.parse() == Ok(o))) {
+                continue;
+            }
             if prev[o] == usize::MAX {
                 prev[o] = r;
                 queue.push_back(o);
