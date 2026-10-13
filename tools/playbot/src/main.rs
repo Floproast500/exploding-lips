@@ -22,7 +22,9 @@ const STEP: f32 = 32.0;
 /// Tags that only send the player back (3: DEATH01 teleport to the start; 661: death).
 const DEATH_TAGS: [i32; 2] = [3, 661];
 /// Most planner states explored per plan.
-const MAX_NODES: usize = 40_000;
+const MAX_NODES: usize = 150_000;
+/// Marker target: a part-way spot on a long region route, not a thing to use.
+const WAYPOINT: usize = usize::MAX;
 const TICK_RATE: f32 = 60.0;
 
 /// Object effects (re/engine/object-effects.md).
@@ -99,6 +101,10 @@ struct Bot<'a> {
     teleported: bool,
     /// When each thing was last used (ticks).
     last_used: HashMap<Target, u64>,
+    /// Waypoint walks that failed in a row.
+    waypoint_fails: u32,
+    /// Regions the last failed plan got to (seeds for the region-level route).
+    reached: HashSet<usize>,
     /// Every region the player has stood in.
     visited: HashSet<usize>,
     /// Planner steps already simulated: (grid spot, direction) → result.
@@ -153,7 +159,8 @@ impl<'a> Bot<'a> {
         let shut = |r: usize| w.regions[r].ceiling - w.regions[r].floor < 56.0;
         let span = |r: usize| {
             let reg = &w.regions[r];
-            (reg.floor, if doors.contains_key(&r) { reg.ceiling.max(reg.floor + 128.0) } else { reg.ceiling })
+            let floor = reg.floor;
+            (floor, if doors.contains_key(&r) { reg.ceiling.max(reg.floor + 128.0) } else { reg.ceiling })
         };
         let start = s.player.region;
         let mut prev = vec![usize::MAX; w.regions.len()];
@@ -211,6 +218,85 @@ impl<'a> Bot<'a> {
             .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && o.tag == tag).map(|(i, _)| Target::Object(i)))
             .collect();
         switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect()
+    }
+
+    /// A spot about 24 regions along the region-level route (doors and floors as they are
+    /// now; steps up to a jump) to the nearest unreached thing, when that is further.
+    fn route_waypoint(&self, goals: &[Goal]) -> Option<Goal> {
+        use std::collections::VecDeque;
+        if self.waypoint_fails >= 3 {
+            return None;
+        }
+        let s = self.session();
+        let w = &s.level.world;
+        // From everywhere the grid planner could get to (it knows jumps across gaps).
+        let mut prev = vec![usize::MAX; w.regions.len()];
+        let mut queue = VecDeque::new();
+        for &r in self.reached.iter().chain(std::iter::once(&s.player.region)) {
+            if r < prev.len() && prev[r] == usize::MAX {
+                prev[r] = r;
+                queue.push_back(r);
+            }
+        }
+        while let Some(r) = queue.pop_front() {
+            for &wi in &w.regions[r].walls {
+                let x = &w.walls[wi];
+                let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
+                let o = if x.front == r { b } else { x.front };
+                if prev[o] != usize::MAX {
+                    continue;
+                }
+                // Drawn floors (a narrow pit with a see-through floor can be run across; the
+                // grid planner works out whether it can), but no waypoint in such a pit.
+                let (a, c) = (&w.regions[r], &w.regions[o]);
+                let (af, cf) = (a.floor, c.floor);
+                if a.ceiling.min(c.ceiling) - af.max(cf) >= 20.0 && cf - af <= 48.0 {
+                    prev[o] = r;
+                    queue.push_back(o);
+                }
+            }
+        }
+        let len = |mut r: usize| {
+            let mut n = 0;
+            while prev[r] != r && n < 100_000 {
+                r = prev[r];
+                n += 1;
+            }
+            n
+        };
+        let (n, target) = goals
+            .iter()
+            .filter(|g| !self.used.contains(&g.target))
+            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX).map(|r| (len(r), r)))
+            .min()?;
+        let _ = n;
+        // Walk back from the target to the region `n - 24` steps from it... i.e. 24 from us.
+        let mut path = vec![target];
+        while let Some(&r) = path.last() {
+            if prev[r] == r {
+                break;
+            }
+            path.push(prev[r]);
+        }
+        path.reverse();
+        // A region a few steps along from where the planner got to (the route starts there),
+        // the furthest whose middle lies in it and is not the one we stand in.
+        let here = s.player.region;
+        // (The route's first region is one the planner reached: certainly within its budget.)
+        (0..=2.min(path.len() - 1)).filter(|&k| path[k] != here).find_map(|k| {
+            let r = path[k];
+            let reg = &w.regions[r];
+            let ((x0, y0), (x1, y1)) = reg.bounds;
+            let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            (reg.below.is_none() && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then(|| Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
+        })
+    }
+
+    /// Trigger regions whose tags move a floor or ceiling (elevators), used like switches.
+    fn mover_regions(&self) -> HashSet<usize> {
+        let s = self.session();
+        let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
+        s.effects.triggers().into_iter().filter(|(_, tags)| tags.iter().any(|x| mover_tags.contains(x))).map(|(r, _)| r).collect()
     }
 
     /// Regions connected to the player's through open portals.
@@ -399,7 +485,11 @@ impl<'a> Bot<'a> {
         goals.retain(|g| !matches!(g.target, Target::Region(r) if r == here));
         // Likewise bump/shoot switch objects (they toggle their door).
         let reswitch = |i: usize| s.objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW) && shut_tags.contains(&o.tag));
-        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r)) || matches!(g.target, Target::Object(i) if reswitch(i)) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        // Trigger regions that move a floor or ceiling (an elevator's): like a switch, always
+        // usable again.
+        let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
+        let moves = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| mover_tags.contains(x)));
+        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r)) || matches!(g.target, Target::Object(i) if reswitch(i)) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         goals
     }
 
@@ -411,7 +501,8 @@ impl<'a> Bot<'a> {
             // Run while far, walk the last stretch; arrived once the spot is within one step.
             let mut i = Input::default();
             i.set(Action::Forward, true);
-            i.set(Action::Run, before > 48.0 && !jump);
+            // Walk the short hops (a run overshoots small ledges), run the long jumps.
+            i.set(Action::Run, before > 48.0 && (!jump || before > 100.0));
             i.set(Action::Jump, jump && t == 0);
             // Stay down while there is no room to stand.
             let low = world.regions.get(p.region).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
@@ -506,19 +597,36 @@ impl<'a> Bot<'a> {
             }
             expanded += 1;
             if expanded > MAX_NODES {
+                self.reached = came.keys().map(|c| c.3).collect();
                 return None;
             }
-            const MOVES: [(f32, f32); 20] = [
+            const MOVES: [(f32, f32); 40] = [
                 (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0),
                 // Jumps with a run-up onto ledges too high to jump from right next to them.
                 (2.0, 0.0), (-2.0, 0.0), (0.0, 2.0), (0.0, -2.0), (2.0, 2.0), (2.0, -2.0), (-2.0, 2.0), (-2.0, -2.0),
                 (3.0, 0.0), (-3.0, 0.0), (0.0, 3.0), (0.0, -3.0),
+                // Across wider gaps (only tried over a drop, see below).
+                (4.0, 0.0), (-4.0, 0.0), (0.0, 4.0), (0.0, -4.0),
+                (5.0, 0.0), (-5.0, 0.0), (0.0, 5.0), (0.0, -5.0),
+                (6.0, 0.0), (-6.0, 0.0), (0.0, 6.0), (0.0, -6.0),
+                (7.0, 0.0), (-7.0, 0.0), (0.0, 7.0), (0.0, -7.0),
+                (8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0),
             ];
             for (dx, dy) in MOVES {
                 let to = (((p.x / STEP).round() + dx) * STEP, ((p.y / STEP).round() + dy) * STEP);
                 let long = dx.abs() > 1.0 || dy.abs() > 1.0;
-                if long && !world.region_at(to.0, to.1).is_some_and(|r| world.solid_floor(r).0 > p.z + physics.step_height) {
-                    continue;
+                if long {
+                    // Only onto a ledge too high to step onto, or across a gap to ground about
+                    // level with us (an elevator top to its landing).
+                    let floor_at = |x: f32, y: f32| world.region_at_z(x, y, Some(p.z + 1.0)).or_else(|| world.region_at(x, y)).map(|r| world.solid_floor(r).0);
+                    let mid = ((p.x + to.0) / 2.0, (p.y + to.1) / 2.0);
+                    let target = floor_at(to.0, to.1);
+                    let ledge = target.is_some_and(|f| f > p.z + physics.step_height);
+                    let gap = target.is_some_and(|f| (f - p.z).abs() <= physics.step_height) && floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - physics.step_height);
+                    let wide = dx.abs() > 3.0 || dy.abs() > 3.0;
+                    if (!ledge && !gap) || (wide && !gap) {
+                        continue;
+                    }
                 }
                 let edge = (k, (dx as i32, dy as i32));
                 let cached = self.edges.get(&edge).filter(|e| e.doors == doors && heights(e.from_region) == e.from_heights && e.to.is_none_or(|(q, _)| heights(q.region) == e.to_heights)).map(|e| e.to);
@@ -534,7 +642,9 @@ impl<'a> Bot<'a> {
                 let Some((q, (jump, crouch))) = result else { continue };
                 // Never into a region that kills on entry (tag 3 sends you back to the start),
                 // nor jump where landing does.
-                if deadly_enter.contains(&q.region) || (jump && deadly_land.contains(&q.region)) {
+                // (Landing kills: no jump into it, and no drop of more than a step either.)
+                let falls_in = deadly_land.contains(&q.region) && (jump || p.z - world.regions[q.region].floor > physics.step_height);
+                if deadly_enter.contains(&q.region) || falls_in {
                     continue;
                 }
                 if avoid.iter().any(|&(x, y, z, r)| (q.x - x).abs() < r && (q.y - y).abs() < r && (q.z - z).abs() < 64.0) {
@@ -543,17 +653,20 @@ impl<'a> Bot<'a> {
                 let qk = key(&q);
                 // Corners cut off a deadly-landing region (FALLZ's chamfers) belong to its
                 // container: entering the trap from there comes too late to ride its floor down.
+                // (Only for a trap floor level with us, one that sinks under you; not a pit.)
                 let corner = deadly_land.iter().any(|&r| {
-                    let ((x0, y0), (x1, y1)) = world.regions[r].bounds;
-                    q.region != r && q.x > x0 - 8.0 && q.x < x1 + 8.0 && q.y > y0 - 8.0 && q.y < y1 + 8.0
+                    let reg = &world.regions[r];
+                    let ((x0, y0), (x1, y1)) = reg.bounds;
+                    q.region != r && (reg.floor - q.z).abs() < 1.0 && q.x > x0 - 8.0 && q.x < x1 + 8.0 && q.y > y0 - 8.0 && q.y < y1 + 8.0
                 });
                 let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
                     came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch }))));
-                    open.push((Reverse(((c + heuristic(&q)) * 1000.0) as i64), qk));
+                    open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
                 }
             }
         }
+        self.reached = came.keys().map(|c| c.3).collect();
         None
     }
 
@@ -566,6 +679,9 @@ impl<'a> Bot<'a> {
         self.ticks += 1;
         if let Some(s) = self.game.session() {
             self.visited.insert(s.player.region);
+            if self.ticks < 600 && std::env::var("PLAYBOT_TRACE0").is_ok() {
+                println!("       trace t{} r{} ({:.0},{:.0},{:.0}) r16 floor {}", self.ticks, s.player.region, s.player.x, s.player.y, s.player.z, s.level.world.regions.get(16).map_or(0.0, |r| r.floor));
+            }
         }
         if let (Some(a), Some(b)) = (before, self.game.session().map(|s| s.player))
             && (a.x - b.x).hypot(a.y - b.y) > 200.0
@@ -587,11 +703,13 @@ impl<'a> Bot<'a> {
 
     /// Walk the planned steps in the real game; false if the player gets stuck.
     fn walk(&mut self, steps: &[Step]) -> bool {
-        self.walk_to(steps, 12.0)
+        self.walk_to(steps, 12.0, None)
     }
 
     /// `walk` with how close the last step must get.
-    fn walk_to(&mut self, steps: &[Step], close_last: f32) -> bool {
+    /// `inside`: arrived as soon as the player is in this region (trigger regions: stepping
+    /// in is the point, and an elevator floor starts moving at once).
+    fn walk_to(&mut self, steps: &[Step], close_last: f32, inside: Option<usize>) -> bool {
         let last = steps.len().saturating_sub(1);
         for (k, step) in steps.iter().enumerate() {
             // Intermediate spots only need passing near; the goal itself a little closer.
@@ -604,6 +722,9 @@ impl<'a> Bot<'a> {
                 }
                 if self.teleported {
                     return false;
+                }
+                if inside.is_some_and(|r| self.session().player.region == r) {
+                    return true;
                 }
                 let p = self.session().player;
                 let d = (p.x - step.to.0).hypot(p.y - step.to.1);
@@ -631,7 +752,7 @@ impl<'a> Bot<'a> {
                 s.player.angle = angle;
                 let mut input = Input::default();
                 input.set(Action::Forward, true);
-                input.set(Action::Run, d > 48.0 && !step.jump);
+                input.set(Action::Run, d > 48.0 && (!step.jump || d > 100.0));
                 let low = {
                     let s = self.session();
                     let physics = s.physics_override.unwrap_or_default();
@@ -920,7 +1041,8 @@ impl<'a> Bot<'a> {
             let w = &self.session().level.world;
             // (Things, not switches: a door's other face is right behind it and would shut it.)
             let fresh: Vec<Goal> = goals.iter().filter(|g| !matches!(g.target, Target::Wall(_)) && w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).is_some_and(|r| self.opened.contains(&r))).copied().collect();
-            let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)));
+            let movers = self.mover_regions();
+            let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)));
             let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
             if found.is_none() && !firsts.is_empty() {
                 found = self.plan(&firsts);
@@ -974,6 +1096,19 @@ impl<'a> Bot<'a> {
                     }
                 }
                 None
+            });
+            // Too far for the grid search (a big maze): head for a region part-way along a
+            // region-level route to the nearest unreached thing, then plan again from there.
+            let found = found.or_else(|| {
+                let wp = self.route_waypoint(&goals);
+                if self.verbose {
+                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.at), self.reached.len());
+                }
+                let r = self.plan(&[wp?]);
+                if self.verbose {
+                    println!("     waypoint plan {:?}", r.as_ref().map(|r| r.1.len()));
+                }
+                r
             });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
@@ -1045,7 +1180,19 @@ impl<'a> Bot<'a> {
                 _ => 12.0,
             };
             self.teleported = false;
-            let mut reached = self.walk_to(&steps, close);
+            if goal.target == Target::Region(WAYPOINT) {
+                self.note(format!("t={:.0}s → waypoint ({:.0}, {:.0}) ({} steps)", self.ticks as f32 / TICK_RATE, goal.at[0], goal.at[1], steps.len()));
+                self.teleported = false;
+                if !self.walk(&steps) {
+                    self.edges.clear();
+                    self.waypoint_fails += 1;
+                } else {
+                    self.waypoint_fails = 0;
+                }
+                continue;
+            }
+            let inside = if let Target::Region(r) = goal.target { Some(r) } else { None };
+            let mut reached = self.walk_to(&steps, close, inside);
             // Teleported on the way (a trigger region or teleporter did its thing): that goal
             // is spent; plan afresh from wherever we landed.
             if self.teleported && !reached {
@@ -1095,6 +1242,7 @@ impl<'a> Bot<'a> {
                 }
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
+                self.waypoint_fails = 0;
                 self.failures.clear(); // something changed: try the others again
             } else {
                 self.unreachable.insert(goal.target);
@@ -1126,7 +1274,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, reached: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
