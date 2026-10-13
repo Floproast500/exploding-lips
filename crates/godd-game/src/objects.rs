@@ -99,6 +99,15 @@ impl ObjAux {
     }
 }
 
+/// The sound named by an INI `OSOUND(NAME)` command (also `OSOUND (NAME)`), if the line is one.
+fn osound_name(line: &str) -> Option<String> {
+    let rest = line.trim_start().strip_prefix("OSOUND").or_else(|| line.trim_start().strip_prefix("osound"))?;
+    let name = rest.trim_start().strip_prefix('(')?.split(')').next()?.trim();
+    // (Only a lone sound command: anything after it goes the INI way.)
+    let tail = rest.split_once(')').map_or("", |(_, t)| t).trim();
+    (!name.is_empty() && tail.is_empty()).then(|| name.to_string())
+}
+
 fn c_string(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     bytes[..end].iter().map(|&b| b as char).collect::<String>().trim().to_string()
@@ -1402,6 +1411,10 @@ impl Objects {
     fn apply_mover_requests(&mut self, i: usize, reqs: Vec<MoverRequest>, player: Option<&PlayerView>) {
         for r in reqs {
             match r {
+                // A bot's OSOUND comes from the bot, like its other sounds (the original plays
+                // object sounds positionally, object-effects.md FUN_0049d933): a growl in the
+                // next room is not one in your ear.
+                MoverRequest::Ini(line) if osound_name(&line).is_some() => self.sound_from(i, osound_name(&line)),
                 MoverRequest::Ini(line) => self.requests.push(ObjRequest::Ini(line)),
                 // Lips scripts fire 661 when a bot touches the player (combat.md §4.3): the player
                 // is hit, like a shot's tag.

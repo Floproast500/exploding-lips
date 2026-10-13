@@ -1384,3 +1384,23 @@ fn lips00_firing_in_the_bsp_world_animates_the_tool_with_fixes() {
         assert_eq!(changed, fixes, "fixes {fixes}: tool animated {changed}");
     }
 }
+
+/// Death bots' growls (their mover script's OSOUND) come from the bot, not flat in the
+/// player's ear: back from LIPS00's BSP world, the bots in the rooms round the coffin shaft
+/// growl every 1.2 s (no line-of-sight test, movers.md), which used to play at full volume.
+#[test]
+fn lips00_bot_growls_are_positional() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    game.session_mut().unwrap().fire_tag(132);
+    run(&mut game, &vfs, 0.5);
+    game.session_mut().unwrap().bsp.as_mut().unwrap().player.pos = [-2384.0, -1120.0, 424.0];
+    run(&mut game, &vfs, 4.0);
+    let audio = game.drain_audio();
+    let growls: Vec<_> = audio.iter().filter_map(|e| match e {
+        godd_game::AudioEvent::Sound { name, pos, .. } if name == "GROWL07" || name == "GROWL14" => Some(*pos),
+        _ => None,
+    }).collect();
+    assert!(!growls.is_empty(), "the bots growl");
+    assert!(growls.iter().all(Option::is_some), "every growl has a position: {growls:?}");
+}
