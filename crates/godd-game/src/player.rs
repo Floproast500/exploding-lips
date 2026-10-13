@@ -451,7 +451,9 @@ impl Player {
         // The far side is whichever region we are not standing in.
         let other = if w.front == self.region { back } else { front };
         let height = if self.crouching { params.crouch_eye } else { params.height };
-        other.floor - self.z > params.step_height || other.ceiling - other.floor.max(self.z) < height + params.head_clearance
+        // physics.md §8.2: the step is at most 32 and the body (without the head clearance kept
+        // under ceilings) fits under the far ceiling: z + Height < nextCeiling.
+        other.floor - self.z > params.step_height || other.floor.max(self.z) + height >= other.ceiling
     }
 }
 

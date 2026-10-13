@@ -68,6 +68,8 @@ struct Edge {
 #[derive(Debug, Clone, Copy)]
 struct Step {
     to: (f32, f32),
+    /// Height expected there (None: any), so a spot above or below does not count.
+    z: Option<f32>,
     jump: bool,
     /// Crouch the whole way (crawlspaces).
     crouch: bool,
@@ -89,6 +91,12 @@ struct Bot<'a> {
     opened: HashSet<usize>,
     /// Consecutive plans that only re-used something.
     repeats: u32,
+    /// Respawns since the last new thing.
+    idle_respawns: u32,
+    /// Set when a tick moved the player far (a teleport).
+    teleported: bool,
+    /// When each thing was last used (ticks).
+    last_used: HashMap<Target, u64>,
     /// Every region the player has stood in.
     visited: HashSet<usize>,
     /// Planner steps already simulated: (grid spot, direction) → result.
@@ -130,6 +138,77 @@ impl<'a> Bot<'a> {
         self.game.session_mut().expect("session").fire_tag(tag as u32);
         let p = self.session().player;
         (p.x - before.0).hypot(p.y - before.1) > 64.0
+    }
+
+    /// The switches (among `switches`) that open the first shut door on the region route to
+    /// the nearest unreached non-switch goal. Doors count as open for routing; steps up to a
+    /// jump and any drop are allowed.
+    fn door_on_route(&self, goals: &[Goal], switches: &[Goal]) -> Vec<Goal> {
+        use std::collections::VecDeque;
+        let s = self.session();
+        let w = &s.level.world;
+        let doors: HashMap<usize, i32> = s.effects.doors().into_iter().collect();
+        let shut = |r: usize| w.regions[r].ceiling - w.regions[r].floor < 56.0;
+        let span = |r: usize| {
+            let reg = &w.regions[r];
+            (reg.floor, if doors.contains_key(&r) { reg.ceiling.max(reg.floor + 128.0) } else { reg.ceiling })
+        };
+        let start = s.player.region;
+        let mut prev = vec![usize::MAX; w.regions.len()];
+        prev[start] = start;
+        let mut queue = VecDeque::from([start]);
+        while let Some(r) = queue.pop_front() {
+            for &wi in &w.regions[r].walls {
+                let x = &w.walls[wi];
+                let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
+                let o = if x.front == r { b } else { x.front };
+                if prev[o] != usize::MAX || x.blocking && !doors.contains_key(&o) && !doors.contains_key(&r) {
+                    continue;
+                }
+                let ((ff, fc), (tf, tc)) = (span(r), span(o));
+                if fc.min(tc) - ff.max(tf) >= 20.0 && tf - ff <= 48.0 {
+                    prev[o] = r;
+                    queue.push_back(o);
+                }
+            }
+        }
+        // Nearest (by route length) unreached thing.
+        let route_len = |mut r: usize| {
+            let mut n = 0;
+            while prev[r] != r && n < 10_000 {
+                r = prev[r];
+                n += 1;
+            }
+            n
+        };
+        let target = goals
+            .iter()
+            .filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target))
+            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX).map(|r| (route_len(r), r)))
+            .min();
+        if self.verbose {
+            println!("     route target: {:?}", target);
+        }
+        let Some((_, mut r)) = target else { return Vec::new() };
+        // Walk back to the first shut door on the route.
+        let mut first = None;
+        while prev[r] != r {
+            if doors.contains_key(&r) && shut(r) {
+                first = Some(r);
+            }
+            r = prev[r];
+        }
+        let Some(door) = first else { return Vec::new() };
+        let tag = doors[&door];
+        let opens: HashSet<Target> = s
+            .effects
+            .switches()
+            .iter()
+            .filter(|sw| sw.tags.contains(&tag))
+            .map(|sw| Target::Wall(sw.wall))
+            .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && o.tag == tag).map(|(i, _)| Target::Object(i)))
+            .collect();
+        switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect()
     }
 
     /// Regions connected to the player's through open portals.
@@ -219,16 +298,44 @@ impl<'a> Bot<'a> {
                 let x = &w.walls[wi];
                 (x.front == a && x.back == Some(b)) || (x.front == b && x.back == Some(a))
             });
-            let spot = [1.0f32, -1.0]
+            let spots: Vec<((f32, f32), usize)> = [1.0f32, -1.0]
                 .into_iter()
                 .map(|side| {
                     let n = (-dy / len * side, dx / len * side);
                     (mid.0 + n.0 * 40.0, mid.1 + n.1 * 40.0)
                 })
-                .filter_map(|at| w.region_at(at.0, at.1).filter(|&r| open(r)).map(|r| (at, r)))
-                // The wall's own region, else one opening onto it (a button alcove's room).
-                .min_by_key(|&(_, r)| if r == wall.front { 0 } else if joined(r, wall.front) { 1 } else { 2 });
-            if let Some((at, r)) = spot {
+                // At the switch's own height (another level may lie above or below).
+                .filter_map(|at| w.region_at_z(at.0, at.1, Some(w.regions[wall.front].floor + 1.0)).filter(|&r| open(r)).map(|r| (at, r)))
+                // Nothing solid (a wall, a shut door) between the spot and the switch.
+                .filter(|&(at, _)| {
+                    let to = (mid.0 - (mid.0 - at.0) * 0.02, mid.1 - (mid.1 - at.1) * 0.02);
+                    !w.walls.iter().enumerate().any(|(wi, x)| {
+                        if wi == sw.wall {
+                            return false;
+                        }
+                        // Only walls at this height (not a level above or below).
+                        let zf = w.regions[wall.front].floor;
+                        let at_height = |r: usize| w.regions.get(r).is_some_and(|g| g.floor < zf + 48.0 && g.ceiling > zf);
+                        if !at_height(x.front) && !x.back.is_some_and(at_height) {
+                            return false;
+                        }
+                        // One-sided, or next to somewhere too low to stand (a shut door). (The
+                        // "blocking" flag marks door lines too, so it says nothing here.)
+                        let solid = x.back.is_none() || [Some(x.front), x.back].into_iter().flatten().any(|r| !open(r));
+                        solid && segments_cross(at, to, w.vertices[x.a], w.vertices[x.b])
+                    })
+                })
+                .collect();
+            // A two-sided line (a door face) works from either side: offer both and let the
+            // planner take the one it can reach. A one-sided switch: the wall's own region,
+            // else one opening onto it (a button alcove's room).
+            let two_sided = wall.back.is_some_and(|b| b != wall.front);
+            let chosen: Vec<((f32, f32), usize)> = if two_sided {
+                spots
+            } else {
+                spots.into_iter().min_by_key(|&(_, r)| if r == wall.front { 0 } else if joined(r, wall.front) { 1 } else { 2 }).into_iter().collect()
+            };
+            for (at, r) in chosen {
                 let z = w.regions[r].floor;
                 goals.push(Goal { target: Target::Wall(sw.wall), at: [at.0, at.1, z], face: Some(facing(at, mid)), shoot: false });
             }
@@ -304,7 +411,9 @@ impl<'a> Bot<'a> {
             i.set(Action::Forward, true);
             i.set(Action::Run, before > 48.0 && !jump);
             i.set(Action::Jump, jump && t == 0);
-            i.set(Action::Crouch, crouch);
+            // Stay down while there is no room to stand.
+            let low = world.regions.get(p.region).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
+            i.set(Action::Crouch, crouch || low);
             p.angle = facing((p.x, p.y), to);
             let (x0, y0) = (p.x, p.y);
             p.tick(world, &i, physics);
@@ -376,7 +485,7 @@ impl<'a> Bot<'a> {
                 }
                 steps.reverse();
                 let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
-                steps.push(Step { to: (goal.at[0], goal.at[1]), jump: false, crouch });
+                steps.push(Step { to: (goal.at[0], goal.at[1]), z: None, crouch, jump: false });
                 return Some((goal, steps));
             }
             expanded += 1;
@@ -424,7 +533,7 @@ impl<'a> Bot<'a> {
                 });
                 let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
-                    came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), jump, crouch }))));
+                    came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch }))));
                     open.push((Reverse(((c + heuristic(&q)) * 1000.0) as i64), qk));
                 }
             }
@@ -441,6 +550,11 @@ impl<'a> Bot<'a> {
         self.ticks += 1;
         if let Some(s) = self.game.session() {
             self.visited.insert(s.player.region);
+        }
+        if let (Some(a), Some(b)) = (before, self.game.session().map(|s| s.player))
+            && (a.x - b.x).hypot(a.y - b.y) > 200.0
+        {
+            self.teleported = true;
         }
         if self.verbose
             && let (Some(a), Some(b)) = (before, self.game.session().map(|s| s.player))
@@ -472,9 +586,13 @@ impl<'a> Bot<'a> {
                 if self.level_done() {
                     return true;
                 }
+                if self.teleported {
+                    return false;
+                }
                 let p = self.session().player;
                 let d = (p.x - step.to.0).hypot(p.y - step.to.1);
-                if d < close {
+                let level = step.z.is_none_or(|z| (p.z - z).abs() < 40.0 || !p.on_ground);
+                if d < close && level {
                     break;
                 }
                 if d < best - 0.5 {
@@ -498,7 +616,12 @@ impl<'a> Bot<'a> {
                 let mut input = Input::default();
                 input.set(Action::Forward, true);
                 input.set(Action::Run, d > 48.0 && !step.jump);
-                input.set(Action::Crouch, step.crouch);
+                let low = {
+                    let s = self.session();
+                    let physics = s.physics_override.unwrap_or_default();
+                    s.level.world.regions.get(p.region).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance)
+                };
+                input.set(Action::Crouch, step.crouch || low);
                 // The planned jump, or a hop when stuck against a ledge.
                 let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && DEATH_TAGS.contains(&t.1[2]));
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
@@ -734,8 +857,13 @@ impl<'a> Bot<'a> {
             // Whatever the last switch opened up comes first (before a door closes again), then
             // things to collect and places to visit; switches and lifts change the world (an
             // elevator's other button would undo the ride), so only when nothing else is reachable.
+            if let Ok(v) = std::env::var("PLAYBOT_HAS") {
+                let n: Vec<[f32; 3]> = goals.iter().filter(|g| format!("{:?}", g.target) == v).map(|g| g.at).collect();
+                println!("     has {v}: {n:?}");
+            }
             let w = &self.session().level.world;
-            let fresh: Vec<Goal> = goals.iter().filter(|g| w.region_at(g.at[0], g.at[1]).is_some_and(|r| self.opened.contains(&r))).copied().collect();
+            // (Things, not switches: a door's other face is right behind it and would shut it.)
+            let fresh: Vec<Goal> = goals.iter().filter(|g| !matches!(g.target, Target::Wall(_)) && w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).is_some_and(|r| self.opened.contains(&r))).copied().collect();
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)));
             let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
             if found.is_none() && !firsts.is_empty() {
@@ -766,7 +894,31 @@ impl<'a> Bot<'a> {
             // Switches never pressed before ones that were (toggling the same doors forever).
             let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target));
             let found = found.or_else(|| if new.is_empty() { None } else { self.plan(&new) });
-            let found = found.or_else(|| self.plan(&old));
+            // Only old switches left: open the next shut door on the way to the nearest thing
+            // not yet reached.
+            let found = found.or_else(|| {
+                let pick = self.door_on_route(&goals, &old);
+                if self.verbose {
+                    println!("     route switches: {:?}", pick.iter().map(|g| g.target).collect::<Vec<_>>());
+                }
+                if pick.is_empty() { None } else { self.plan(&pick) }
+            });
+            // Among old switches, the one pressed longest ago first (the nearest ones would
+            // just cycle, e.g. an elevator's buttons).
+            let found = found.or_else(|| {
+                let mut old = old.clone();
+                old.sort_by_key(|g| self.last_used.get(&g.target).copied().unwrap_or(0));
+                let mut k = 0;
+                while k < old.len() {
+                    let stamp = self.last_used.get(&old[k].target).copied().unwrap_or(0);
+                    let batch: Vec<Goal> = old[k..].iter().take_while(|g| self.last_used.get(&g.target).copied().unwrap_or(0) == stamp).copied().collect();
+                    k += batch.len();
+                    if let Some(f) = self.plan(&batch) {
+                        return Some(f);
+                    }
+                }
+                None
+            });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
                 let idle = Input::default();
@@ -774,10 +926,12 @@ impl<'a> Bot<'a> {
                     self.tick(&idle);
                 }
                 self.waits += 1;
+                let stuck_at = self.session().player;
                 if self.waits > 8 && self.respawn() {
                     // Trapped (a pit with no way up): a player gets out by dying, which sends them
                     // back to the start; do the same.
-                    self.note("     no way on: back to the start (death teleport)".into());
+                    let p = stuck_at;
+                    self.note(format!("     no way on from ({:.0}, {:.0}, {:.0}) r{}: back to the start (death teleport)", p.x, p.y, p.z, p.region));
                     self.waits = 0;
                     self.edges.clear();
                     continue;
@@ -804,12 +958,26 @@ impl<'a> Bot<'a> {
             // Only ever re-pressing old switches: nothing new is reachable.
             if self.used.contains(&goal.target) {
                 self.repeats += 1;
+                // Shut in with only old switches (a one-way area): back to the start, as a
+                // player would get out by dying; give up if that changes nothing twice.
+                if self.repeats > 60 && self.idle_respawns < 2 && self.respawn() {
+                    let p = self.session().player;
+                    self.note(format!("     only old switches here: back to the start at ({:.0}, {:.0})", p.x, p.y));
+                    self.idle_respawns += 1;
+                    self.repeats = 0;
+                    self.edges.clear();
+                    continue;
+                }
                 if self.repeats > 60 {
                     let p = self.session().player;
-                    return Err(format!("only old switches left at ({:.0}, {:.0}, {:.0}) region {}. The reachable area ends at:\n    {}", p.x, p.y, p.z, p.region, self.boundary_report()));
+                    let mut left: Vec<&Goal> = goals.iter().filter(|g| !self.used.contains(&g.target)).collect();
+                    left.sort_by_key(|g| matches!(g.target, Target::Wall(_)));
+                    let left: Vec<String> = left.iter().take(24).map(|g| format!("{:?}@r{:?}", g.target, self.session().level.world.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)))).collect();
+                    return Err(format!("only old switches left at ({:.0}, {:.0}, {:.0}) region {}. Unreached: {}\n  The reachable area ends at:\n    {}", p.x, p.y, p.z, p.region, left.join(" "), self.boundary_report()));
                 }
             } else {
                 self.repeats = 0;
+                self.idle_respawns = 0;
             }
             self.note(format!("t={:.0}s → {:?} ({} steps)", self.ticks as f32 / TICK_RATE, goal.target, steps.len()));
             let start = { let p = self.session().player; (p.x, p.y) };
@@ -819,7 +987,17 @@ impl<'a> Bot<'a> {
                 Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW)) => 20.0,
                 _ => 12.0,
             };
+            self.teleported = false;
             let mut reached = self.walk_to(&steps, close);
+            // Teleported on the way (a trigger region or teleporter did its thing): that goal
+            // is spent; plan afresh from wherever we landed.
+            if self.teleported && !reached {
+                self.teleported = false;
+                self.used.insert(goal.target);
+                self.edges.clear();
+                self.note("     teleported on the way".into());
+                continue;
+            }
             // A pickup only counts once it is actually picked up (the walk's "close enough"
             // may stop just out of touch, or mid-hop above it).
             if reached && let Target::Object(i) = goal.target
@@ -850,7 +1028,7 @@ impl<'a> Bot<'a> {
                     && self.session().effects.triggers().iter().any(|(t, tags)| *t == r && tags[1] > 0)
                 {
                     let back = steps.len().checked_sub(2).map_or(start, |k| steps[k].to);
-                    let _ = self.walk(&[Step { to: back, jump: false, crouch: false }]);
+                    let _ = self.walk(&[Step { to: back, z: None, jump: false, crouch: false }]);
                 }
                 if matches!(goal.target, Target::Wall(_) | Target::Lift(_)) {
                     let after = self.area();
@@ -859,6 +1037,7 @@ impl<'a> Bot<'a> {
                     self.opened.clear();
                 }
                 self.used.insert(goal.target);
+                self.last_used.insert(goal.target, self.ticks);
                 self.failures.clear(); // something changed: try the others again
             } else {
                 self.unreachable.insert(goal.target);
@@ -890,7 +1069,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
@@ -906,4 +1085,12 @@ fn main() -> AnyResult {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Whether segments p1-p2 and q1-q2 properly intersect.
+fn segments_cross(p1: (f32, f32), p2: (f32, f32), q1: (f32, f32), q2: (f32, f32)) -> bool {
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+    let (d1, d2) = (cross(q1, q2, p1), cross(q1, q2, p2));
+    let (d3, d4) = (cross(p1, p2, q1), cross(p1, p2, q2));
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
 }

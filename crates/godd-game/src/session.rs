@@ -63,6 +63,12 @@ pub struct Session {
     pub physics_override: Option<PhysicsParams>,
     /// Cheat: enemy shots do not fire their hit tag (which usually sends the player back).
     pub god: bool,
+    /// Original-game bug fixes on (cvar `g_fixes`; off = classic behaviour).
+    pub fixes: bool,
+    /// The menu's "Options" item was chosen (the game opens the options screen).
+    pub wants_options: bool,
+    /// g_fixes trap pits: (region, starting floor, empty since).
+    trap_floors: Vec<(usize, f32, Option<f64>)>,
     /// Lightning: everything full bright while set (OFLASH).
     pub flash: bool,
     /// Screen overlays (OTEXOVER): Tex, 320x200 position, animation.
@@ -164,6 +170,9 @@ impl Session {
             remote_players: std::collections::HashMap::new(),
             physics_override: None,
             god: false,
+            fixes: false,
+            wants_options: false,
+            trap_floors: Vec::new(),
             flash: false,
             overlays: Vec::new(),
             tvs,
@@ -368,8 +377,12 @@ impl Session {
         self.level.animate(dt);
         let occupancy = self.occupancy(physics);
         let now = self.ticks as f64 / TICK_RATE;
+        self.effects.fixes = self.fixes;
         self.effects.tick(&mut self.level, now, dt, &|r| occupancy.get(r).copied().unwrap_or(0.0));
         self.process_effect_requests();
+        if self.fixes {
+            self.reset_traps(now, dt);
+        }
         let view = PlayerView {
             x: self.player.x,
             y: self.player.y,
@@ -436,6 +449,7 @@ impl Session {
                     MenuRequest::Message(text) => self.show_message(crate::script::DEFAULT_MESSAGE_COLOR, text),
                     MenuRequest::SaveCurrent => self.save_current(),
                     MenuRequest::Goto { level, slot, restore } => self.pending_goto = Some(Goto { level, slot, restore }),
+                    MenuRequest::Options => self.wants_options = true,
                     MenuRequest::Quit => self.quit_requested = true,
                     MenuRequest::SaveFileChanged => self.save_dirty = true,
                 }
@@ -678,6 +692,38 @@ impl Session {
             }
         }
         self.background = target;
+    }
+
+    /// g_fixes: a floor where landing kills (a trap pit like LIPS00's FALLZ) that was lowered
+    /// rises back to its starting height once it has sat empty for 3 s, so stepping into the
+    /// trap's trigger and back out does not leave the way on deadly for good.
+    fn reset_traps(&mut self, now: f64, dt: f32) {
+        if self.trap_floors.is_empty() {
+            let triggers = self.effects.triggers();
+            // Landing fires a tag that teleports the player (back to the start).
+            let teleport_tags: Vec<i32> = self.objects.list.iter().filter(|o| o.effect == crate::objects::fx::OTELE && o.tag > 0).map(|o| o.tag).collect();
+            self.trap_floors = triggers.iter().filter(|t| teleport_tags.contains(&t.1[2])).map(|t| (t.0, self.level.world.regions[t.0].floor, None)).collect();
+            if self.trap_floors.is_empty() {
+                self.trap_floors.push((usize::MAX, 0.0, None));
+            }
+        }
+        for k in 0..self.trap_floors.len() {
+            let (r, home, _) = self.trap_floors[k];
+            if r == usize::MAX {
+                continue;
+            }
+            let floor = self.level.world.regions[r].floor;
+            let busy = self.player.region == r || self.objects.region_moving(r) || floor >= home - 0.01;
+            if busy {
+                self.trap_floors[k].2 = None;
+                continue;
+            }
+            let since = *self.trap_floors[k].2.get_or_insert(now);
+            if now - since >= 3.0 {
+                let reg = &mut self.level.world.regions[r];
+                reg.floor = (reg.floor + 200.0 / 1.2 * dt).min(home);
+            }
+        }
     }
 
     fn teleport(&mut self, x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize>) {

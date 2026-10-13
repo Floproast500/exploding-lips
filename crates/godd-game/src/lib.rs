@@ -600,6 +600,11 @@ impl Game {
         }
         self.options_menu.slot_labels = self.slots.iter().map(|s| s.as_ref().map_or_else(String::new, |s| s.label.clone())).collect();
         self.options_menu.can_save = self.session().is_some();
+        if let Some(s) = self.session_mut()
+            && std::mem::take(&mut s.wants_options)
+        {
+            self.options_menu.open_main();
+        }
         let paused = self.options_menu.update(input, &mut self.cvars, &mut self.binds);
         self.options = options::GameOptions::from_cvars(&self.cvars);
         if let Some(req) = self.options_menu.request.take() {
@@ -661,6 +666,7 @@ impl Game {
         }
         if let State::Playing(s) = &mut self.state {
             s.message_scale = if self.options.long_messages { 2.0 } else { 1.0 };
+            s.fixes = self.options.fixes;
         }
         self.settings.vfov_degrees = if self.options.classic { 48.9 } else { self.options.fov };
         self.settings.true_color = self.options.true_color;

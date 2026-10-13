@@ -28,6 +28,12 @@ mod effect {
     pub const GAMEGOTO: i32 = 265;
 }
 
+/// Tag of the "Options" item Big Lips adds to the main and pause menus (opens the options
+/// screen, F10). Negative, so no level object can listen on it.
+const OPTIONS_ITEM_TAG: i32 = -1000;
+/// Menus that get the item: 600 main menu, 620 quit/pause menu.
+const MENUS_WITH_OPTIONS: [i32; 2] = [600, 620];
+
 const ITEM_COLOR: u8 = 92;
 const SELECTED_COLOR: u8 = 176;
 const PROMPT_BORDER: u8 = 176;
@@ -88,6 +94,8 @@ pub enum MenuRequest {
     Goto { level: String, slot: Option<usize>, restore: bool },
     Quit,
     SaveFileChanged,
+    /// Open the options screen.
+    Options,
 }
 
 pub struct Menus {
@@ -150,6 +158,21 @@ impl Menus {
                             kind: ho.le_i32(0x54),
                             sound: sound_name(ha),
                         });
+                    }
+                    if MENUS_WITH_OPTIONS.contains(&tag)
+                        && let Some(last) = items.last().cloned()
+                    {
+                        // Just above the last item (Quit), which moves down a line at the menu's
+                        // own spacing.
+                        let gap = items.len().checked_sub(2).map_or(12, |k| (last.y - items[k].y).clamp(10, 24));
+                        let at = items.len() - 1;
+                        items.insert(at, Hotspot { key: "Options".into(), tag: OPTIONS_ITEM_TAG, kind: 1, slot: 0, ..last.clone() });
+                        items[at + 1].y += gap;
+                        // Grow the box if the new line would fall outside it.
+                        let bottom = info[1] + info[3];
+                        if last.y + gap + GLYPH as i32 + 4 > bottom {
+                            info[3] += last.y + gap + GLYPH as i32 + 4 - bottom;
+                        }
                     }
                     let cursor_name = slot_of(aux, 8).to_ascii_uppercase();
                     let cursor = named.get(&cursor_name).and_then(|&c| aux_of(&objects[c])).map(|a| slot_of(a, 9));
@@ -377,7 +400,11 @@ impl Menus {
             if let Some(s) = item.sound {
                 self.requests.push(MenuRequest::Sound(s));
             }
-            self.tag(item.tag);
+            if item.tag == OPTIONS_ITEM_TAG {
+                self.requests.push(MenuRequest::Options);
+            } else {
+                self.tag(item.tag);
+            }
         }
         true
     }

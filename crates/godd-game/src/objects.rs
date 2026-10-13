@@ -1155,6 +1155,11 @@ impl Objects {
         }
     }
 
+    /// Whether an OSETF/OSETC is moving (or queued for) this region.
+    pub fn region_moving(&self, region: usize) -> bool {
+        self.motions.iter().any(|m| m.1 == region) || self.pending_motions.iter().any(|m| m.1 == region)
+    }
+
     /// Start an OSETF/OSETC motion once the session resolved the region by name.
     pub fn start_height_motion(&mut self, object: usize, region: usize, current: f32) {
         let o = &self.list[object];

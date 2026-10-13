@@ -96,8 +96,8 @@ With `--classic` you get the original 320×200 software look, shade tables and H
 
 ### Controls
 
-F10 opens the options: Video, Audio, Controls, HUD, Accessibility and Key bindings. Two binding
-presets:
+The options (Video, Audio, Controls, HUD, Game, Accessibility and Key bindings) are in the menu
+(Esc → Options, also on the title menu), or F10 at any time. Two binding presets:
 
 - **Modern** (default):
   - WASD move, mouse look (click to capture);
@@ -158,6 +158,21 @@ bind mouse:Right Jump        unbind key:KeyF
 ```
 
 `--set NAME VALUE` changes a variable for one run only; settings changed in the game are saved.
+
+### Fixes to the original game
+
+Big Lips fixes a few bugs and softlocks that were always in Exploding Lips. They are on by
+default; Options → Game → "Fix original game bugs" (`g_fixes 0`) gives the exact original
+behaviour. Currently:
+
+- **Doors with a switch on both faces** no longer shut when you touch the far face while walking
+  through (the original closes them in front of, or on, you). They still close on their timers.
+- **Trap pits** where landing sends you back to the start (LIPS00's sinking corridor) rise back
+  once empty, so stepping onto the trigger and back out no longer locks you out of the exit.
+
+Netplay players should use the same setting.
+
+The console also has a `god` cheat: enemy shots and bots no longer send you back.
 A selection:
 
 | Variable | Meaning |

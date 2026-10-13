@@ -1157,3 +1157,65 @@ fn lips00_elevator_call_during_a_ride_is_queued() {
     let r = &game.session().unwrap().level.world.regions[76];
     assert!(r.floor.abs() < 0.5, "elevator floor {}", r.floor);
 }
+
+/// g_fixes (default on): LIPS00's FALLZ floor, lowered by stepping onto its trigger strip and
+/// back out, rises again once empty; classic behaviour leaves it down for good.
+#[test]
+fn lips00_fallz_trap_rearms_with_fixes() {
+    use godd_game::Action;
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS00") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 0.3);
+        let south = -std::f32::consts::FRAC_PI_2;
+        place(&mut game, 16544.0, 16020.0, south);
+        hold(&mut game, &vfs, &[Action::Forward], 6, south); // onto the trigger strip
+        hold(&mut game, &vfs, &[Action::Back], 30, south); // and back out
+        run(&mut game, &vfs, 1.0);
+        assert!(game.session().unwrap().level.world.regions[466].floor < -440.0, "trap sprung");
+        run(&mut game, &vfs, 8.0);
+        let floor = game.session().unwrap().level.world.regions[466].floor;
+        if fixes {
+            assert!((floor + 384.0).abs() < 0.5, "re-armed: {floor}");
+        } else {
+            assert!(floor < -440.0, "classic stays down: {floor}");
+        }
+    }
+}
+
+/// g_fixes: walking through LIPS00's door r458 (a switch face on each side) no longer touches
+/// the far face shut; classic behaviour closes it on the way through.
+#[test]
+fn lips00_door_far_face_does_not_shut_it_with_fixes() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    game.session_mut().unwrap().fire_tag(86);
+    run(&mut game, &vfs, 3.0);
+    let open = |g: &godd_game::Game| { let r = &g.session().unwrap().level.world.regions[458]; r.ceiling - r.floor };
+    assert!(open(&game) > 56.0, "opened: {}", open(&game));
+    // Touch the far face (wall 364, door side r184) the way walking through does.
+    game.session_mut().unwrap().effects.on_player_events(&[godd_game::player::PlayerEvent::TouchedWall(364)]);
+    run(&mut game, &vfs, 1.0);
+    assert!(open(&game) > 56.0, "still open with fixes: {}", open(&game));
+}
+
+/// The pause menu (tag 620, Esc) has an "Options" item (above Quit) that opens the options screen.
+#[test]
+fn pause_menu_opens_options() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let press = |game: &mut godd_game::Game, a: Action| {
+        let mut i = Input::default();
+        i.set(a, true);
+        game.tick(&vfs, &i);
+        game.tick(&vfs, &Input::default());
+    };
+    press(&mut game, Action::Menu);
+    assert!(game.session().unwrap().menus.is_open(), "pause menu open");
+    press(&mut game, Action::MenuUp); // wraps to the last item, Quit
+    press(&mut game, Action::MenuUp); // Options
+    press(&mut game, Action::MenuSelect);
+    run(&mut game, &vfs, 0.1);
+    assert!(game.options_menu.open, "options screen open");
+}

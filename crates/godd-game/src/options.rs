@@ -30,6 +30,8 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.string("r_texpack", "Texture pack", Video, "");
     // Mod folders overlaid on the game data at start-up, separated by ';'.
     c.string("fs_mods", "Mods", Game, "");
+    // Fix bugs and softlocks of the original game (off = classic behaviour, as lips.exe).
+    c.bool("g_fixes", "Fix original game bugs", Game, true);
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);
@@ -84,6 +86,8 @@ pub struct GameOptions {
     /// Brighter, higher-contrast HUD colours (accessibility).
     pub high_contrast: bool,
     pub volume: (f32, f32, f32),
+    /// Original-game bug fixes (off = classic behaviour).
+    pub fixes: bool,
 }
 
 impl GameOptions {
@@ -106,6 +110,7 @@ impl GameOptions {
             show_fps: c.get_bool("hud_fps"),
             high_contrast: c.get_bool("hud_highcontrast"),
             volume: (f("snd_master"), f("snd_sfx"), f("snd_music")),
+            fixes: c.get_bool("g_fixes"),
         }
     }
 }
@@ -323,6 +328,13 @@ fn items(c: &CvarRegistry, cat: Category) -> Vec<&'static str> {
 }
 
 impl OptionsMenu {
+    /// Open on the main page (from the game's own menus).
+    pub fn open_main(&mut self) {
+        self.open = true;
+        self.page = Page::Main;
+        self.selected = 0;
+    }
+
     pub fn is_capturing(&self) -> bool {
         self.capturing.is_some()
     }
@@ -605,8 +617,8 @@ mod tests {
         m.update(&press(Action::MenuSelect), &mut c, &mut b);
         assert!(c.get_bool("r_truecolor"));
         m.update(&press(Action::Menu), &mut c, &mut b); // back to main
-        // Main: 5 categories, Save game, Load game, Key bindings, Back.
-        for _ in 0..5 {
+        // Main: 6 categories, Save game, Load game, Key bindings, Back.
+        for _ in 0..6 {
             m.update(&press(Action::MenuDown), &mut c, &mut b);
         }
         m.slot_labels = vec![String::new(); 8];

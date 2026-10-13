@@ -181,6 +181,12 @@ pub struct Effects {
     /// RSLANT: strip region → ramp.
     ramps: Vec<Option<Ramp>>,
     frame_accum: f32,
+    /// Original-game fixes on (cvar `g_fixes`).
+    pub fixes: bool,
+    /// Switch wall → the door region it is a face of.
+    door_faces: std::collections::HashMap<usize, usize>,
+    /// Door regions open (or opening) at the last tick.
+    open_doors: std::collections::HashSet<usize>,
 }
 
 /// A switch wall: touching it fires `tags` (while `usable`).
@@ -353,6 +359,14 @@ impl Effects {
             fx.regions.push(RegionEffect { region: ri, tag: r.le_u16(0x86) as i16 as i32, kind, slots });
         }
         fx.ramps = build_ramps(level);
+        // Switch walls that are faces of the door they open (g_fixes: not shut by a touch).
+        let doors = fx.doors();
+        for sw in fx.switches() {
+            let wall = &level.world.walls[sw.wall];
+            if let Some(&(door, _)) = doors.iter().find(|&&(r, t)| sw.tags.contains(&t) && (wall.front == r || wall.back == Some(r))) {
+                fx.door_faces.insert(sw.wall, door);
+            }
+        }
         fx
     }
 
@@ -466,6 +480,12 @@ impl Effects {
 
     fn touch_wall(&mut self, wall: usize) {
         let Some(i) = self.by_wall.get(wall).copied().flatten() else { return };
+        // g_fixes: a door's own face does not shut it while it is open. In the original,
+        // walking through a door with a switch face on both sides touches the far face and
+        // closes the door in front of (or on) you; it still closes on its own timer.
+        if self.fixes && self.door_faces.get(&wall).is_some_and(|d| self.open_doors.contains(d)) {
+            return;
+        }
         let WallKind::Switch { tag, tag_end, uses, state, lockout } = &mut self.walls[i].kind else { return };
         if *lockout > 0.0 {
             return;
@@ -523,6 +543,7 @@ impl Effects {
     /// Pre-tick work for one simulation tick of `dt` seconds at time `now` (seconds).
     /// `occupancy(region)` is the tallest object height in the region (0 if empty).
     pub fn tick(&mut self, level: &mut Level, now: f64, dt: f32, occupancy: &dyn Fn(usize) -> f32) {
+        self.open_doors = self.door_faces.values().copied().filter(|&d| level.world.regions.get(d).is_some_and(|r| r.ceiling > r.floor + 0.5)).collect();
         let world = &mut level.world;
         let sequences = &level.sequences;
         for w in &mut self.walls {
