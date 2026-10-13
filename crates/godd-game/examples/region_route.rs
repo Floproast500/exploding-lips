@@ -1,5 +1,6 @@
 //! Region-level route between two regions at the start of a level (debug aid):
-//! `cargo run --example region_route LIPS05 278 416`
+//! `cargo run --example region_route LIPS05 278 416 [solid]`; with `solid`, solid lines and
+//! regions whose floor kills (death tags 3 and 75..78 style teleports) are not crossed.
 use godd_game::{Game, Options, Vfs};
 use std::collections::VecDeque;
 
@@ -8,7 +9,11 @@ fn main() {
     let (from, to): (usize, usize) = (args[2].parse().unwrap(), args[3].parse().unwrap());
     let vfs = Vfs::from_dir(std::path::Path::new("original")).unwrap();
     let game = Game::new(&vfs, &Options { start_level: Some(args[1].clone()), save: None }).unwrap();
-    let w = &game.session().unwrap().level.world;
+    let s = game.session().unwrap();
+    let w = &s.level.world;
+    let solid = args.get(4).is_some_and(|a| a == "solid");
+    let death: Vec<i32> = s.objects.list.iter().filter(|o| o.effect == 15 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag).collect();
+    let deadly: Vec<usize> = s.effects.triggers().iter().filter(|(_, t)| death.contains(&t[0]) || death.contains(&t[2])).map(|(r, _)| *r).collect();
     let doors: Vec<usize> = game.session().unwrap().effects.doors().iter().map(|d| d.0).collect();
     let mut prev = vec![usize::MAX; w.regions.len()];
     prev[from] = from;
@@ -26,11 +31,17 @@ fn main() {
             if std::env::var("ALL").is_err() && !doors.contains(&b) && !doors.contains(&x.front) && !fits((mx + nx, my + ny), (mx - nx, my - ny)) {
                 continue;
             }
+            if solid && (deadly.contains(&o) || w.regions[o].floor - w.regions[r].floor > 48.0 || w.regions[o].ceiling - w.regions[o].floor < 12.0) {
+                continue;
+            }
             if prev[o] == usize::MAX {
                 prev[o] = r;
                 queue.push_back(o);
             }
         }
+    }
+    if solid {
+        eprintln!("death tags {death:?}, {} deadly regions", deadly.len());
     }
     if prev[to] == usize::MAX {
         println!("no route");

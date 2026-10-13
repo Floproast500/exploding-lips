@@ -462,6 +462,7 @@ impl<'a> Bot<'a> {
         let mut goals = Vec::new();
         // Tag 3 (DEATH01: back to the start) and 661 (death) only send the player back.
         let pointless = |tags: &std::ops::RangeInclusive<i32>| tags.clone().all(|t| t == 3 || t == 661);
+        let locks = self.key_locks();
         // A switch is worth using while it would change something: a door of its tags is
         // closed, or a floor/ceiling mover (OSETF/OSETC: elevators, the coffin) of its tags has
         // its region away from the target height. Others are used once.
@@ -492,7 +493,8 @@ impl<'a> Bot<'a> {
             match useful(&sw.tags) {
                 Some(false) => continue,
                 Some(true) => {}
-                None if self.used.contains(&Target::Wall(sw.wall)) => continue,
+                // (A lock pressed before we had its key is worth pressing again now.)
+                None if self.used.contains(&Target::Wall(sw.wall)) && !locks.contains(&Target::Wall(sw.wall)) => continue,
                 None => {}
             }
             let wall = &w.walls[sw.wall];
@@ -971,7 +973,12 @@ impl<'a> Bot<'a> {
                 if need_inside && stalled > 80 && d < 24.0 {
                     return true;
                 }
-                if d < close && dz > 40.0 && p.on_ground && k > 0 {
+                // (Above it: a drop still to come right ahead, so keep walking.)
+                let drop_ahead = step.z.is_some_and(|z| z < p.z - 40.0);
+                if d < close && dz > 40.0 && p.on_ground && k > 0 && !drop_ahead {
+                    if self.verbose {
+                        println!("     at step {k}/{last} but {dz:.0} off the planned height: player r{} ({:.0}, {:.0}, {:.0}), step ({:.0}, {:.0}, {:?})", p.region, p.x, p.y, p.z, step.to.0, step.to.1, step.z);
+                    }
                     self.mark_bad(steps, k);
                     return false;
                 }
