@@ -107,6 +107,8 @@ struct Bot<'a> {
     boss: Option<(usize, Option<usize>)>,
     /// Regions the last failed plan got to (seeds for the region-level route).
     reached: HashSet<usize>,
+    /// Cell-to-cell moves that failed in the real game.
+    bad_moves: HashSet<((i32, i32), (i32, i32))>,
     /// Every region the player has stood in.
     visited: HashSet<usize>,
     /// Planner steps already simulated: (grid spot, direction) → result.
@@ -299,6 +301,15 @@ impl<'a> Bot<'a> {
         let s = self.session();
         let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
         s.effects.triggers().into_iter().filter(|(_, tags)| tags.iter().any(|x| mover_tags.contains(x))).map(|(r, _)| r).collect()
+    }
+
+    /// A planned move that the real game would not do: never plan it again (the planner's
+    /// simulation leaves out objects and the exact spot it walks from).
+    fn mark_bad(&mut self, steps: &[Step], k: usize) {
+        let cell = |p: (f32, f32)| ((p.0 / STEP).round() as i32, (p.1 / STEP).round() as i32);
+        let to = cell(steps[k].to);
+        let from = if k == 0 { let p = self.session().player; cell((p.x, p.y)) } else { cell(steps[k - 1].to) };
+        self.bad_moves.insert((from, to));
     }
 
     /// Regions connected to the player's through open portals.
@@ -648,6 +659,10 @@ impl<'a> Bot<'a> {
                     }
                 };
                 let Some((q, (jump, crouch))) = result else { continue };
+                let cell_of = |x: f32, y: f32| ((x / STEP).round() as i32, (y / STEP).round() as i32);
+                if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y))) {
+                    continue;
+                }
                 if (dx == 0.0 || dy == 0.0) && dx.abs() + dy.abs() == 1.0 {
                     straight_ok.insert((dx as i32, dy as i32));
                 }
@@ -765,6 +780,7 @@ impl<'a> Bot<'a> {
                 // off; give up on it so the next one starts from here.
                 if d < close && !level && p.on_ground && k > 0 {
                     self.edges.clear();
+                    self.mark_bad(steps, k);
                     return false;
                 }
                 if d < best - 0.5 {
@@ -779,7 +795,11 @@ impl<'a> Bot<'a> {
                             println!("     stalled at step {k}/{last}: player r{} z {:.0} → ({:.0}, {:.0}) r{:?} floor {:?} ceil {:?}, d {d:.0}", p.region, p.z, step.to.0, step.to.1, to, to.map(|r| w.regions[r].floor), to.map(|r| w.regions[r].ceiling));
                         }
                         // Within reach of the goal counts.
-                        return k == last && d < 32.0;
+                        if k == last && d < 32.0 {
+                            return true;
+                        }
+                        self.mark_bad(steps, k);
+                        return false;
                     }
                 }
                 let angle = facing((p.x, p.y), step.to);
@@ -1320,7 +1340,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, boss: None, reached: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
