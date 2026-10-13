@@ -29,6 +29,10 @@ const BOT_FRICTION: f32 = 200.0;
 const BOT_MAX_SPEED: f32 = 500.0;
 const BOT_GRAVITY: f32 = 400.0;
 const BOT_HOP: f32 = 200.0;
+/// Climb/sink speed of flying wanderers (bats), u per 1.2 s: the original's msz.
+const BOT_FLY_SPEED: f32 = 200.0;
+/// Object flag: flies (no gravity), as in TY …32.
+const FLYING: u32 = 0x2;
 const PROJECTILE_RADIUS: f32 = 8.0;
 const PROJECTILE_HEIGHT: f32 = 16.0;
 
@@ -411,6 +415,8 @@ pub struct PlayerView {
 
 pub struct Objects {
     pub list: Vec<Obj>,
+    /// Original-game bug fixes on (cvar `g_fixes`, set by the session).
+    pub fixes: bool,
     scripts: HashMap<String, mover::Script>,
     texs_by_name: HashMap<String, usize>,
     pub tools: Tools,
@@ -484,6 +490,7 @@ impl Objects {
             pending_motions: Vec::new(),
             retex: Vec::new(),
             rng: 0x1234_5678,
+            fixes: false,
             point_names: points
                 .iter()
                 .enumerate()
@@ -571,7 +578,7 @@ impl Objects {
             let seed = self.random();
             let (mover, reqs) = Mover::attach(compiled.clone(), seed);
             self.list[i].mover = Some(mover);
-            self.apply_mover_requests(i, reqs, None);
+            self.apply_mover_requests(i, reqs, None, None);
         }
     }
 
@@ -672,6 +679,12 @@ impl Objects {
         let o = &self.list[i];
         let pos = [o.x, o.y, o.z + o.height / 2.0];
         self.sound_at(name, pos);
+    }
+
+    /// g_fixes: whether bot `i` sees the player (from its middle to the player's eye).
+    fn sees(&self, world: &World, i: usize, player: &PlayerView) -> bool {
+        let o = &self.list[i];
+        line_of_sight(world, [o.x, o.y, o.z + o.height / 2.0], [player.x, player.y, player.eye])
     }
 
     /// A sound from bot `i` (at `at`, else the bot's middle).
@@ -1277,10 +1290,7 @@ impl Objects {
             if !o.in_world() || matches!(o.kind, Kind::Projectile { .. } | Kind::Explosion { .. }) {
                 continue;
             }
-            let touching = (o.x - player.x).abs() < o.radius + player.radius
-                && (o.y - player.y).abs() < o.radius + player.radius
-                && o.z <= player.z + player.height
-                && player.z <= o.z + o.height;
+            let touching = overlaps((o.x, o.y, o.z, o.radius, o.height), (player.x, player.y, player.z, player.radius, player.height));
             let was = o.contact;
             let distance = (o.x - player.x).hypot(o.y - player.y);
             self.list[i].contact = touching;
@@ -1312,8 +1322,22 @@ impl Objects {
                 }
                 m.think(&mut out)
             };
-            self.apply_mover_requests(i, out, Some(player));
+            self.apply_mover_requests(i, out, Some(player), Some(&level.world));
             let mask = if mask & action::OWN != 0 { self.own_behaviour(i) } else { mask };
+            self.move_bot(i, mask, &level.world);
+        }
+        // Plain OWALKs (no script: LIPS00's and LIPS12's vampire bats) random-walk on their own
+        // (object-effects.md OWALK tick 4: always forward, turning bursts; flyers bob up and
+        // down), while near the player like movers.
+        for i in 0..self.list.len() {
+            let o = &self.list[i];
+            if o.effect != fx::OWALK || o.mover.is_some() || o.destroyed || !o.in_world() || o.region.is_none() {
+                continue;
+            }
+            if (o.x - player.x).hypot(o.y - player.y) > ACTIVATE_DISTANCE && o.region != Some(player.region) {
+                continue;
+            }
+            let mask = self.own_behaviour(i);
             self.move_bot(i, mask, &level.world);
         }
 
@@ -1344,7 +1368,7 @@ impl Objects {
                 if o.mover.is_none() || !o.in_world() || !matches!(o.kind, Kind::Normal) {
                     continue;
                 }
-                if (o.x - x).abs() < o.radius + r && (o.y - y).abs() < o.radius + r && o.z <= z + h && z <= o.z + o.height {
+                if overlaps((o.x, o.y, o.z, o.radius, o.height), (x, y, z, r, h)) {
                     self.bump(t, true, now);
                 }
             }
@@ -1420,13 +1444,19 @@ impl Objects {
         }
     }
 
-    fn apply_mover_requests(&mut self, i: usize, reqs: Vec<MoverRequest>, player: Option<&PlayerView>) {
+    fn apply_mover_requests(&mut self, i: usize, reqs: Vec<MoverRequest>, player: Option<&PlayerView>, world: Option<&World>) {
         for r in reqs {
             match r {
                 // A bot's OSOUND comes from the bot, like its other sounds (the original plays
                 // object sounds positionally, object-effects.md FUN_0049d933): a growl in the
                 // next room is not one in your ear.
-                MoverRequest::Ini(line) if osound_name(&line).is_some() => self.bot_sound(i, osound_name(&line), None),
+                // (g_fixes: and growls only at a player it can see, like its shots.)
+                MoverRequest::Ini(line) if osound_name(&line).is_some() => {
+                    let blind = self.fixes && matches!((world, player), (Some(w), Some(p)) if !self.sees(w, i, p));
+                    if !blind {
+                        self.bot_sound(i, osound_name(&line), None);
+                    }
+                }
                 MoverRequest::Ini(line) => self.requests.push(ObjRequest::Ini(line)),
                 // Lips scripts fire 661 when a bot touches the player (combat.md §4.3): the player
                 // is hit, like a shot's tag.
@@ -1444,7 +1474,7 @@ impl Objects {
                     }
                 }
                 MoverRequest::SetAngle(deg) => self.list[i].angle = deg.to_radians(),
-                MoverRequest::Attack { tool, tag } => self.bot_attack(i, tool, tag, player),
+                MoverRequest::Attack { tool, tag } => self.bot_attack(i, tool, tag, player, world),
                 MoverRequest::Spawn(name) => self.spawn_clone(i, &name),
                 MoverRequest::ChangeClass(name) => self.change_class(i, &name),
                 MoverRequest::Destroy => {
@@ -1507,7 +1537,17 @@ impl Objects {
         let o = &mut self.list[i];
         o.wander.0 -= 1;
         o.angle += o.wander.1;
-        action::FORWARD
+        // Flyers keep climbing or sinking until near the ceiling or floor; level, a left turn
+        // climbs and a right turn sinks.
+        let climbing = if o.vz != 0.0 { o.vz } else { o.wander.1 };
+        let vertical = if o.flags & FLYING == 0 || climbing == 0.0 {
+            0
+        } else if climbing > 0.0 {
+            action::UP
+        } else {
+            action::DOWN
+        };
+        action::FORWARD | vertical
     }
 
     fn move_bot(&mut self, i: usize, mask: u32, world: &World) {
@@ -1522,7 +1562,17 @@ impl Objects {
         let airborne = o.z > floor + 0.5;
         let friction = BOT_FRICTION * scale * if airborne { 0.5 } else { 1.0 };
         o.vx -= o.vx.signum() * friction.min(o.vx.abs());
-        if mask & action::UP != 0 && !airborne {
+        let flying = o.flags & FLYING != 0 && o.mover.is_none();
+        if flying {
+            let ceiling = o.region.map_or(o.z + o.height, |r| world.solid_ceiling(r).0);
+            o.vz = if mask & action::UP != 0 && o.z + o.height < ceiling - 4.0 {
+                BOT_FLY_SPEED
+            } else if mask & action::DOWN != 0 && o.z > floor + 4.0 {
+                -BOT_FLY_SPEED
+            } else {
+                0.0
+            };
+        } else if mask & action::UP != 0 && !airborne {
             o.vz = BOT_HOP;
         }
         if o.vx.abs() > 0.01 {
@@ -1535,10 +1585,21 @@ impl Objects {
                     o.x = nx;
                     o.y = ny;
                     o.region = Some(region);
+                } else if o.mover.is_none() {
+                    // A wanderer turns away from the wall (the original mirrors its heading
+                    // about it) and keeps going.
+                    o.angle += std::f32::consts::PI * 0.75;
                 } else {
                     o.vx = 0.0;
                 }
+            } else if o.mover.is_none() {
+                o.angle += std::f32::consts::PI * 0.75;
             }
+        }
+        if flying {
+            let ceiling = o.region.map_or(o.z + o.height, |r| world.solid_ceiling(r).0);
+            o.z = (o.z + o.vz * scale).clamp(floor, (ceiling - o.height).max(floor));
+            return;
         }
         if o.vz != 0.0 || airborne {
             o.z += o.vz * scale;
@@ -1551,9 +1612,19 @@ impl Objects {
         }
     }
 
-    fn bot_attack(&mut self, i: usize, tool: usize, tag: Option<u32>, player: Option<&PlayerView>) {
+    fn bot_attack(&mut self, i: usize, tool: usize, tag: Option<u32>, player: Option<&PlayerView>, world: Option<&World>) {
         let Some(def) = self.tools.bot_projectiles.get(tool).cloned().flatten() else { return };
         let o = &self.list[i];
+        // g_fixes: a bot only shoots at a player it can see. The original has no line-of-sight
+        // test (movers.md): every bot within 1024 units faces the player and fires through the
+        // walls, its shot blowing up on the wall in front of it (spawned radius + 4 ahead,
+        // combat.md 3.1), which can never reach anyone.
+        if self.fixes
+            && let (Some(world), Some(pl)) = (world, player)
+            && !self.sees(world, i, pl)
+        {
+            return;
+        }
         let mut p = Obj::blank();
         p.name = "_PROJ_".into();
         p.x = o.x + o.angle.cos() * (o.radius + 4.0);
@@ -1657,27 +1728,30 @@ impl Objects {
                 region = r;
                 (x, y) = (nx, ny);
                 // Object hits.
+                let shot = (x, y, z, PROJECTILE_RADIUS, PROJECTILE_HEIGHT);
+                let fixes = self.fixes;
                 if from_player {
                     let target = self.list.iter().enumerate().position(|(j, t)| {
-                        j != i && t.in_world() && matches!(t.kind, Kind::Normal) && (t.mover.is_some() || t.effect == fx::OWALK) && (t.x - x).abs() < t.radius + PROJECTILE_RADIUS
-                            && (t.y - y).abs() < t.radius + PROJECTILE_RADIUS && z <= t.z + t.height && t.z <= z + PROJECTILE_HEIGHT
+                        // (g_fixes: shots pass objects they cannot hurt, a killed bot's bone
+                        // pile; the original bursts them on it in front of the player.)
+                        j != i
+                            && t.in_world()
+                            && matches!(t.kind, Kind::Normal)
+                            && (t.mover.as_ref().is_some_and(|m| !fixes || m.shootable()) || t.effect == fx::OWALK)
+                            && overlaps((t.x, t.y, t.z, t.radius, t.height), shot)
                     });
                     if let Some(t) = target {
                         impact = Some(Some(t));
                         break;
                     }
                     let switch = self.list.iter().enumerate().position(|(j, t)| {
-                        j != i && t.in_world() && t.effect == fx::OTAGSW && (t.x - x).abs() < t.radius + PROJECTILE_RADIUS && (t.y - y).abs() < t.radius + PROJECTILE_RADIUS
+                        j != i && t.in_world() && t.effect == fx::OTAGSW && overlaps((t.x, t.y, t.z, t.radius, t.height), shot)
                     });
                     if let Some(t) = switch {
                         impact = Some(Some(t));
                         break;
                     }
-                } else if (player.x - x).abs() < player.radius + PROJECTILE_RADIUS
-                    && (player.y - y).abs() < player.radius + PROJECTILE_RADIUS
-                    && z <= player.z + player.height
-                    && player.z <= z + PROJECTILE_HEIGHT
-                {
+                } else if overlaps((player.x, player.y, player.z, player.radius, player.height), shot) {
                     if let Some(t) = tag {
                         self.requests.push(ObjRequest::PlayerHit(t));
                     }
@@ -1888,6 +1962,47 @@ enum Trigger {
 }
 
 /// Whether moving from (x0,y0) to (x1,y1) crosses a blocking (solid one-sided) wall.
+/// Object contact (physics.md 8.1 step 3): bodies (x, y, z of the feet, radius, height) touch
+/// when they overlap vertically and their centres are closer than the sum of the radii (the
+/// original's |dx|, |dy| box test is only a quick reject before the exact distance).
+fn overlaps(a: (f32, f32, f32, f32, f32), b: (f32, f32, f32, f32, f32)) -> bool {
+    let reach = a.3 + b.3;
+    (a.0 - b.0).abs() < reach && (a.1 - b.1).abs() < reach && (a.0 - b.0).hypot(a.1 - b.1) < reach && a.2 <= b.2 + b.4 && b.2 <= a.2 + a.4
+}
+
+/// Whether the straight line from `a` to `b` (x, y, z) is clear: it crosses no solid or
+/// one-sided line, and every portal it crosses is open at the height the line passes it (the
+/// higher floor to the lower ceiling of the two sides; a shut door has no opening).
+pub fn line_of_sight(world: &World, a: [f32; 3], b: [f32; 3]) -> bool {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let (x0, x1) = (a[0].min(b[0]), a[0].max(b[0]));
+    let (y0, y1) = (a[1].min(b[1]), a[1].max(b[1]));
+    world.walls.iter().all(|w| {
+        let (p, q) = (world.vertices[w.a], world.vertices[w.b]);
+        if p.0.max(q.0) < x0 || p.0.min(q.0) > x1 || p.1.max(q.1) < y0 || p.1.min(q.1) > y1 {
+            return true;
+        }
+        // Where along a→b the line crosses the wall (t), and whether it does at all.
+        let (ex, ey) = (q.0 - p.0, q.1 - p.1);
+        let den = dx * ey - dy * ex;
+        if den.abs() < 1e-6 {
+            return true;
+        }
+        let t = ((p.0 - a[0]) * ey - (p.1 - a[1]) * ex) / den;
+        let u = ((p.0 - a[0]) * dy - (p.1 - a[1]) * dx) / den;
+        if !(0.0..=1.0).contains(&t) || !(0.0..=1.0).contains(&u) {
+            return true;
+        }
+        let Some(back) = w.back.filter(|&b| b != w.front) else { return w.back.is_some() };
+        if w.blocking {
+            return false;
+        }
+        let (f, k) = (&world.regions[w.front], &world.regions[back]);
+        let z = a[2] + (b[2] - a[2]) * t;
+        z >= f.floor.max(k.floor) && z <= f.ceiling.min(k.ceiling)
+    })
+}
+
 fn crosses_solid_wall(world: &World, x0: f32, y0: f32, x1: f32, y1: f32, _radius: f32) -> bool {
     world.walls.iter().any(|w| {
         if !(w.blocking || w.back.is_none()) {
@@ -1906,4 +2021,21 @@ fn segments_cross(p: (f32, f32), q: (f32, f32), a: (f32, f32), b: (f32, f32)) ->
     let d3 = cross(p, q, a);
     let d4 = cross(p, q, b);
     (d1 > 0.0) != (d2 > 0.0) && (d3 > 0.0) != (d4 > 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Contact is round (physics.md 8.1): the |dx|, |dy| box only rejects early. A body diagonal
+    /// to another, inside the box but beyond the radii, does not touch (a bat 30 units off on
+    /// both axes used to bite the player); vertical overlap still matters.
+    #[test]
+    fn contact_is_round_and_needs_vertical_overlap() {
+        let player = (0.0, 0.0, 0.0, 16.0, 48.0);
+        assert!(overlaps((30.0, 0.0, 0.0, 16.0, 32.0), player), "straight ahead within the radii");
+        assert!(!overlaps((30.0, 30.0, 0.0, 16.0, 32.0), player), "the box corner is out of reach");
+        assert!(overlaps((20.0, 20.0, 0.0, 16.0, 32.0), player), "28 units off: touching");
+        assert!(!overlaps((10.0, 0.0, 60.0, 16.0, 32.0), player), "overhead, above the player's head");
+    }
 }

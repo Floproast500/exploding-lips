@@ -277,6 +277,12 @@ impl Mover {
         (m, out)
     }
 
+    /// Whether the script reacts to the player's shots (an `H…` or `K` condition): a bot, not a
+    /// corpse that only waits to be picked up (DEADBOTn: `ON BP`).
+    pub fn shootable(&self) -> bool {
+        self.script.on.iter().any(|b| b.cond.hit || b.cond.kill)
+    }
+
     /// Contact by the player's body (BP) or a player projectile (HP).
     pub fn bumped(&mut self, by_projectile: bool) {
         self.active = true;

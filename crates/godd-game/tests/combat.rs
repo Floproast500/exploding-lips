@@ -1,0 +1,216 @@
+//! Combat: bots, shots and hit boxes against the original game data. Tests skip themselves
+//! without original/.
+
+use std::path::PathBuf;
+
+fn start(level: &str) -> Option<(godd_game::Vfs, godd_game::Game)> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../original");
+    if !dir.join("LIPS00.XRB").exists() {
+        return None;
+    }
+    let vfs = godd_game::Vfs::from_dir(&dir).unwrap();
+    let game = godd_game::Game::new(&vfs, &godd_game::Options { start_level: Some(level.into()), save: None }).unwrap();
+    Some((vfs, game))
+}
+
+/// Bot shots fired in the first `seconds` (spawn spot, where each ended, its distance to the
+/// player then).
+fn bot_shots(level: &str, fixes: bool, seconds: f64) -> Vec<([f32; 2], [f32; 2], f32)> {
+    bot_shots_with(level, fixes, seconds, |_| {})
+}
+
+fn bot_shots_with(level: &str, fixes: bool, seconds: f64, setup: impl FnOnce(&mut godd_game::Game)) -> Vec<([f32; 2], [f32; 2], f32)> {
+    let Some((vfs, mut game)) = start(level) else { return Vec::new() };
+    assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+    game.tick(&vfs, &godd_game::Input::default());
+    setup(&mut game);
+    let mut live: std::collections::HashMap<usize, [f32; 2]> = std::collections::HashMap::new();
+    let mut shots = Vec::new();
+    for _ in 0..(seconds * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &godd_game::Input::default());
+        let s = game.session().unwrap();
+        for (i, o) in s.objects.list.iter().enumerate() {
+            if o.name != "_PROJ_" {
+                continue;
+            }
+            if !o.destroyed {
+                live.entry(i).or_insert([o.x, o.y]);
+            } else if let Some(from) = live.remove(&i) {
+                shots.push((from, [o.x, o.y], (o.x - s.player.x).hypot(o.y - s.player.y)));
+            }
+        }
+    }
+    shots
+}
+
+/// g_fixes: bots shoot only at a player they can see. Near the starts of LIPS01 and LIPS02 the
+/// original's bots (no line-of-sight test) fire through the walls every 1.2 s; none of those
+/// shots can reach the player, they blow up on the walls in front of the bots.
+#[test]
+fn bots_hold_fire_without_line_of_sight_with_fixes() {
+    for level in ["LIPS01", "LIPS02"] {
+        let classic = bot_shots(level, false, 20.0);
+        let fixed = bot_shots(level, true, 20.0);
+        if classic.is_empty() && fixed.is_empty() && start(level).is_none() {
+            return;
+        }
+        assert!(classic.len() > 5 && classic.iter().all(|s| s.2 > 64.0), "{level} classic: {} shots through walls", classic.len());
+        assert!(fixed.is_empty(), "{level} fixes: {} shots", fixed.len());
+    }
+}
+
+/// A bot that sees the player still shoots, and hits: stand in the open in front of LIPS01's
+/// second death bot (#331).
+#[test]
+fn a_bot_in_view_still_shoots_with_fixes() {
+    let shots = bot_shots_with("LIPS01", true, 10.0, |game| {
+        let s = game.session_mut().unwrap();
+        s.god = true;
+        let b = &s.objects.list[331];
+        assert_eq!(b.name, "DETHBOT1");
+        let (x, y) = (b.x + 150.0, b.y + 120.0);
+        let r = s.level.world.region_at(x, y).unwrap();
+        let z = s.level.world.regions[r].floor;
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, z, r);
+        s.previous = s.player;
+    });
+    if start("LIPS01").is_none() {
+        return;
+    }
+    assert!(shots.iter().filter(|s| s.2 < 64.0).count() >= 3, "shots reaching the player: {:?}", shots.iter().map(|s| s.2 as i32).collect::<Vec<_>>());
+}
+
+/// Plain OWALKs (no script) random-walk (object-effects.md OWALK tick 4): LIPS00's vampire bats
+/// fly about near the player instead of hanging still where they were placed.
+#[test]
+fn vampire_bats_fly_about() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    game.tick(&vfs, &godd_game::Input::default());
+    let (bat, from) = {
+        let s = game.session_mut().unwrap();
+        s.god = true;
+        let b = &s.objects.list[13];
+        let from = (b.x, b.y, b.z);
+        // Stand 300 units off, inside the activation distance.
+        let (x, y) = (b.x - 300.0, b.y);
+        if let Some(r) = s.level.world.region_at(x, y) {
+            let z = s.level.world.regions[r].floor;
+            (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, z, r);
+            s.previous = s.player;
+        }
+        (13, from)
+    };
+    let mut moved: f32 = 0.0;
+    let mut heights = (f32::MAX, f32::MIN);
+    for _ in 0..(5.0 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &godd_game::Input::default());
+        let b = &game.session().unwrap().objects.list[bat];
+        moved = moved.max((b.x - from.0).hypot(b.y - from.1));
+        heights = (heights.0.min(b.z), heights.1.max(b.z));
+    }
+    assert!(moved > 64.0, "the bat flies about: moved {moved}");
+}
+
+/// Stand `d` units in front of LIPS01's death bot #331 (in the open, facing it) with every tool.
+fn face_bot_331(game: &mut godd_game::Game, d: f32) {
+    let s = game.session_mut().unwrap();
+    s.god = true;
+    s.objects.tools.available = u32::MAX;
+    let b = &s.objects.list[331];
+    let (x, y) = (b.x + d * 0.78, b.y + d * 0.62);
+    let r = s.level.world.region_at(x, y).unwrap();
+    (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, s.level.world.regions[r].floor, r);
+    s.previous = s.player;
+}
+
+/// Fire tool 2 at bot #331 every `period` ticks for `seconds`, aiming at it; where each shot ended
+/// (distance from the bot) and the enemies-killed count after it.
+fn shoot_bot_331(fixes: bool, seconds: f64) -> Vec<(f32, i32)> {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS01") else { return Vec::new() };
+    assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+    game.tick(&vfs, &godd_game::Input::default());
+    face_bot_331(&mut game, 190.0);
+    let mut pick = godd_game::Input::default();
+    pick.set(Action::Tool2, true);
+    game.tick(&vfs, &pick);
+    let mut live = std::collections::HashSet::new();
+    let mut ends = Vec::new();
+    for t in 0..(seconds * godd_game::TICK_RATE) as usize {
+        let (bx, by) = {
+            let b = &game.session().unwrap().objects.list[331];
+            (b.x, b.y)
+        };
+        let s = game.session_mut().unwrap();
+        s.player.angle = (by - s.player.y).atan2(bx - s.player.x);
+        let mut input = godd_game::Input::default();
+        input.set(Action::Use, t % 120 < 2);
+        game.tick(&vfs, &input);
+        let s = game.session().unwrap();
+        for (i, o) in s.objects.list.iter().enumerate() {
+            if o.name == "_PPROJ_" && !o.destroyed {
+                live.insert(i);
+            } else if o.name == "_PPROJ_" && live.remove(&i) {
+                let b = &s.objects.list[331];
+                ends.push(((o.x - b.x).hypot(o.y - b.y), s.script.states[12]));
+            }
+        }
+    }
+    ends
+}
+
+/// A one-hit death bot (DETHBOT1, SH(1)) dies to the second shot (movers.md 3.5: HK runs at
+/// the event after the counter runs out, n + 1), and turns into its bone-pile pickup. With
+/// g_fixes later shots fly on past the pile; the original bursts them on it, right in front of
+/// the player.
+#[test]
+fn a_killed_bot_dies_on_the_second_shot_and_its_bones_do_not_stop_shots() {
+    for fixes in [true, false] {
+        let ends = shoot_bot_331(fixes, 7.0);
+        if ends.is_empty() && start("LIPS01").is_none() {
+            return;
+        }
+        assert!(ends.len() >= 4, "fixes {fixes}: shots {ends:?}");
+        assert!(ends[0].0 < 30.0 && ends[1].0 < 30.0, "fixes {fixes}: the first two hit the bot: {ends:?}");
+        // (Its HK block runs a few ticks after the second shot lands.)
+        assert!(ends[1].1 == 0 && ends[2].1 == 1, "fixes {fixes}: killed by the second shot: {ends:?}");
+        let later = &ends[2..];
+        if fixes {
+            assert!(later.iter().all(|e| e.0 > 60.0), "shots pass the bones: {ends:?}");
+        } else {
+            assert!(later.iter().all(|e| e.0 < 30.0), "classic: shots burst on the bones: {ends:?}");
+        }
+    }
+}
+
+/// LIPS07's tag switch #31 hangs 384 units up (r78): an aimed shot (tool 2, looking up) hits
+/// it, which opens the gate (wall 589 copies GAT01OPN); the lobbed starting tools cannot reach.
+#[test]
+fn lips07_overhead_switch_is_shot_open() {
+    use godd_game::Action;
+    for (tool, opens) in [(Action::Tool2, true), (Action::Tool0, false)] {
+        let Some((vfs, mut game)) = start("LIPS07") else { return };
+        game.tick(&vfs, &godd_game::Input::default());
+        {
+            let s = game.session_mut().unwrap();
+            s.god = true;
+            s.objects.tools.available = u32::MAX;
+            let r = s.level.world.region_at(14272.0, 19704.0).unwrap();
+            (s.player.x, s.player.y, s.player.z, s.player.region) = (14272.0, 19704.0, s.level.world.regions[r].floor, r);
+            s.player.angle = std::f32::consts::FRAC_PI_2;
+            s.previous = s.player;
+        }
+        let mut pick = godd_game::Input::default();
+        pick.set(tool, true);
+        game.tick(&vfs, &pick);
+        let mut fire = godd_game::Input::default();
+        fire.set(Action::Use, true);
+        for _ in 0..240 {
+            game.session_mut().unwrap().player.look = 512.0;
+            game.tick(&vfs, &fire);
+        }
+        let open = !game.session().unwrap().level.world.walls[589].blocking;
+        assert_eq!(open, opens, "{tool:?}: gate open {open}");
+    }
+}
+

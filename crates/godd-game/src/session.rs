@@ -402,6 +402,7 @@ impl Session {
         let occupancy = self.occupancy(physics);
         let now = self.ticks as f64 / TICK_RATE;
         self.effects.fixes = self.fixes;
+        self.objects.fixes = self.fixes;
         self.effects.tick(&mut self.level, now, dt, &|r| occupancy.get(r).copied().unwrap_or(0.0));
         self.process_effect_requests();
         if self.fixes != self.fixes_applied {
