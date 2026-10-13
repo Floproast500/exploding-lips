@@ -4,7 +4,8 @@
 # pick this file) and start it from Steam: Steam then gives the controller the game's gamepad
 # layout. The game uses X11 under Steam, because Steam cannot see the focus of Wayland windows.
 cd "$(dirname "$0")/.."
-[ -x target/release/biglips ] && [ -x target/release/packbuilder ] || cargo build --release -p lips-desktop -p packbuilder --features lips-desktop/sdl || exit 1
+# (Always: cargo only rebuilds what changed, so the game you start is the latest.)
+cargo build --release -p lips-desktop -p packbuilder --features lips-desktop/sdl || exit 1
 pack=""
 [ -f packs/lips-hd/pack.txt ] && pack="--set r_texpack packs/lips-hd"
 # Outside Steam, prefer X11 too (Steam may still be running and grabbing the controller).
