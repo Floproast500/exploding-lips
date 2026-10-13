@@ -111,7 +111,7 @@ struct Bot<'a> {
     /// Regions the last failed plan got to (seeds for the region-level route).
     reached: HashSet<usize>,
     /// Cell-to-cell moves that failed in the real game.
-    /// (with the doors as they were: a door shutting in our face does not make the way bad).
+    /// (forgotten whenever something new is used: a door may have changed).
     bad_moves: HashSet<BadMove>,
     /// Every region the player has stood in.
     visited: HashSet<usize>,
@@ -321,8 +321,7 @@ impl<'a> Bot<'a> {
         let cell = |p: (f32, f32)| ((p.0 / STEP).round() as i32, (p.1 / STEP).round() as i32);
         let to = cell(steps[k].to);
         let from = if k == 0 { let p = self.session().player; cell((p.x, p.y)) } else { cell(steps[k - 1].to) };
-        let doors = self.doors_key();
-        self.bad_moves.insert((from, to, doors));
+        self.bad_moves.insert((from, to, 0));
     }
 
     /// Regions connected to the player's through open portals.
@@ -683,7 +682,7 @@ impl<'a> Bot<'a> {
                 };
                 let Some((q, (jump, crouch))) = result else { continue };
                 let cell_of = |x: f32, y: f32| ((x / STEP).round() as i32, (y / STEP).round() as i32);
-                if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y), doors)) {
+                if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y), 0)) {
                     continue;
                 }
                 if (dx == 0.0 || dy == 0.0) && dx.abs() + dy.abs() == 1.0 {
@@ -1338,6 +1337,9 @@ impl<'a> Bot<'a> {
                     self.opened = after.difference(&before).copied().collect();
                 } else {
                     self.opened.clear();
+                }
+                if !self.used.contains(&goal.target) {
+                    self.bad_moves.clear();
                 }
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
