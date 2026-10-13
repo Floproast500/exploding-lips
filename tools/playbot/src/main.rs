@@ -501,13 +501,23 @@ impl<'a> Bot<'a> {
         let reopens = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| shut_tags.contains(x)));
         let here = s.player.region;
         goals.retain(|g| !matches!(g.target, Target::Region(r) if r == here));
+        // And a lock (a trigger or switch firing an ODROP) once we carry its key.
+        let carried: Vec<&str> = s.objects.inventory.iter().map(|&k| s.objects.list[k].name.as_str()).collect();
+        let key_tags: HashSet<i32> = s
+            .objects
+            .list
+            .iter()
+            .filter(|o| o.effect == 131 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|item| carried.iter().any(|c| c.eq_ignore_ascii_case(item))))
+            .map(|o| o.tag)
+            .collect();
+        let lock = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| key_tags.contains(x)));
         // Likewise bump/shoot switch objects (they toggle their door).
         let reswitch = |i: usize| s.objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW) && shut_tags.contains(&o.tag));
         // Trigger regions that move a floor or ceiling (an elevator's): like a switch, always
         // usable again.
         let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
         let moves = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| mover_tags.contains(x)));
-        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r)) || matches!(g.target, Target::Object(i) if reswitch(i)) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         goals
     }
 
@@ -1152,6 +1162,19 @@ impl<'a> Bot<'a> {
                 }
                 if pick.is_empty() { None } else { self.plan(&pick) }
             });
+            // Too far for the grid search (a big maze): head for a region part-way along a
+            // region-level route to the nearest unreached thing, then plan again from there.
+            let found = found.or_else(|| {
+                let wp = self.route_waypoint(&goals);
+                if self.verbose {
+                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.at), self.reached.len());
+                }
+                let r = self.plan(&[wp?]);
+                if self.verbose {
+                    println!("     waypoint plan {:?}", r.as_ref().map(|r| r.1.len()));
+                }
+                r
+            });
             // Among old switches, the one pressed longest ago first (the nearest ones would
             // just cycle, e.g. an elevator's buttons).
             let found = found.or_else(|| {
@@ -1167,19 +1190,6 @@ impl<'a> Bot<'a> {
                     }
                 }
                 None
-            });
-            // Too far for the grid search (a big maze): head for a region part-way along a
-            // region-level route to the nearest unreached thing, then plan again from there.
-            let found = found.or_else(|| {
-                let wp = self.route_waypoint(&goals);
-                if self.verbose {
-                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.at), self.reached.len());
-                }
-                let r = self.plan(&[wp?]);
-                if self.verbose {
-                    println!("     waypoint plan {:?}", r.as_ref().map(|r| r.1.len()));
-                }
-                r
             });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
