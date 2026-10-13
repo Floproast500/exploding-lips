@@ -103,6 +103,8 @@ struct Bot<'a> {
     last_used: HashMap<Target, u64>,
     /// Waypoint walks that failed in a row.
     waypoint_fails: u32,
+    /// The last level's boss (object, look): killing it ends the game.
+    boss: Option<(usize, Option<usize>)>,
     /// Regions the last failed plan got to (seeds for the region-level route).
     reached: HashSet<usize>,
     /// Every region the player has stood in.
@@ -442,7 +444,7 @@ impl<'a> Bot<'a> {
             };
             if walk_into {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: false });
-            } else if (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) {
+            } else if (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) || self.boss.is_some_and(|(b, _)| b == i) {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
             }
         }
@@ -707,7 +709,22 @@ impl<'a> Bot<'a> {
 
     /// The level changed (exit taken, or a death sent us to another level).
     fn level_done(&self) -> bool {
-        self.game.session().is_none_or(|s| !s.name.eq_ignore_ascii_case(&self.level))
+        let Some(s) = self.game.session() else { return true };
+        if !s.name.eq_ignore_ascii_case(&self.level) {
+            return true;
+        }
+        // The last level has no exit: it is done once its boss is killed (it turns into its
+        // dead version, XN).
+        self.boss.is_some_and(|(i, tex)| s.objects.list.get(i).is_none_or(|o| o.destroyed || o.tex != tex))
+    }
+
+    /// In a level without an exit (the last one): its boss (DETHBOT9) and its look.
+    fn find_boss(&self) -> Option<(usize, Option<usize>)> {
+        let s = self.session();
+        if s.objects.list.iter().any(|o| o.effect == 29) {
+            return None;
+        }
+        s.objects.list.iter().position(|o| o.name.eq_ignore_ascii_case("DETHBOT9") && o.mover.is_some()).map(|i| (i, s.objects.list[i].tex))
     }
 
     /// Walk the planned steps in the real game; false if the player gets stuck.
@@ -859,9 +876,18 @@ impl<'a> Bot<'a> {
         } else if goal.shoot {
             let Target::Object(i) = goal.target else { return };
             let counter = self.session().objects.list.get(i).map_or(0, |o| o.counter);
+            // The strongest ranged tool we have (higher numbers first; unavailable ones do
+            // nothing), then fire away.
+            for &tool in Action::TOOLS.iter().rev().take(8) {
+                let mut pick = Input::default();
+                pick.set(tool, true);
+                self.tick(&pick);
+                self.tick(&Input::default());
+            }
+            let boss = self.boss.is_some_and(|(b, _)| b == i);
             let mut fire = Input::default();
             fire.set(Action::Use, true);
-            for _ in 0..(TICK_RATE as usize * 6) {
+            for _ in 0..(TICK_RATE as usize * if boss { 20 } else { 6 }) {
                 if self.level_done() {
                     return;
                 }
@@ -1026,9 +1052,11 @@ impl<'a> Bot<'a> {
 
     /// Play the level until it is left or nothing new is reachable; Ok(next level name).
     fn play(&mut self, max_ticks: u64) -> Result<String, String> {
+        self.boss = self.find_boss();
         while self.ticks < max_ticks {
             if self.level_done() {
-                return Ok(self.game.session().map_or_else(String::new, |s| s.name.clone()));
+                let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
+                return Ok(if next.eq_ignore_ascii_case(&self.level) { "the end (boss killed)".into() } else { next });
             }
             if self.session().in_bsp {
                 self.cross_bsp()?;
@@ -1286,7 +1314,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, reached: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, boss: None, reached: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;

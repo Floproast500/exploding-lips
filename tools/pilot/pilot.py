@@ -66,6 +66,9 @@ def launch(exe, extra_args=()):
         for name in ("LIPSTART.GAM", "GODDRUN.DAT", "goddrun.tad"):
             if (ROOT / "original" / name).exists():
                 shutil.copy(ROOT / "original" / name, run_dir / name)
+        # PILOT_GAM: start from a prepared save file instead (e.g. a slot saved in another level).
+        if os.environ.get("PILOT_GAM"):
+            shutil.copy(os.environ["PILOT_GAM"], run_dir / "LIPSTART.GAM")
         prepare_bios_font(run_dir)
         log = open(ROOT / "re" / "wine-run.log", "w")
         return subprocess.Popen(["wine", "godd-launch.exe", "lips.exe"], cwd=run_dir, env=env,
