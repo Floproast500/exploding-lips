@@ -772,7 +772,7 @@ impl<'a> Bot<'a> {
             // right before a change of level (a drop or a jump planned from this very spot)
             // close enough to start it from where the planner did.
             let next_level_change = steps.get(k + 1).is_some_and(|n| n.jump || matches!((step.z, n.z), (Some(a), Some(b)) if (a - b).abs() > 24.0));
-            let close = if k == last { close_last } else if next_level_change { 5.0 } else { 16.0 };
+            let close = if k == last { close_last } else if next_level_change { 8.0 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
             loop {
