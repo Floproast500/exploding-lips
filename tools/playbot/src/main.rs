@@ -51,7 +51,9 @@ struct Goal {
 }
 
 /// A planner grid spot: x and y in grid steps, z in 24-unit bands.
-type Cell = (i32, i32, i32);
+/// Grid spot: x, y, height band and region (overlapping regions at one height are different
+/// places: a corridor under a walkway that is solid from the room around it).
+type Cell = (i32, i32, i32, usize);
 
 /// A cached planner step: where it starts and ends, and the heights it was tested with.
 #[derive(Debug, Clone, Copy)]
@@ -348,13 +350,13 @@ impl<'a> Bot<'a> {
                 OPICKUP => true,
                 OTELE => o.name.is_empty() && o.aux.is_some(),
                 OTAGSW | OBUMPSW => true,
-                // Plain walking bots fire their tag when bumped.
-                OWALK => o.mover.is_none() && o.tag > 0,
+                // Plain walking bots fire their tag when bumped (or shot, if out of reach).
+                OWALK => o.mover.is_none() && o.tag > 0 && o.region.is_some_and(|r| o.z - w.regions[r].floor < 40.0),
                 _ => false,
             };
             if walk_into {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: false });
-            } else if o.name.starts_with("KEYBOT") && o.mover.is_some() {
+            } else if (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
             }
         }
@@ -445,10 +447,22 @@ impl<'a> Bot<'a> {
         let world = &s.level.world;
         let physics = s.physics_override.unwrap_or_default();
         let start = s.player;
-        let key = |p: &Player| ((p.x / STEP).round() as i32, (p.y / STEP).round() as i32, (p.z / 24.0).round() as i32);
+        let key = |p: &Player| ((p.x / STEP).round() as i32, (p.y / STEP).round() as i32, (p.z / 24.0).round() as i32, p.region);
         // Lifts move: reaching their floor area at any height counts.
         let near_goal = |p: &Player| {
-            goals.iter().find(|g| (p.x - g.at[0]).hypot(p.y - g.at[1]) < STEP * 0.75 && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)).copied()
+            goals
+                .iter()
+                .find(|g| {
+                    let d = (p.x - g.at[0]).hypot(p.y - g.at[1]);
+                    if g.shoot {
+                        // In range, not right underneath (aim is limited to about 60 degrees).
+                        let dz = g.at[2] - p.z;
+                        d < 200.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0
+                    } else {
+                        d < STEP * 0.75 && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)
+                    }
+                })
+                .copied()
         };
         let heuristic = |p: &Player| goals.iter().map(|g| (p.x - g.at[0]).hypot(p.y - g.at[1])).fold(f32::MAX, f32::min) / STEP;
         let heights = |r: usize| world.regions.get(r).map_or((0, 0), |reg| (reg.floor.to_bits(), reg.ceiling.to_bits()));
@@ -484,8 +498,10 @@ impl<'a> Bot<'a> {
                     k = prev;
                 }
                 steps.reverse();
-                let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
-                steps.push(Step { to: (goal.at[0], goal.at[1]), z: None, crouch, jump: false });
+                if !goal.shoot {
+                    let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
+                    steps.push(Step { to: (goal.at[0], goal.at[1]), z: None, crouch, jump: false });
+                }
                 return Some((goal, steps));
             }
             expanded += 1;
@@ -634,6 +650,28 @@ impl<'a> Bot<'a> {
 
     /// Use the goal once there: walk into the wall, or shoot the bot.
     fn interact(&mut self, goal: &Goal) {
+        if let Target::Region(_) = goal.target {
+            // A trigger region may start something under us (a floor that is an elevator):
+            // stand still while the floor here moves.
+            let idle = Input::default();
+            let mut still = 0;
+            let mut last = None;
+            for _ in 0..(TICK_RATE as usize * 12) {
+                if self.level_done() {
+                    return;
+                }
+                self.tick(&idle);
+                let s = self.session();
+                let r = &s.level.world.regions[s.player.region];
+                let now = (s.player.region, r.floor.to_bits());
+                still = if Some(now) == last { still + 1 } else { 0 };
+                last = Some(now);
+                if still > 20 {
+                    break;
+                }
+            }
+            return;
+        }
         if let Some(face) = goal.face {
             let mut input = Input::default();
             input.set(Action::Forward, true);
@@ -687,6 +725,7 @@ impl<'a> Bot<'a> {
             }
         } else if goal.shoot {
             let Target::Object(i) = goal.target else { return };
+            let counter = self.session().objects.list.get(i).map_or(0, |o| o.counter);
             let mut fire = Input::default();
             fire.set(Action::Use, true);
             for _ in 0..(TICK_RATE as usize * 6) {
@@ -695,12 +734,22 @@ impl<'a> Bot<'a> {
                 }
                 let s = self.session();
                 let Some(o) = s.objects.list.get(i) else { break };
-                if o.destroyed || !o.name.starts_with("KEYBOT") {
+                if o.destroyed || o.hidden || (o.name.starts_with("KEYBOT") && o.mover.is_none()) || o.counter != counter {
                     break;
                 }
                 let angle = facing((s.player.x, s.player.y), (o.x, o.y));
-                self.game.session_mut().expect("session").player.angle = angle;
+                // Aim at its middle: projectiles that fly follow the view pitch.
+                let physics = s.physics_override.unwrap_or_default();
+                let dist = (o.x - s.player.x).hypot(o.y - s.player.y).max(1.0);
+                let slope = (o.z + o.height / 2.0 - s.player.eye_z(&physics)) / dist;
+                let look = (slope * 220.2 * 256.0 / 200.0).clamp(-512.0, 512.0);
+                let p = &mut self.game.session_mut().expect("session").player;
+                p.angle = angle;
+                p.look = look;
                 self.tick(&fire);
+            }
+            if let Some(s) = self.game.session_mut() {
+                s.player.look = 0.0;
             }
         } else if let Target::Object(i) = goal.target
             && self.session().objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW))
@@ -757,7 +806,14 @@ impl<'a> Bot<'a> {
         let mut lines = Vec::new();
         for wall in &w.walls {
             let Some(b) = wall.back.filter(|&b| b != wall.front) else { continue };
-            let (inside, out) = if inside_set.contains(&wall.front) && !inside_set.contains(&b) { (wall.front, b) } else if inside_set.contains(&b) && !inside_set.contains(&wall.front) { (b, wall.front) } else { continue };
+            let shut_door = |r: usize| doors.contains_key(&r) && w.regions[r].ceiling - w.regions[r].floor < 20.0;
+            let (inside, out) = if inside_set.contains(&wall.front) && (!inside_set.contains(&b) || shut_door(b)) {
+                (wall.front, b)
+            } else if inside_set.contains(&b) && (!inside_set.contains(&wall.front) || shut_door(wall.front)) {
+                (b, wall.front)
+            } else {
+                continue;
+            };
             if !seen.insert(out) {
                 continue;
             }
@@ -943,14 +999,15 @@ impl<'a> Bot<'a> {
                     if self.verbose {
                         println!("  failures: {:?}", self.failures.iter().filter(|e| *e.1 > 0).collect::<Vec<_>>());
                         println!("  player {:?} override {:?}", self.session().player, self.session().physics_override);
-                        let w = &self.session().level.world;
-                        println!("  door236 floor {} ceil {}; r0 floor {} ceil {}; r234 floor {} ceil {}", w.regions[236].floor, w.regions[236].ceiling, w.regions[0].floor, w.regions[0].ceiling, w.regions[234].floor, w.regions[234].ceiling);
                         for g in goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 600.0) {
                             let w = &self.session().level.world;
                             println!("  near target {:?} at ({:.0}, {:.0}, {:.0}) region {:?}", g.target, g.at[0], g.at[1], g.at[2], w.region_at(g.at[0], g.at[1]));
                         }
                     }
-                    return Err(format!("stuck at ({:.0}, {:.0}, {:.0}) region {}; {} targets left. The reachable area ends at:\n    {}", p.x, p.y, p.z, p.region, goals.len(), self.boundary_report()));
+                    let mut left: Vec<&Goal> = goals.iter().filter(|g| !self.used.contains(&g.target)).collect();
+                    left.sort_by_key(|g| matches!(g.target, Target::Wall(_)));
+                    let left: Vec<String> = left.iter().take(24).map(|g| format!("{:?}@r{:?}", g.target, self.session().level.world.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)))).collect();
+                    return Err(format!("stuck at ({:.0}, {:.0}, {:.0}) region {}; {} targets left. Unreached: {}\n  The reachable area ends at:\n    {}", p.x, p.y, p.z, p.region, goals.len(), left.join(" "), self.boundary_report()));
                 }
                 continue;
             };

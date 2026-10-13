@@ -345,8 +345,11 @@ impl Player {
             // Push out of every blocking wall to radius + 12 (physics.md §8.1: solid walls hold
             // the body that far away; two passes settle corners).
             let keep = params.radius + CONTACT_MARGIN;
+            // Only the walls of the region the body is in count (physics.md §8.1: the region's
+            // wall array), so a corridor may pass under or beside unrelated geometry.
             for _ in 0..2 {
-                for (wi, wall) in world.walls.iter().enumerate() {
+                for &wi in &world.regions[self.region].walls {
+                    let wall = &world.walls[wi];
                     if !self.wall_blocks(world, params, wi) {
                         continue;
                     }
@@ -391,7 +394,30 @@ impl Player {
                 continue;
             }
             let current = &world.regions[self.region];
-            let target = if current.below.is_none() && current.above.is_none() && world.point_in_region(nx, ny, self.region) {
+            // Re-home on crossing one of the region's portal lines (physics.md §8.2), the first
+            // one along the step; stacked levels and lost bodies fall back to a point lookup.
+            let crossed = (current.below.is_none() && current.above.is_none())
+                .then(|| {
+                    current
+                        .walls
+                        .iter()
+                        .filter_map(|&wi| {
+                            let w = &world.walls[wi];
+                            let back = w.back.filter(|&b| b != w.front)?;
+                            let other = if w.front == self.region { back } else if back == self.region { w.front } else { return None };
+                            let t = segment_param(world.vertices[w.a], world.vertices[w.b], (self.x, self.y), (nx, ny))?;
+                            Some((t, other))
+                        })
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, r)| r)
+                })
+                .flatten();
+            let stacked = current.below.is_some() || current.above.is_some();
+            let lost = !stacked && !world.point_in_region(self.x, self.y, self.region) && !world.point_in_region(nx, ny, self.region);
+            let target = if let Some(r) = crossed {
+                Some(r)
+            } else if !stacked && !lost {
+                // No line crossed: still in the same region.
                 Some(self.region)
             } else {
                 // The region the point is in, if the body can step onto its floor (a raised
@@ -418,9 +444,9 @@ impl Player {
         }
     }
 
-    /// Whether a blocking wall is closer than `dist` to (x, y).
+    /// Whether a blocking wall of the current region is closer than `dist` to (x, y).
     fn near_blocking_wall(&self, world: &World, params: &PhysicsParams, x: f32, y: f32, dist: f32) -> bool {
-        world.walls.iter().enumerate().any(|(wi, wall)| {
+        world.regions[self.region].walls.iter().map(|&wi| (wi, &world.walls[wi])).any(|(wi, wall)| {
             let (ax, ay) = world.vertices[wall.a];
             let (bx, by) = world.vertices[wall.b];
             if x < ax.min(bx) - dist || x > ax.max(bx) + dist || y < ay.min(by) - dist || y > ay.max(by) + dist {
@@ -455,6 +481,20 @@ impl Player {
         // under ceilings) fits under the far ceiling: z + Height < nextCeiling.
         other.floor - self.z > params.step_height || other.floor.max(self.z) + height >= other.ceiling
     }
+}
+
+/// Where along p1→p2 (0..1) it crosses the segment a-b, if it does.
+fn segment_param(a: (f32, f32), b: (f32, f32), p1: (f32, f32), p2: (f32, f32)) -> Option<f32> {
+    let (rx, ry) = (p2.0 - p1.0, p2.1 - p1.1);
+    let (sx, sy) = (b.0 - a.0, b.1 - a.1);
+    let denom = rx * sy - ry * sx;
+    if denom.abs() < 1e-9 {
+        return None;
+    }
+    let (qx, qy) = (a.0 - p1.0, a.1 - p1.1);
+    let t = (qx * sy - qy * sx) / denom;
+    let u = (qx * ry - qy * rx) / denom;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
 }
 
 fn closest_point(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> (f32, f32) {

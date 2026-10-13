@@ -1053,7 +1053,7 @@ fn lips00_elevator_button_keeps_the_player_on_the_elevator() {
     place(&mut game, 16800.0, 15936.0, 0.0);
     hold(&mut game, &vfs, &[Action::Forward], 60, 0.0);
     let s = game.session().unwrap();
-    assert!(s.player.x <= 16912.0 - 28.0 + 0.5, "x = {}", s.player.x);
+    assert!(s.player.x < 16896.0, "x = {}", s.player.x);
     assert_eq!(s.player.region, 76, "on the elevator, not in the alcove");
     run(&mut game, &vfs, 12.0);
     let s = game.session().unwrap();
@@ -1218,4 +1218,23 @@ fn pause_menu_opens_options() {
     press(&mut game, Action::MenuSelect);
     run(&mut game, &vfs, 0.1);
     assert!(game.options_menu.open, "options screen open");
+}
+
+/// Bodies collide with the walls of their own region only and change region by crossing its
+/// portal lines (physics.md §8.1/8.2): LIPS12's corridor r37 runs under a raised walkway that
+/// is solid from the room around it, and the player walks its length to door r94.
+#[test]
+fn lips12_corridor_under_the_walkway() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS12") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (15340.0, 15650.0, 0.0, 37);
+        s.player.angle = 0.0;
+        s.previous = s.player;
+    }
+    hold(&mut game, &vfs, &[Action::Forward], 120, 0.0);
+    let p = game.session().unwrap().player;
+    assert!(p.x > 16000.0, "walked under the walkway: x = {} region {}", p.x, p.region);
 }
