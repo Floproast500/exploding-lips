@@ -260,10 +260,6 @@ impl<'a> Bot<'a> {
                 if prev[o] != usize::MAX || deadly_enter.contains(&o) {
                     continue;
                 }
-                // (Landing kills: no dropping in; walking in at its level is fine.)
-                if deadly_land.contains(&o) && w.regions[r].floor - w.regions[o].floor > 32.0 {
-                    continue;
-                }
                 // Drawn floors (a narrow pit with a see-through floor can be run across; the
                 // grid planner works out whether it can), but no waypoint in such a pit.
                 let (a, c) = (&w.regions[r], &w.regions[o]);
@@ -306,7 +302,8 @@ impl<'a> Bot<'a> {
             let reg = &w.regions[r];
             let ((x0, y0), (x1, y1)) = reg.bounds;
             let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            (reg.below.is_none() && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then_some(Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
+            // (Not in a region where landing kills: the walk there may end in a drop.)
+            (reg.below.is_none() && !deadly_land.contains(&r) && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then_some(Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
         })
     }
 
@@ -781,7 +778,7 @@ impl<'a> Bot<'a> {
             // right before a change of level (a drop or a jump planned from this very spot)
             // close enough to start it from where the planner did.
             let next_level_change = steps.get(k + 1).is_some_and(|n| n.jump || matches!((step.z, n.z), (Some(a), Some(b)) if (a - b).abs() > 24.0));
-            let close = if k == last { close_last } else if next_level_change { 8.0 } else { 16.0 };
+            let close = if k == last { close_last } else if next_level_change { 5.5 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
             loop {
@@ -796,13 +793,14 @@ impl<'a> Bot<'a> {
                 }
                 let p = self.session().player;
                 let d = (p.x - step.to.0).hypot(p.y - step.to.1);
-                let level = step.z.is_none_or(|z| (p.z - z).abs() < 40.0 || !p.on_ground);
+                // Arrived only at about the planned height (a step 16 up in the next region is
+                // not the spot); far off it, the plan went another way: give up on it.
+                let dz = step.z.map_or(0.0, |z| (p.z - z).abs());
+                let level = dz < 12.0 || !p.on_ground;
                 if d < close && level {
                     break;
                 }
-                // Right spot, wrong level (above or below where the plan went): this plan is
-                // off; give up on it so the next one starts from here.
-                if d < close && !level && p.on_ground && k > 0 {
+                if d < close && dz > 40.0 && p.on_ground && k > 0 {
                     self.mark_bad(steps, k);
                     return false;
                 }
