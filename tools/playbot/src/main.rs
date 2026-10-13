@@ -106,6 +106,9 @@ struct Bot<'a> {
     last_used: HashMap<Target, u64>,
     /// Waypoint walks that failed in a row.
     waypoint_fails: u32,
+    /// Portal lines whose sides are not in the regions they join (a stray line off a region's
+    /// outline): no way through, for the region routes.
+    false_portals: std::cell::OnceCell<HashSet<usize>>,
     /// The last level's boss (object, look): killing it ends the game.
     boss: Option<(usize, Option<usize>)>,
     /// Regions the last failed plan got to (seeds for the region-level route).
@@ -272,6 +275,26 @@ impl<'a> Bot<'a> {
         let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[0])).map(|t| t.0).collect();
         let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
         let door_regions: HashSet<usize> = s.effects.doors().iter().map(|d| d.0).collect();
+        let false_portals = self.false_portals.get_or_init(|| {
+            w.walls
+                .iter()
+                .enumerate()
+                .filter(|(_, x)| {
+                    // (Doors' lines are real however their regions are drawn.)
+                    let Some(b) = x.back.filter(|&b| b != x.front && !door_regions.contains(&b) && !door_regions.contains(&x.front)) else { return false };
+                    let ((ax, ay), (bx, by)) = (w.vertices[x.a], w.vertices[x.b]);
+                    let len = (bx - ax).hypot(by - ay);
+                    if len < 1.0 {
+                        return false;
+                    }
+                    let (mx, my, nx, ny) = ((ax + bx) / 2.0, (ay + by) / 2.0, -(by - ay) / len * 2.0, (bx - ax) / len * 2.0);
+                    let inside = |x: f32, y: f32, r: usize| w.point_in_region(x, y, r);
+                    let (p, q) = ((mx + nx, my + ny), (mx - nx, my - ny));
+                    !((inside(p.0, p.1, x.front) && inside(q.0, q.1, b)) || (inside(p.0, p.1, b) && inside(q.0, q.1, x.front)))
+                })
+                .map(|(i, _)| i)
+                .collect()
+        });
         // From everywhere the grid planner could get to (it knows jumps across gaps).
         let mut prev = vec![usize::MAX; w.regions.len()];
         let mut queue = VecDeque::new();
@@ -287,7 +310,7 @@ impl<'a> Bot<'a> {
                 // (Lines flagged solid block, as they are now: wall copies change them; door
                 // lines carry the flag too.)
                 let solid = |y: &godd_game::world::Wall| y.blocking && !door_regions.contains(&y.front) && !y.back.is_some_and(|b| door_regions.contains(&b));
-                let Some(b) = x.back.filter(|&b| b != x.front && !solid(x)) else { continue };
+                let Some(b) = x.back.filter(|&b| b != x.front && !solid(x) && !false_portals.contains(&wi)) else { continue };
                 let o = if x.front == r { b } else { x.front };
                 if prev[o] != usize::MAX || deadly_enter.contains(&o) {
                     continue;
@@ -1474,7 +1497,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
