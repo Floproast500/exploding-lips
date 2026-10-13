@@ -109,6 +109,8 @@ struct Bot<'a> {
     /// Portal lines whose sides are not in the regions they join (a stray line off a region's
     /// outline): no way through, for the region routes.
     false_portals: std::cell::OnceCell<HashSet<usize>>,
+    /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
+    route_fails: HashSet<usize>,
     /// The last level's boss (object, look): killing it ends the game.
     boss: Option<(usize, Option<usize>)>,
     /// Regions the last failed plan got to (seeds for the region-level route).
@@ -263,7 +265,7 @@ impl<'a> Bot<'a> {
 
     /// A spot about 24 regions along the region-level route (doors and floors as they are
     /// now; steps up to a jump) to the nearest unreached thing, when that is further.
-    fn route_waypoint(&self, goals: &[Goal]) -> Option<Goal> {
+    fn route_waypoint(&self, goals: &[Goal]) -> Option<(Goal, usize)> {
         use std::collections::VecDeque;
         if self.waypoint_fails >= 3 {
             return None;
@@ -351,7 +353,7 @@ impl<'a> Bot<'a> {
         let (n, target) = goals
             .iter()
             .filter(|g| !self.used.contains(&g.target))
-            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX).map(|r| (len(r), r)))
+            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (len(r), r)))
             .min()?;
         let _ = n;
         // Walk back from the target to the region `n - 24` steps from it... i.e. 24 from us.
@@ -373,7 +375,7 @@ impl<'a> Bot<'a> {
             let ((x0, y0), (x1, y1)) = reg.bounds;
             let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             // (Not in a region where landing kills: the walk there may end in a drop.)
-            (reg.below.is_none() && !deadly_land.contains(&r) && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then_some(Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
+            (reg.below.is_none() && !deadly_land.contains(&r) && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then_some((Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false }, target))
         })
     }
 
@@ -1290,11 +1292,16 @@ impl<'a> Bot<'a> {
             let found = found.or_else(|| {
                 let wp = self.route_waypoint(&goals);
                 if self.verbose {
-                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.at), self.reached.len());
+                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.0.at), self.reached.len());
                 }
-                let r = self.plan(&[wp?]);
+                let (wp, target) = wp?;
+                let r = self.plan(&[wp]);
                 if self.verbose {
                     println!("     waypoint plan {:?}", r.as_ref().map(|r| r.1.len()));
+                }
+                // No way to it (a moat the route crosses): try the routes to other things.
+                if r.is_none() {
+                    self.route_fails.insert(target);
                 }
                 // Only worth it far away (the search ran out); a waypoint next to us means
                 // something else (a door) is in the way.
@@ -1469,6 +1476,7 @@ impl<'a> Bot<'a> {
                 self.last_used.insert(goal.target, self.ticks);
                 self.waypoint_fails = 0;
                 self.failures.clear(); // something changed: try the others again
+                self.route_fails.clear();
             } else {
                 self.unreachable.insert(goal.target);
                 *self.failures.entry(goal.target).or_default() += 1;
@@ -1497,7 +1505,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), route_fails: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
