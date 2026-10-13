@@ -374,6 +374,12 @@ fn lips00_water_teleport_makes_the_player_swim() {
     }
     let z = game.session().unwrap().player.z;
     assert!((380.0..520.0).contains(&(z - start_z)), "swam up from {start_z} to {z} (original: about 450 in 3 s)");
+    // Letting go of Jump, the swimmer drifts down slowly (idle sink 50 u per 1.2 s).
+    for _ in 0..(1.2 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &godd_game::Input::default());
+    }
+    let sunk = z - game.session().unwrap().player.z;
+    assert!((35.0..65.0).contains(&sunk), "sank {sunk} in 1.2 s (original 50)");
     game.session_mut().unwrap().fire_tag(78);
     game.tick(&vfs, &godd_game::Input::default());
     let s = game.session().unwrap();

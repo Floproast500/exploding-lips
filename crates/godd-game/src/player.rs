@@ -134,6 +134,8 @@ pub enum PlayerEvent {
 
 /// Extra distance beyond the radius at which walls count as touched.
 const CONTACT_MARGIN: f32 = 12.0;
+/// Flying with no up/down input: sink speed (u per 1.2 s), physics.md 5.5.
+const FLY_IDLE_SINK: f32 = 50.0;
 /// Region changes recorded per tick (a tick moves at most a few sub-steps).
 const MAX_CROSSINGS: usize = 8;
 
@@ -295,7 +297,17 @@ impl Player {
         if self.flying {
             // Fly speeds: up/down at the original fall speed scale, no gravity.
             let fly = params.fall_speed;
-            self.vz = if input.held(Action::Jump) { fly } else if input.held(Action::Crouch) { -fly } else { 0.0 };
+            // With neither held, a body above the floor sinks slowly (physics.md 5.5: idle sink
+            // ext+0x20c, 50): a swimmer drifts down when Jump is let go.
+            self.vz = if input.held(Action::Jump) {
+                fly
+            } else if input.held(Action::Crouch) {
+                -fly
+            } else if self.z - floor > 4.0 {
+                -FLY_IDLE_SINK
+            } else {
+                0.0
+            };
             self.z += PhysicsParams::dz(self.vz);
             let height = params.height;
             self.z = self.z.clamp(floor, (ceiling - height - params.head_clearance).max(floor));
