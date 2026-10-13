@@ -631,7 +631,18 @@ impl<'a> Bot<'a> {
 
     /// Simulate a player walking (running, optionally jumping) from `p` toward `to`; the state
     /// where it arrives, if it does.
-    fn try_move(world: &godd_game::world::World, physics: &PhysicsParams, mut p: Player, to: (f32, f32), jump: bool, crouch: bool) -> Option<Player> {
+    fn try_move(world: &godd_game::world::World, physics: &PhysicsParams, pads: &[Option<f32>], mut p: Player, to: (f32, f32), jump: bool, crouch: bool) -> Option<Player> {
+        // Jump pads relaunch a body on their floor that is not rising, plus the jump speed when
+        // Jump is held at contact (as the session does after each tick).
+        let pad = |p: &mut Player, jump: bool| {
+            let floor = world.solid_floor(p.region).1;
+            if p.on_ground && p.vz <= 0.0 && !p.flying
+                && let Some(vz) = pads.get(floor).copied().flatten()
+            {
+                p.vz = vz + if jump { physics.jump_speed } else { 0.0 };
+                p.on_ground = false;
+            }
+        };
         for t in 0..48 {
             let before = (p.x - to.0).hypot(p.y - to.1);
             // Run while far, walk the last stretch; arrived once the spot is within one step.
@@ -647,9 +658,15 @@ impl<'a> Bot<'a> {
             let (x0, y0) = (p.x, p.y);
             p.tick(world, &i, physics);
             let moved = (p.x - x0).hypot(p.y - y0);
-            // Arrived: on the spot, about to pass it, or held up just short of it.
             let after = (p.x - to.0).hypot(p.y - to.1);
-            if after < 6.0 || (before <= moved + 1.0 && moved > 0.5) || (after < 16.0 && moved < 0.5 && (p.on_ground || p.flying)) {
+            let arrived = after < 6.0 || (before <= moved + 1.0 && moved > 0.5);
+            // (Touching a pad where we were going counts as there: the next move starts from
+            // the contact, bouncing.)
+            if !(arrived && p.on_ground) {
+                pad(&mut p, i.held(Action::Jump));
+            }
+            // Arrived: on the spot, about to pass it, or held up just short of it.
+            if arrived || (after < 16.0 && moved < 0.5 && (p.on_ground || p.flying)) {
                 // Flying (swimming): no ground to come to rest on.
                 if p.flying {
                     return Some(p);
@@ -662,6 +679,7 @@ impl<'a> Bot<'a> {
                     }
                     p.tick(world, &idle, physics);
                 }
+                // (On a pad, that contact is where we stand.)
                 return p.on_ground.then_some(p);
             }
         }
@@ -720,6 +738,7 @@ impl<'a> Bot<'a> {
         let heuristic = |p: &Player| goals.iter().map(|g| (p.x - g.at[0]).hypot(p.y - g.at[1])).fold(f32::MAX, f32::min) / STEP;
         let heights = |r: usize| world.regions.get(r).map_or((0, 0), |reg| (reg.floor.to_bits(), reg.ceiling.to_bits()));
         let doors = self.doors_key();
+        let pads: Vec<Option<f32>> = (0..world.regions.len()).map(|r| s.effects.bounce_speed(r).filter(|&v| v > 0.0)).collect();
         let triggers = s.effects.triggers();
         let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[0])).map(|t| t.0).collect();
         let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
@@ -803,7 +822,7 @@ impl<'a> Bot<'a> {
                     None => {
                         // (A crouched jump gets into a low duct up a ledge.)
                         let kinds: &[(bool, bool)] = if long { &[(true, false), (true, true)] } else { &[(false, false), (true, false), (false, true), (true, true)] };
-                        let r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
+                        let r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, &pads, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
                         self.edges.insert(edge, Edge { doors, from_region: p.region, from_heights: heights(p.region), to: r, to_heights: r.map_or((0, 0), |(q, _)| heights(q.region)) });
                         r
                     }
