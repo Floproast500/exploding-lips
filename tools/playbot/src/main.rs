@@ -806,6 +806,10 @@ impl<'a> Bot<'a> {
                         if self.verbose {
                             let w = &self.session().level.world;
                             let to = w.region_at(step.to.0, step.to.1);
+                            if k > 0 {
+                                let pr = &steps[k - 1];
+                                println!("     planned from ({:.1}, {:.1}, {:?}) jump {} → ({:.1}, {:.1}, {:?}) jump {} crouch {}", pr.to.0, pr.to.1, pr.z, pr.jump, step.to.0, step.to.1, step.z, step.jump, step.crouch);
+                            }
                             println!("     stalled at step {k}/{last}: player r{} z {:.0} → ({:.0}, {:.0}) r{:?} floor {:?} ceil {:?}, d {d:.0}", p.region, p.z, step.to.0, step.to.1, to, to.map(|r| w.regions[r].floor), to.map(|r| w.regions[r].ceiling));
                         }
                         // Within reach of the goal counts.

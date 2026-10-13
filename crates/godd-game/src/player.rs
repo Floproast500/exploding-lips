@@ -423,10 +423,15 @@ impl Player {
                 // The region the point is in, if the body can step onto its floor (a raised
                 // region nested in another, like a pedestal: crossing onto it re-homes the body
                 // and raises it, physics.md §8.2); else the one at our height (stacked levels).
-                world.region_at(nx, ny).filter(|&r| {
+                // Only a region the body fits in (a lookup that finds none would hand back
+                // whatever region lies under the point, e.g. a cellar below, and the ceiling
+                // clamp would drag the body down into it); else the step is undone, as one
+                // that would land outside any region (physics.md §8.1).
+                let fits = |r: usize| {
                     let reg = &world.regions[r];
                     reg.floor - self.z <= params.step_height && self.z < reg.ceiling
-                }).or_else(|| world.region_at_z(nx, ny, Some(self.z)))
+                };
+                world.region_at(nx, ny).filter(|&r| fits(r)).or_else(|| world.region_at_z(nx, ny, Some(self.z)).filter(|&r| fits(r)))
             };
             if let Some(region) = target {
                 let floor = world.solid_floor(region).0;

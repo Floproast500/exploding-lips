@@ -1263,3 +1263,21 @@ fn lips02_secret_passage_with_fixes() {
         }
     }
 }
+
+/// A body on a region's corner (off its polygon) never drops into a region under it whose
+/// space it does not fit: LIPS00's start room corner used to hand the player to the cellar
+/// r521 below, and the ceiling clamp dragged them 88 units down through the floor.
+#[test]
+fn lips00_corner_never_drops_into_the_cellar() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (17856.2, 16960.0, 0.0, 0);
+        s.previous = s.player;
+    }
+    let angle = (16992.0f32 - 16960.0).atan2(17888.0 - 17856.2);
+    hold(&mut game, &vfs, &[godd_game::Action::Forward], 30, angle);
+    let p = game.session().unwrap().player;
+    assert!(p.z > -1.0 && p.region != 521, "at ({}, {}, {}) r{}", p.x, p.y, p.z, p.region);
+}
