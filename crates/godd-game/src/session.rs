@@ -416,6 +416,9 @@ impl Session {
         {
             self.player.vz = vz + if input.held(Action::Jump) { physics.jump_speed } else { 0.0 };
             self.player.on_ground = false;
+            // Off the floor at once, as the original's sub-step does: a jump pressed on the
+            // next tick must not restart from the floor at the plain jump speed.
+            self.player.z += 0.05;
         }
         self.level.animate(dt);
         let occupancy = self.occupancy(physics);
