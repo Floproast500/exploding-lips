@@ -13,7 +13,8 @@ fn main() {
     game.tick(&vfs, &godd_game::Input::default());
     let s = game.session().unwrap();
     let w = &s.level.world;
-    let from = s.player.region;
+    // FROM=26: start the search there instead of the player's start.
+    let from = std::env::var("FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(s.player.region);
     let exits: Vec<usize> = match std::env::var("TARGET").ok().and_then(|t| t.parse().ok()) {
         Some(t) => vec![t],
         None => s.effects.switches().iter().filter(|sw| sw.tags.contains(&500)).map(|sw| w.walls[sw.wall].front).collect(),

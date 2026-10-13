@@ -19,11 +19,12 @@ fn main() {
         let wait = s.effects.door_waits().iter().find(|(d, _)| d == r).map(|(_, w)| *w);
         println!("door r{r} (tag {t}) wait {wait:?}");
     }
+    // (Objects without an aux too: a plain OTAGSW fires its own tag, LIPS00 #73 opens SECRET1.)
     for (i, o) in s.objects.list.iter().enumerate() {
-        let Some(a) = o.aux.as_ref() else { continue };
-        if a.ints.contains(&tag) || o.tag == tag {
-            let drop = a.slot(8).map(|p| (p.to_string(), s.objects.point(p), s.objects.point(p).and_then(|(x, y, z)| w.region_at_z(x, y, Some(z + 1.0)))));
-            println!("object #{i} {} eff {} tag {} r{:?} ints {:?} point {drop:?}", o.name, o.effect, o.tag, o.region, a.ints);
+        let ints = o.aux.as_ref().map_or([0; 5], |a| a.ints);
+        if ints.contains(&tag) || o.tag == tag {
+            let drop = o.aux.as_ref().and_then(|a| a.slot(8)).map(|p| (p.to_string(), s.objects.point(p), s.objects.point(p).and_then(|(x, y, z)| w.region_at_z(x, y, Some(z + 1.0)))));
+            println!("object #{i} {} eff {} tag {} r{:?} ints {:?} point {drop:?}", o.name, o.effect, o.tag, o.region, ints);
         }
     }
 }
