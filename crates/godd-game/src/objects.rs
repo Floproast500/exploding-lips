@@ -1155,6 +1155,11 @@ impl Objects {
         }
     }
 
+    /// Whether any OSETF/OSETC floor or ceiling is moving or queued.
+    pub fn any_height_motion(&self) -> bool {
+        !self.motions.is_empty() || !self.pending_motions.is_empty()
+    }
+
     /// Whether an OSETF/OSETC is moving (or queued for) this region.
     pub fn region_moving(&self, region: usize) -> bool {
         self.motions.iter().any(|m| m.1 == region) || self.pending_motions.iter().any(|m| m.1 == region)

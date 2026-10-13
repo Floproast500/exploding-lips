@@ -794,7 +794,6 @@ impl<'a> Bot<'a> {
                 // Right spot, wrong level (above or below where the plan went): this plan is
                 // off; give up on it so the next one starts from here.
                 if d < close && !level && p.on_ground && k > 0 {
-                    self.edges.clear();
                     self.mark_bad(steps, k);
                     return false;
                 }
@@ -855,7 +854,9 @@ impl<'a> Bot<'a> {
                 let s = self.session();
                 let r = &s.level.world.regions[s.player.region];
                 let now = (s.player.region, r.floor.to_bits());
-                still = if Some(now) == last { still + 1 } else { 0 };
+                // (Also anything it set moving elsewhere: a bridge that rises ahead of us.)
+                let busy = s.objects.any_height_motion();
+                still = if Some(now) == last && !busy { still + 1 } else { 0 };
                 last = Some(now);
                 if still > 20 {
                     break;
@@ -1181,7 +1182,9 @@ impl<'a> Bot<'a> {
                 let mut old = old.clone();
                 old.sort_by_key(|g| self.last_used.get(&g.target).copied().unwrap_or(0));
                 let mut k = 0;
-                while k < old.len() {
+                let mut tries = 0;
+                while k < old.len() && tries < 3 {
+                    tries += 1;
                     let stamp = self.last_used.get(&old[k].target).copied().unwrap_or(0);
                     let batch: Vec<Goal> = old[k..].iter().take_while(|g| self.last_used.get(&g.target).copied().unwrap_or(0) == stamp).copied().collect();
                     k += batch.len();
@@ -1189,7 +1192,8 @@ impl<'a> Bot<'a> {
                         return Some(f);
                     }
                 }
-                None
+                // The rest together (one search).
+                if k < old.len() { self.plan(&old[k..]) } else { None }
             });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
@@ -1328,8 +1332,6 @@ impl<'a> Bot<'a> {
             } else {
                 self.unreachable.insert(goal.target);
                 *self.failures.entry(goal.target).or_default() += 1;
-                // Cached moves are per grid cell, not per exact spot; recompute them.
-                self.edges.clear();
                 let p = self.session().player;
                 self.note(format!("   could not follow the path to {:?} (at {:.0}, {:.0})", goal.target, p.x, p.y));
             }
