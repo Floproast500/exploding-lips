@@ -1391,6 +1391,8 @@ fn lips00_firing_in_the_bsp_world_animates_the_tool_with_fixes() {
 #[test]
 fn lips00_bot_growls_are_positional() {
     let Some((vfs, mut game)) = start("LIPS00") else { return };
+    // (Classic: with g_fixes, bots behind walls out of earshot are not heard at all.)
+    assert!(game.exec_config("set g_fixes 0").is_empty());
     run(&mut game, &vfs, 0.2);
     game.session_mut().unwrap().fire_tag(132);
     run(&mut game, &vfs, 0.5);
