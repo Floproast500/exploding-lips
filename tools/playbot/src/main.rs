@@ -704,7 +704,8 @@ impl<'a> Bot<'a> {
                 let result = match cached {
                     Some(r) => r,
                     None => {
-                        let kinds: &[(bool, bool)] = if long { &[(true, false)] } else { &[(false, false), (true, false), (false, true)] };
+                        // (A crouched jump gets into a low duct up a ledge.)
+                        let kinds: &[(bool, bool)] = if long { &[(true, false), (true, true)] } else { &[(false, false), (true, false), (false, true), (true, true)] };
                         let r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
                         self.edges.insert(edge, Edge { doors, from_region: p.region, from_heights: heights(p.region), to: r, to_heights: r.map_or((0, 0), |(q, _)| heights(q.region)) });
                         r
