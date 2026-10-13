@@ -797,7 +797,10 @@ impl<'a> Bot<'a> {
                 // not the spot); far off it, the plan went another way: give up on it.
                 let dz = step.z.map_or(0.0, |z| (p.z - z).abs());
                 let level = dz < 12.0 || !p.on_ground;
-                if d < close && level {
+                // Held up just short of a precise spot before a drop (a wall in the way from
+                // this side): close enough. Not before a jump, which needs its run-up spot.
+                let next_jump = steps.get(k + 1).is_some_and(|n| n.jump);
+                if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level {
                     break;
                 }
                 if d < close && dz > 40.0 && p.on_ground && k > 0 {
@@ -929,15 +932,18 @@ impl<'a> Bot<'a> {
         } else if goal.shoot {
             let Target::Object(i) = goal.target else { return };
             let counter = self.session().objects.list.get(i).map_or(0, |o| o.counter);
-            // The strongest ranged tool we have (higher numbers first; unavailable ones do
-            // nothing), then fire away.
-            for &tool in Action::TOOLS.iter().rev().take(8) {
-                let mut pick = Input::default();
-                pick.set(tool, true);
-                self.tick(&pick);
-                self.tick(&Input::default());
-            }
+            // For the boss, the strongest ranged tool we have (higher numbers first; missing
+            // ones do nothing). Not for switches and walkers: a long shot can hit a trap switch
+            // further off.
             let boss = self.boss.is_some_and(|(b, _)| b == i);
+            if boss {
+                for &tool in Action::TOOLS.iter().rev().take(8) {
+                    let mut pick = Input::default();
+                    pick.set(tool, true);
+                    self.tick(&pick);
+                    self.tick(&Input::default());
+                }
+            }
             let mut fire = Input::default();
             fire.set(Action::Use, true);
             for _ in 0..(TICK_RATE as usize * if boss { 20 } else { 6 }) {
