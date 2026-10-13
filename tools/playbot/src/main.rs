@@ -35,6 +35,9 @@ const OTAGSW: i32 = 20;
 const OBUMPSW: i32 = 22;
 const OPICKUP: i32 = 130;
 
+/// A search that found nothing: (start cell x, y, z band, region), goals.
+type FailedPlan = ((i32, i32, i32, usize), Vec<Target>);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Target {
     Wall(usize),
@@ -115,6 +118,8 @@ struct Bot<'a> {
     death_tags: std::cell::OnceCell<HashSet<i32>>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
+    /// Searches that found nothing: (start cell, goals); cleared when the world changes.
+    failed_plans: HashSet<FailedPlan>,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
     cam_reported: HashSet<(i32, i32, usize)>,
     /// The last level's boss (object, look): killing it ends the game.
@@ -164,6 +169,9 @@ impl<'a> Bot<'a> {
         let before = (s.player.x, s.player.y);
         // A fresh start: what failed from elsewhere may work from here.
         self.bad_moves.clear();
+        // (From the start, places that could not be reached from where we were may be.)
+        self.unreachable.clear();
+        self.failed_plans.clear();
         self.game.session_mut().expect("session").fire_tag(tag as u32);
         let p = self.session().player;
         (p.x - before.0).hypot(p.y - before.1) > 64.0
@@ -658,6 +666,28 @@ impl<'a> Bot<'a> {
     /// walk (or jump) to a neighbouring grid spot; results are cached while the regions at
     /// both ends keep their heights.
     fn plan(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
+        // A search that failed from this spot for these goals fails again until something
+        // changes (the world, or where we are): skip it.
+        let p = self.session().player;
+        let mut targets: Vec<Target> = goals.iter().map(|g| g.target).collect();
+        targets.sort_by_key(|t| format!("{t:?}"));
+        let memo = (((p.x / STEP).round() as i32, (p.y / STEP).round() as i32, (p.z / 24.0).round() as i32, p.region), targets);
+        if self.failed_plans.contains(&memo) {
+            return None;
+        }
+        let started = std::time::Instant::now();
+        let r = self.plan_search(goals);
+        if r.is_none() {
+            self.failed_plans.insert(memo);
+        }
+        let took = started.elapsed().as_secs_f32();
+        if self.verbose && took > 5.0 {
+            println!("     slow plan: {took:.0} s for {} goals ({:?}...) -> {:?}", goals.len(), goals.iter().take(3).map(|g| g.target).collect::<Vec<_>>(), r.as_ref().map(|r| r.1.len()));
+        }
+        r
+    }
+
+    fn plan_search(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         let s = self.game.session().expect("session");
@@ -1271,6 +1301,7 @@ impl<'a> Bot<'a> {
             if key != self.world_key {
                 self.world_key = key;
                 self.unreachable.clear();
+                self.failed_plans.clear();
             }
             let goals = self.goals();
             if goals.is_empty() {
@@ -1547,7 +1578,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
