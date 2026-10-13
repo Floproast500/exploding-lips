@@ -237,6 +237,10 @@ impl<'a> Bot<'a> {
         }
         let s = self.session();
         let w = &s.level.world;
+        // Regions that kill on entering or on landing (a drop into them) are no way on.
+        let triggers = s.effects.triggers();
+        let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[0])).map(|t| t.0).collect();
+        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
         // From everywhere the grid planner could get to (it knows jumps across gaps).
         let mut prev = vec![usize::MAX; w.regions.len()];
         let mut queue = VecDeque::new();
@@ -251,7 +255,11 @@ impl<'a> Bot<'a> {
                 let x = &w.walls[wi];
                 let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
                 let o = if x.front == r { b } else { x.front };
-                if prev[o] != usize::MAX {
+                if prev[o] != usize::MAX || deadly_enter.contains(&o) {
+                    continue;
+                }
+                // (Landing kills: no dropping in; walking in at its level is fine.)
+                if deadly_land.contains(&o) && w.regions[r].floor - w.regions[o].floor > 32.0 {
                     continue;
                 }
                 // Drawn floors (a narrow pit with a see-through floor can be run across; the
