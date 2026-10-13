@@ -288,6 +288,21 @@ impl<'a> Bot<'a> {
                 if prev[o] != usize::MAX || deadly_enter.contains(&o) {
                     continue;
                 }
+                // Not through an opening narrower than the body (the bars of a grate): all the
+                // portal lines between the two regions together.
+                let opening: f32 = w.regions[r]
+                    .walls
+                    .iter()
+                    .map(|&wj| &w.walls[wj])
+                    .filter(|y| (y.front == r && y.back == Some(o)) || (y.front == o && y.back == Some(r)))
+                    .map(|y| {
+                        let (pa, pb) = (w.vertices[y.a], w.vertices[y.b]);
+                        (pa.0 - pb.0).hypot(pa.1 - pb.1)
+                    })
+                    .sum();
+                if opening < 32.0 {
+                    continue;
+                }
                 // Drawn floors (a narrow pit with a see-through floor can be run across; the
                 // grid planner works out whether it can), but no waypoint in such a pit.
                 let (a, c) = (&w.regions[r], &w.regions[o]);
