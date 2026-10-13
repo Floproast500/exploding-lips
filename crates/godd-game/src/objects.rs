@@ -43,6 +43,7 @@ pub(crate) mod fx {
     pub const OFLYON: i32 = 26;
     pub const OFLYOFF: i32 = 27;
     pub const OSNDSEQ: i32 = 54;
+    pub const OSNDGRP: i32 = 56;
     pub const OOTOO: i32 = 66;
     pub const OWTOW: i32 = 67;
     pub const OORIENT: i32 = 69;
@@ -172,6 +173,8 @@ pub struct Obj {
     sound: SoundState,
     /// OFLASH: flashes left and the end of the current on/off phase (seconds).
     flash: (i32, Option<f64>, bool),
+    /// OSNDGRP mode 1: the slot (1..5) the next trigger plays.
+    group_cycle: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,6 +187,8 @@ struct SoundState {
     /// OSNDSEQ: current slot and remaining repeats of it.
     slot: usize,
     reps: i32,
+    /// OSNDGRP: replays left per slot (-1: not playing).
+    group: [i32; 5],
     looping: bool,
     /// Positional sounds started by a bump stop when the player gets farther than this.
     reach: Option<f32>,
@@ -226,6 +231,7 @@ impl Obj {
             carries: None,
             sound: SoundState::default(),
             flash: (0, None, false),
+            group_cycle: 1,
         }
     }
 
@@ -842,6 +848,8 @@ impl Objects {
                     self.start_sequence(i, now);
                 }
             }
+            // (A trigger while the group plays is ignored: no toggle.)
+            fx::OSNDGRP if !self.list[i].sound.active => self.start_group(i, now),
             fx::OWTOW => {
                 if let (Some(target), Some(source)) = (slot(9), slot(8)) {
                     self.requests.push(ObjRequest::CopyWall { target, source });
@@ -993,6 +1001,35 @@ impl Objects {
         self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::sound(first)));
     }
 
+    /// OSNDGRP start (object-effects.md OSNDGRP): mode (counter) 0 plays every slot together,
+    /// 1 the next slot in turn (1..5), -1 a random slot; each `int k + 1` times, from the object.
+    fn start_group(&mut self, i: usize, now: f64) {
+        let Some(aux) = self.list[i].aux.clone() else { return };
+        let slots: Vec<usize> = match self.list[i].counter {
+            0 => (0..5).collect(),
+            1 => {
+                let k = self.list[i].group_cycle;
+                self.list[i].group_cycle = if k < 5 { k + 1 } else { 1 };
+                vec![k - 1]
+            }
+            -1 => vec![(self.random() % 5) as usize],
+            _ => Vec::new(),
+        };
+        let mut group = [-1; 5];
+        let mut longest = None::<f64>;
+        for k in slots {
+            let Some(name) = aux.sounds[k].clone() else { continue };
+            group[k] = aux.ints[k].max(0);
+            longest = Some(longest.unwrap_or(0.0).max(self.sound_seconds(&name)));
+            self.sound_from(i, Some(name));
+        }
+        let Some(longest) = longest else { return }; // an empty slot: nothing plays
+        let st = &mut self.list[i].sound;
+        st.active = true;
+        st.group = group;
+        st.next = Some(now + longest);
+    }
+
     fn stop_sound(&mut self, i: usize) {
         if self.list[i].sound.looping {
             self.requests.push(ObjRequest::Audio(crate::audio::AudioEvent::Stop { channel: channel(i) }));
@@ -1023,6 +1060,25 @@ impl Objects {
                 continue;
             }
             if !o.sound.next.is_some_and(|t| now >= t) {
+                continue;
+            }
+            if o.effect == fx::OSNDGRP {
+                // Each finished sound plays again while it has replays left; the group ends
+                // when none is playing any more.
+                let mut longest = None::<f64>;
+                for k in 0..5 {
+                    if self.list[i].sound.group[k] < 1 {
+                        continue;
+                    }
+                    self.list[i].sound.group[k] -= 1;
+                    let Some(name) = aux.sounds[k].clone() else { continue };
+                    longest = Some(longest.unwrap_or(0.0).max(self.sound_seconds(&name)));
+                    self.sound_from(i, Some(name));
+                }
+                match longest {
+                    Some(t) => self.list[i].sound.next = Some(now + t),
+                    None => self.list[i].sound = SoundState::default(),
+                }
                 continue;
             }
             if o.effect == fx::OSNDSEQ {
@@ -1392,7 +1448,7 @@ impl Objects {
         }
         let accepts = match effect {
             fx::OBUMPSW | fx::OTELE | fx::OSELTOOL | fx::ORPOLY => !by_projectile,
-            fx::OTAGSW | fx::OPICKUP | fx::OSOUND | fx::OTEXT | fx::OTIMER | fx::OSTRAP | fx::OSETF | fx::OSETC | fx::OSNDSEQ
+            fx::OTAGSW | fx::OPICKUP | fx::OSOUND | fx::OTEXT | fx::OTIMER | fx::OSTRAP | fx::OSETF | fx::OSETC | fx::OSNDSEQ | fx::OSNDGRP
             | fx::OWTOW | fx::OOTOO | fx::OFLYON | fx::OFLYOFF | fx::ODROP | fx::OTEXOVER | fx::OFLASH | fx::OVIEWON | fx::OVIEWOFF
             | fx::OCOUNT | fx::OEFFSW | fx::OPHYSON => true,
             _ => false,

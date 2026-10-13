@@ -1108,6 +1108,42 @@ leftover copy of a menu hotspot aux; silent). XRB +0x0c already contains the ini
 
 ---------------------------------------------------------------------------------------------
 
+### OSNDGRP (index 56, FUN_0042edf2, mask 0x3002d0) – confidence H (dispatch, modes), M (finish test)
+
+A group of up to five sounds (aux sound slots 0..4) that plays together or one at a time. The
+mode is the object's +0x54 counter. Unlike OSNDSEQ, a trigger while the group plays is ignored
+(no toggle). Each slot's play count is aux int k + 1 (Sound+0x28), as for OSNDSEQ.
+
+**Events**
+| event | action |
+|---|---|
+| guard | nothing at all while +7 & 0x20. |
+| 0x01 init | flags |= 0x200; +0x0c |= 4; with aux: resolve sounds; Sound+0x28 = aux int k + 1 per slot; current (+0x11c) = 0; cycle index (+0x124) = 1. |
+| 0x04 stop (direct) | stop all five sounds (FUN_0049d489); inactive (+5 &= ~0x40); current = 0. |
+| 0x10 tick | while active: mode 0 runs the finish test on all five sounds and stays active while any is still going; other modes run it on the current sound. |
+| 0x40 tag, 0x80 trigger, 0x200 bump (FUN_0048a05a: player-ish only; and not if +4 has any of 1, 2, 4, 8) | start, if not active (see below). |
+
+```
+start (not active, has aux):
+    mode 0:  every slot with a Sound: reps = count − 1; play(src, sound) positionally (FUN_0049d933);
+             current = 0
+    mode 1:  k = cycle index; cycle index = k < 5 ? k + 1 : 1      // slots 1..5 in turn
+    mode −1: k = rand() % 5 + 1                                     // a random slot
+             (modes 1/−1) play slot k positionally; current = that Sound; reps = count − 1;
+             an empty slot: current = 0 and nothing plays (the original also logs
+             "OSNDGRP: sn %d nonexistent" for k outside 1..5, which cannot happen)
+    active (+5 |= 0x40)
+finish test (FUN_0042ed4b, M — the same per-sound replay as OSNDSEQ's tick): when a Sound
+    has finished, reps −= 1 and it plays again while reps ≥ 0; the group goes inactive when
+    nothing is playing any more.
+```
+
+**Data.** One object in all levels: LIPS10 #110 AMBICITY (street-walk ambience AMBWLK01/03/04/05
+and AMBSUB01, mode 0, all counts 1). Nothing triggers it: tag −1, no region, and no object or
+script names it, so it never plays in the shipped game (dead data).
+
+---
+
 ### OSNDSEQ (index 54, FUN_0042f615, mask 0x3002d0) – confidence H
 
 Plays aux sound slots 0..4 one after the other (a chain through Sound+0x30), whole sequence

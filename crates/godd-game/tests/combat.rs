@@ -244,3 +244,52 @@ fn bots_stay_out_of_walls() {
     }
 }
 
+
+/// OSNDGRP (object-effects.md): LIPS10's AMBICITY street ambience. Nothing in the shipped data
+/// triggers it (dead data), so the test gives it a tag. Mode 0 plays all five slots together,
+/// from the object; a trigger while they play is ignored; mode 1 plays one slot per trigger,
+/// in turn.
+#[test]
+fn sound_groups_play_together_or_in_turn() {
+    let Some((vfs, mut game)) = start("LIPS10") else { return };
+    game.tick(&vfs, &godd_game::Input::default());
+    let sounds = |game: &mut godd_game::Game| -> Vec<String> {
+        game.drain_audio()
+            .into_iter()
+            .filter_map(|e| match e {
+                godd_game::AudioEvent::Sound { name, pos: Some(_), .. } if name.starts_with("AMB") => Some(name),
+                _ => None,
+            })
+            .collect()
+    };
+    let _ = game.drain_audio();
+    let s = game.session_mut().unwrap();
+    assert_eq!(s.objects.list[110].name, "AMBICITY");
+    s.objects.list[110].tag = 990;
+    s.fire_tag(990);
+    game.tick(&vfs, &godd_game::Input::default());
+    let mut all = sounds(&mut game);
+    all.sort();
+    assert_eq!(all, ["AMBSUB01", "AMBWLK01", "AMBWLK03", "AMBWLK04", "AMBWLK05"], "mode 0: all five");
+    game.session_mut().unwrap().fire_tag(990);
+    game.tick(&vfs, &godd_game::Input::default());
+    assert!(sounds(&mut game).is_empty(), "ignored while playing");
+
+    // Mode 1: wait for the group to end, then one slot per trigger.
+    for _ in 0..(30.0 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &godd_game::Input::default());
+    }
+    let _ = game.drain_audio();
+    game.session_mut().unwrap().objects.list[110].counter = 1;
+    let mut order = Vec::new();
+    for _ in 0..2 {
+        game.session_mut().unwrap().fire_tag(990);
+        game.tick(&vfs, &godd_game::Input::default());
+        order.extend(sounds(&mut game));
+        for _ in 0..(10.0 * godd_game::TICK_RATE) as usize {
+            game.tick(&vfs, &godd_game::Input::default());
+        }
+        let _ = game.drain_audio();
+    }
+    assert_eq!(order, ["AMBWLK01", "AMBWLK03"], "mode 1: slots in turn");
+}
