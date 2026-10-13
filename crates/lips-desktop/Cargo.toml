@@ -23,12 +23,19 @@ softbuffer = "0.4"
 wgpu = "30"
 winit = "0.30"
 rfd = "0.15"
+# Downloading the game data (archive.org) on first run / `--install` (feature `download`).
+ureq = { version = "2", optional = true }
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [[bin]]
 name = "biglips"
 path = "src/main.rs"
 
 [features]
+default = ["download"]
+# The installer's downloader (TLS via rustls/ring, which needs the target's C toolchain).
+download = ["dep:ureq", "dep:zip", "dep:sha2"]
 # SDL3 gamepads: gyro aiming and rumble (needs the system SDL3 library).
 sdl = ["dep:sdl3-sys"]
 # The same, building SDL3 from source (CI runners have no SDL3 package).

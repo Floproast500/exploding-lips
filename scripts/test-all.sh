@@ -15,7 +15,9 @@ if rustup target list --installed 2>/dev/null | grep -q x86_64-pc-windows-gnu &&
 fi
 if rustup target list --installed 2>/dev/null | grep -q aarch64-apple-darwin; then
     echo "== macos check"
-    cargo check --quiet -p lips-desktop --target aarch64-apple-darwin
+    # (Without the downloader: its TLS crate needs the macOS SDK to cross-compile; CI builds it
+    # natively on macOS.)
+    cargo check --quiet -p lips-desktop --no-default-features --target aarch64-apple-darwin
 fi
 echo "== wasm"
 ./scripts/build-web.sh >/dev/null

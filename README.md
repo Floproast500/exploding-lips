@@ -37,17 +37,37 @@ revival, Summoner, is already planned (see [Floproast Kiln](#floproast-kiln)).
 
 ## Quick start
 
+The installers set up Big Lips and fetch the game for you, the way OldUnreal's installers fetch
+Unreal. The full version of Exploding Lips is on the Internet Archive
+([exploding-lips-full](https://archive.org/details/exploding-lips-full), public domain mark).
+The installer downloads that zip (about 43 MB), checks it against a known SHA-256 and unpacks
+it into the config folder (`~/.config/exploding-lips/game`, or `%APPDATA%\exploding-lips\game`
+on Windows). No game files ship with Big Lips.
+
+- **Linux:** `scripts/install.sh` builds Big Lips, installs it with a menu entry and a `biglips`
+  command, and downloads the game. `scripts/install.sh --uninstall` removes it again (the game
+  data, settings and saves stay).
+- **Windows:** run `BigLips-<version>-setup.exe`. CI builds it from `packaging/windows/biglips.iss`;
+  to build it yourself, run `iscc packaging\windows\biglips.iss` after a release build. Its last
+  step downloads the game in a console window.
+- **Any platform:** `biglips --install [DIR]` downloads the game on its own. If Big Lips starts
+  without the game, it offers the download, or a folder picker for a copy you already have.
+
+From source:
+
 ```sh
 git clone https://github.com/Floproast500/exploding-lips.git && cd exploding-lips
 cargo build --release -p lips-desktop -p packbuilder --features lips-desktop/sdl
-./target/release/biglips                      # finds your Exploding Lips folder, or asks for it
+./target/release/biglips --install            # download the game (once)
+./target/release/biglips                      # finds the game, or asks for it
 ```
 
 On first launch Big Lips does three things:
 
 1. **Finds your game folder.** It looks for the folder with `LIPS00.XRB`: the configured one,
-   next to the binary, `./original`, or `~/Games/Exploding Lips`. If none matches, it opens a
-   folder picker. The choice is remembered, and `--data <folder>` overrides it.
+   next to the binary, `./original`, `~/Games/Exploding Lips`, or the installer's download. If
+   none matches, it offers to download the game, or opens a folder picker for your own copy. The
+   choice is remembered, and `--data <folder>` overrides it.
 2. **Builds the HD textures in the background.** `packbuilder` upscales every texture 4× with
    Real-ESRGAN when it is installed, and with a built-in pixel-art scaler otherwise. It adds
    normal and specular maps. The game switches to the pack when it is ready, after about a
@@ -201,6 +221,7 @@ A selection:
 | `--data DIR` | game folder |
 | `--classic` | the original 320×200 look |
 | `--size WxH`, `--fullscreen` | window size, borderless fullscreen |
+| `--install [DIR]` | download the full game from the Internet Archive into DIR (default: the config folder) and exit |
 | `--level LIPSnn` | start directly in a level |
 | `--software` | present on the CPU (no GPU) |
 | `--soundfont F.sf2` | MIDI SoundFont |

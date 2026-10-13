@@ -7,6 +7,7 @@
 mod audio;
 mod config;
 mod gamepad;
+mod install;
 mod module_app;
 mod present;
 mod setup;
@@ -481,6 +482,9 @@ fn main() {
     // with the engine's renderer instead of starting Exploding Lips.
     let args: Vec<String> = std::env::args().collect();
     // `--pad-test [SECONDS]`: rumble every controller, then report gyro motion (SDL builds).
+    if let Some(i) = args.iter().position(|a| a == "--install") {
+        install::run_cli(args.get(i + 1).filter(|a| !a.starts_with("--")).map(PathBuf::from));
+    }
     if let Some(i) = args.iter().position(|a| a == "--pad-test") {
         let seconds = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(5.0);
         #[cfg(feature = "sdl")]
@@ -528,8 +532,8 @@ fn main() {
         std::process::exit(2);
     });
     // Bring your own data: the configured folder, the usual places, or ask.
-    let data = setup::find_game_dir(&cvars.get_str("fs_data")).or_else(setup::ask_game_dir).unwrap_or_else(|| {
-        eprintln!("Big Lips needs your copy of Exploding Lips: run it with --data <folder with LIPS00.XRB>");
+    let data = setup::find_game_dir(&cvars.get_str("fs_data")).or_else(install::offer_download).unwrap_or_else(|| {
+        eprintln!("Big Lips needs Exploding Lips: run `biglips --install` to download it, or --data <folder with LIPS00.XRB>");
         std::process::exit(1);
     });
     let mut vfs = Vfs::from_dir(&data).unwrap_or_else(|e| {

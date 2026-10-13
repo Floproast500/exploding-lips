@@ -1,5 +1,6 @@
 //! Bring your own data: Big Lips ships without Exploding Lips' files. On start it finds the
-//! player's copy of the game (the configured folder, common places, or a folder picker) and,
+//! player's copy of the game (the configured folder, common places, a download from the Internet
+//! Archive, see `install`, or a folder picker) and,
 //! on first run, builds the HD texture pack from it in the background with `packbuilder`.
 
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ pub fn find_game_dir(configured: &str) -> Option<PathBuf> {
         candidates.extend([exe_dir.join("original"), exe_dir.join("data"), exe_dir.clone()]);
     }
     candidates.extend([PathBuf::from("original"), PathBuf::from(".")]);
+    // Where `--install` and the first-run download put it.
+    candidates.extend(crate::install::default_dir());
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from) {
         for rel in ["Games/Exploding Lips", "Games/ExplodingLips", "Exploding Lips", ".local/share/biglips/game"] {
             candidates.push(home.join(rel));

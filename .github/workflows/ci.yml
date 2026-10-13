@@ -38,3 +38,17 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - run: cargo build -p lips-web -p godd-formats -p godd-game -p godd-net --target wasm32-unknown-unknown --release
+
+  # The Windows installer (Inno Setup, preinstalled on the runner). It carries no game files:
+  # its last step downloads the game from the Internet Archive.
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p lips-desktop -p packbuilder
+      - run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DVersion=0.1.0 packaging\windows\biglips.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: biglips-windows-installer
+          path: target/installer/*.exe
