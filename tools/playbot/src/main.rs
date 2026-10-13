@@ -20,7 +20,8 @@ type AnyResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 /// Planner grid spacing (world units).
 const STEP: f32 = 32.0;
 /// Tags that only send the player back (3: DEATH01 teleport to the start; 661: death).
-const DEATH_TAGS: [i32; 2] = [3, 661];
+/// Tags that send the player back to the start (PLAYTRN1's 661 → 3, DEATH01).
+const BASE_DEATH_TAGS: [i32; 2] = [3, 661];
 /// Most planner states explored per plan.
 const MAX_NODES: usize = 150_000;
 /// Marker target: a part-way spot on a long region route, not a thing to use.
@@ -109,6 +110,9 @@ struct Bot<'a> {
     /// Portal lines whose sides are not in the regions they join (a stray line off a region's
     /// outline): no way through, for the region routes.
     false_portals: std::cell::OnceCell<HashSet<usize>>,
+    /// Tags that kill: the base ones and any firing a teleport back to a start point (LIPS05's
+    /// pits fire 75, DETH2 → RBIRTH02).
+    death_tags: std::cell::OnceCell<HashSet<i32>>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
@@ -156,7 +160,7 @@ impl<'a> Bot<'a> {
     /// leads; false if there is none.
     fn respawn(&mut self) -> bool {
         let s = self.session();
-        let Some(tag) = s.objects.list.iter().find(|o| o.effect == OTELE && DEATH_TAGS.contains(&o.tag)).map(|o| o.tag) else { return false };
+        let Some(tag) = s.objects.list.iter().find(|o| o.effect == OTELE && BASE_DEATH_TAGS.contains(&o.tag)).map(|o| o.tag) else { return false };
         let before = (s.player.x, s.player.y);
         // A fresh start: what failed from elsewhere may work from here.
         self.bad_moves.clear();
@@ -244,6 +248,17 @@ impl<'a> Bot<'a> {
         switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect()
     }
 
+    fn death_tags(&self) -> &HashSet<i32> {
+        self.death_tags.get_or_init(|| {
+            let s = self.session();
+            BASE_DEATH_TAGS
+                .iter()
+                .copied()
+                .chain(s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag))
+                .collect()
+        })
+    }
+
     /// Switch walls and objects that fire a lock (ODROP) whose key we carry and that has not
     /// taken it yet.
     fn key_locks(&self) -> HashSet<Target> {
@@ -276,8 +291,8 @@ impl<'a> Bot<'a> {
         let w = &s.level.world;
         // Regions that kill on entering or on landing (a drop into them) are no way on.
         let triggers = s.effects.triggers();
-        let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[0])).map(|t| t.0).collect();
-        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
+        let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[0])).map(|t| t.0).collect();
+        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
         let door_regions: HashSet<usize> = s.effects.doors().iter().map(|d| d.0).collect();
         let false_portals = self.false_portals.get_or_init(|| {
             w.walls
@@ -552,7 +567,7 @@ impl<'a> Bot<'a> {
         // out first leaves a deadly drop).
         let names = s.level.region_names();
         let triggers = s.effects.triggers();
-        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
+        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
         let trap_tags: HashSet<i32> = s
             .objects
             .list
@@ -562,7 +577,7 @@ impl<'a> Bot<'a> {
             .map(|o| o.tag)
             .collect();
         for &(r, tags) in &triggers {
-            if tags.iter().all(|t| *t <= 0 || DEATH_TAGS.contains(t) || trap_tags.contains(t)) {
+            if tags.iter().all(|t| *t <= 0 || self.death_tags().contains(t) || trap_tags.contains(t)) {
                 continue;
             }
             let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
@@ -670,8 +685,8 @@ impl<'a> Bot<'a> {
         let heights = |r: usize| world.regions.get(r).map_or((0, 0), |reg| (reg.floor.to_bits(), reg.ceiling.to_bits()));
         let doors = self.doors_key();
         let triggers = s.effects.triggers();
-        let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[0])).map(|t| t.0).collect();
-        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
+        let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[0])).map(|t| t.0).collect();
+        let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
         // Switch objects fire (and toggle doors back) on touch: walk around the ones that are
         // not the goal.
         let goal_objects: HashSet<usize> = goals.iter().filter_map(|g| if let Target::Object(i) = g.target { Some(i) } else { None }).collect();
@@ -966,7 +981,7 @@ impl<'a> Bot<'a> {
                 };
                 input.set(Action::Crouch, step.crouch || low);
                 // The planned jump, or a hop when stuck against a ledge.
-                let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && DEATH_TAGS.contains(&t.1[2]));
+                let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && self.death_tags().contains(&t.1[2]));
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
                 input.set(Action::Jump, (step.jump && stalled == 0 && best == d) || (!deadly && (stalled == 30 || stalled == 60)));
                 self.tick(&input);
@@ -1524,7 +1539,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), route_fails: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;

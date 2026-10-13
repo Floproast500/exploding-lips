@@ -1451,3 +1451,17 @@ fn lips12_no_standing_up_under_a_low_ceiling() {
     let eye = s.player.eye_z(&s.physics_override.unwrap_or_default());
     assert!(s.player.crouching && eye < s.level.world.regions[160].ceiling, "eye {eye} under the ceiling {}", s.level.world.regions[160].ceiling);
 }
+
+/// g_fixes: death bots out of earshot (behind walls; near bots attack through them with no
+/// line-of-sight test, movers.md) are not heard. At LIPS02's start four of them growled and
+/// fired every 1.2 s forever; classic keeps them.
+#[test]
+fn lips02_bots_behind_walls_are_not_heard_with_fixes() {
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS02") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 10.0);
+        let growls = game.drain_audio().iter().filter(|e| matches!(e, godd_game::AudioEvent::Sound { name, .. } if name.starts_with("GROWL"))).count();
+        assert_eq!(growls == 0, fixes, "fixes {fixes}: {growls} growls");
+    }
+}

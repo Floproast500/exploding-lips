@@ -65,6 +65,8 @@ pub struct Session {
     pub god: bool,
     /// Original-game bug fixes on (cvar `g_fixes`; off = classic behaviour).
     pub fixes: bool,
+    /// Portal hops from the player's region, for bot earshot: ((region, half-second), hops).
+    hops_cache: ((usize, u64), Vec<u8>),
     /// The menu's "Options" item was chosen (the game opens the options screen).
     pub wants_options: bool,
     /// Whether the level data fixes (`crate::fixes`) are applied now.
@@ -173,6 +175,7 @@ impl Session {
             physics_override: None,
             god: false,
             fixes: false,
+            hops_cache: ((usize::MAX, 0), Vec::new()),
             wants_options: false,
             fixes_applied: false,
             trap_floors: Vec::new(),
@@ -274,6 +277,21 @@ impl Session {
 
     /// Open portals (walls with room to pass sound) from `region` to every region: 0 for the
     /// region itself, 255 when unreachable.
+    /// g_fixes: whether a bot sound at `pos` (in `region`) is heard: close by, or a few open
+    /// portals from the player (not across solid walls or shut doors).
+    fn in_earshot(&mut self, pos: [f32; 3], region: Option<usize>) -> bool {
+        let p = self.player;
+        if (pos[0] - p.x).hypot(pos[1] - p.y) < EARSHOT_NEAR {
+            return true;
+        }
+        // (Doors open and shut: recomputed every half second.)
+        let key = (p.region, self.ticks / (TICK_RATE as u64 / 2).max(1));
+        if self.hops_cache.0 != key {
+            self.hops_cache = (key, self.portal_hops(p.region));
+        }
+        region.and_then(|r| self.hops_cache.1.get(r)).is_some_and(|&h| h <= EARSHOT_HOPS)
+    }
+
     pub fn portal_hops(&self, region: usize) -> Vec<u8> {
         let w = &self.level.world;
         let mut hops = vec![u8::MAX; w.regions.len()];
@@ -576,6 +594,11 @@ impl Session {
             }
             ObjRequest::TriggerNamed(name) => self.trigger_named(&name),
             ObjRequest::Audio(event) => self.audio.push(event),
+            ObjRequest::BotSound { name, pos, region } => {
+                if !self.fixes || self.in_earshot(pos, region) {
+                    self.audio.push(AudioEvent::sound_at(name, pos));
+                }
+            }
             ObjRequest::CopyWall { target, source } => self.copy_wall(&target, &source),
             ObjRequest::MorphPlayer { height, speed } => {
                 let mut p = self.physics_override.unwrap_or_default();
@@ -1056,6 +1079,9 @@ fn seed_from(name: &str) -> u64 {
 
 /// Audio channel of the background sound (object loops use 1000 and up).
 const BACKGROUND_CHANNEL: u32 = 999;
+/// g_fixes bot earshot: always within this distance, else within this many open portals.
+const EARSHOT_NEAR: f32 = 320.0;
+const EARSHOT_HOPS: u8 = 4;
 
 /// Load the level's BSP world (`[startup] loadbspfilename`) with the level's ORORB exit cubes and
 /// OPTAGSW tag cubes.

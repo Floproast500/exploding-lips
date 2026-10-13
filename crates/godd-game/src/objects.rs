@@ -315,6 +315,10 @@ const BOT_TOUCH_TAG: u32 = 661;
 /// Things the session must carry out.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjRequest {
+    /// A sound from a bot (its growls and shots), from the bot's spot: the session drops it
+    /// under g_fixes when the bot is out of earshot (behind walls; bots near you attack through
+    /// them with no line-of-sight test, movers.md, so these never stop).
+    BotSound { name: String, pos: [f32; 3], region: Option<usize> },
     Tag(u32),
     /// A tag from a world switch (OTAGSW/OBUMPSW): fired locally and shared in netplay.
     SharedTag(u32),
@@ -668,6 +672,14 @@ impl Objects {
         let o = &self.list[i];
         let pos = [o.x, o.y, o.z + o.height / 2.0];
         self.sound_at(name, pos);
+    }
+
+    /// A sound from bot `i` (at `at`, else the bot's middle).
+    fn bot_sound(&mut self, i: usize, name: Option<String>, at: Option<[f32; 3]>) {
+        let Some(name) = name else { return };
+        let o = &self.list[i];
+        let pos = at.unwrap_or([o.x, o.y, o.z + o.height / 2.0]);
+        self.requests.push(ObjRequest::BotSound { name, pos, region: o.region });
     }
 
     fn sound_at(&mut self, name: Option<String>, pos: [f32; 3]) {
@@ -1414,7 +1426,7 @@ impl Objects {
                 // A bot's OSOUND comes from the bot, like its other sounds (the original plays
                 // object sounds positionally, object-effects.md FUN_0049d933): a growl in the
                 // next room is not one in your ear.
-                MoverRequest::Ini(line) if osound_name(&line).is_some() => self.sound_from(i, osound_name(&line)),
+                MoverRequest::Ini(line) if osound_name(&line).is_some() => self.bot_sound(i, osound_name(&line), None),
                 MoverRequest::Ini(line) => self.requests.push(ObjRequest::Ini(line)),
                 // Lips scripts fire 661 when a bot touches the player (combat.md §4.3): the player
                 // is hit, like a shot's tag.
@@ -1422,7 +1434,7 @@ impl Objects {
                 MoverRequest::Tag(t) => self.requests.push(ObjRequest::Tag(t)),
                 MoverRequest::TagRange(a, b) => self.requests.push(ObjRequest::TagRange(a, b)),
                 MoverRequest::Message { color, text } => self.requests.push(ObjRequest::Message { color, text }),
-                MoverRequest::Sound(s) => self.sound_from(i, Some(s)),
+                MoverRequest::Sound(s) => self.bot_sound(i, Some(s), None),
                 MoverRequest::PlayerState { index, op, value } => self.requests.push(ObjRequest::PlayerState { index, op, value }),
                 MoverRequest::TurnPlayer { units_per_frame, frames } => self.requests.push(ObjRequest::TurnPlayer { units_per_frame, frames }),
                 MoverRequest::FacePlayer { away } => {
@@ -1560,8 +1572,9 @@ impl Objects {
             }
         let explosion = self.tools.bot_explosions.get(tool).cloned().flatten().map(|_| tool);
         p.kind = Kind::Projectile { from_player: false, tag, flying: def.flying(), life: 6.0, explosion };
-        self.sound_at(def.sounds[0].clone(), [p.x, p.y, p.z]);
+        let at = [p.x, p.y, p.z];
         self.list.push(p);
+        self.bot_sound(i, def.sounds[0].clone(), Some(at));
     }
 
     fn fire_player_projectile(&mut self, player: &PlayerView) {
