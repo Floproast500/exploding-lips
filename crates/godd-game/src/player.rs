@@ -439,13 +439,13 @@ impl Player {
             let target = if let Some(r) = crossed {
                 // (Likewise a crossing that lands beyond the new region's own solid lines: the
                 // end of a portal where the region behind it is cut off by a diagonal.)
-                (world.point_in_region(nx, ny, r) || !world.point_in_region(self.x, self.y, self.region)).then_some(r)
+                (world.point_in_region(nx, ny, r) || world.region_at(nx, ny).is_some() || !world.point_in_region(self.x, self.y, self.region)).then_some(r)
             } else if !stacked && !lost {
                 // No line crossed: still in the same region, unless the push put the body out
-                // of it through a solid line (two walls of a narrow corner pushing against each
-                // other): a push that lands outside every region undoes the step (physics.md
-                // §8.1).
-                (world.point_in_region(nx, ny, self.region) || !world.point_in_region(self.x, self.y, self.region)).then_some(self.region)
+                // of the level through a solid line (two walls of a narrow corner pushing against
+                // each other): a push that lands outside every region undoes the step
+                // (physics.md §8.1).
+                (world.point_in_region(nx, ny, self.region) || world.region_at(nx, ny).is_some() || !world.point_in_region(self.x, self.y, self.region)).then_some(self.region)
             } else {
                 // The region the point is in, if the body can step onto its floor (a raised
                 // region nested in another, like a pedestal: crossing onto it re-homes the body
