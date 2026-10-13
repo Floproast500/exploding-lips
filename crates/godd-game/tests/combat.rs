@@ -293,3 +293,53 @@ fn sound_groups_play_together_or_in_turn() {
     }
     assert_eq!(order, ["AMBWLK01", "AMBWLK03"], "mode 1: slots in turn");
 }
+
+/// LIPS05's blue gem (it opens door r481, behind which is the rest of the level) lies on an
+/// island in a field of death pits, reached by jump pads (RFBOUNCE, world-effects.md 3.3): from
+/// a low pad (r524, -960) hop to r520 (-640), then on to the gem's pedestal (r368, -368). Pads
+/// relaunch a body on their floor at every contact (not only on landing), and a jump started on
+/// one adds the pad's speed; without those the island cannot be reached.
+#[test]
+fn lips05_jump_pads_carry_the_player_to_the_blue_gem() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS05") else { return };
+    game.tick(&vfs, &godd_game::Input::default());
+    {
+        let s = game.session_mut().unwrap();
+        s.god = true;
+        let z = s.level.world.regions[524].floor;
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (12480.0, 9600.0, z, 524);
+        s.previous = s.player;
+    }
+    let mut hop = godd_game::Input::default();
+    hop.set(Action::Forward, true);
+    hop.set(Action::Jump, true);
+    let mut walk = godd_game::Input::default();
+    walk.set(Action::Forward, true);
+    // 0: hop to r520; 1: cross it (bouncing) to its north edge; 2: jump to the gem.
+    let mut stage = 0;
+    for _ in 0..900 {
+        let p = game.session().unwrap().player;
+        if p.region == 368 {
+            break;
+        }
+        if stage == 0 && p.region == 520 {
+            stage = 1;
+        }
+        let edge = (12864.0, 9140.0);
+        // (Jump as the pad is touched, near its north edge.)
+        if stage == 1 && p.region == 520 && (p.x - edge.0).hypot(p.y - edge.1) < 40.0 && p.z < -630.0 && p.vz <= 0.0 {
+            stage = 2;
+        }
+        let (target, input) = match stage {
+            0 => ((12864.0, 9280.0), &hop),
+            1 => (edge, &walk),
+            _ => ((12864.0, 8800.0), &hop),
+        };
+        game.session_mut().unwrap().player.angle = (target.1 - p.y).atan2(target.0 - p.x);
+        game.tick(&vfs, input);
+    }
+    let p = game.session().unwrap().player;
+    assert_eq!(p.region, 368, "on the gem's pedestal: ({}, {}, {}) r{}", p.x, p.y, p.z, p.region);
+}
+

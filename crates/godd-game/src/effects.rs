@@ -43,8 +43,6 @@ pub enum EffectRequest {
     Tag(u32),
     /// A sound, from a region (its moving door/lift) when known.
     Sound(String, Option<usize>),
-    /// Set the player's vertical speed (jump pads).
-    Launch(f32),
     /// RROTATE turned `region` by `angle` radians about `pivot`: objects on its floor follow.
     Rotated { region: usize, pivot: (f32, f32), angle: f32 },
 }
@@ -223,6 +221,20 @@ impl Effects {
     }
 
     /// Whether any door (RTDOOR) is opening or closing now.
+    /// The effect a region carries, by name (debug and tools): "door", "lift", "bounce",
+    /// "animated", "trigger" or "rotate".
+    pub fn region_kind(&self, region: usize) -> Option<&'static str> {
+        let i = self.by_region.get(region).copied().flatten()?;
+        Some(match self.regions[i].kind {
+            RegionKind::Door { .. } => "door",
+            RegionKind::Lift { .. } => "lift",
+            RegionKind::Bounce { .. } => "bounce",
+            RegionKind::Animated { .. } => "animated",
+            RegionKind::Trigger { .. } => "trigger",
+            RegionKind::Rotate(_) => "rotate",
+        })
+    }
+
     pub fn doors_moving(&self) -> bool {
         self.regions.iter().any(|r| matches!(r.kind, RegionKind::Door { moving: true, .. }))
     }
@@ -519,7 +531,6 @@ impl Effects {
             _ => 0,
         };
         let mut tags = Vec::new();
-        let mut launch = None;
         match &mut self.regions[i].kind {
             RegionKind::Animated { aux: Some(aux) } => tags.push(fire(aux)),
             RegionKind::Trigger { aux: Some(aux), uses_left } => {
@@ -531,17 +542,10 @@ impl Effects {
                 }
                 tags.push(fire(aux));
             }
-            RegionKind::Bounce { speed, sound } if event == 0x400 => {
-                launch = Some((*speed, sound.clone()));
-            }
             _ => {}
         }
         for t in tags {
             self.tag(t);
-        }
-        if let Some((speed, sound)) = launch {
-            self.requests.push(EffectRequest::Launch(speed));
-            self.sound(sound);
         }
     }
 
@@ -661,6 +665,20 @@ impl Effects {
         for s in sounds {
             self.sound(s);
         }
+    }
+
+    /// RFBOUNCE (world-effects.md 3.3, mode 0, every pad in the data): a body on the pad's
+    /// floor that is not rising is launched at the pad's speed, on every contact, so one
+    /// standing on it (or walking onto it) bounces too, not only one landing on it. Returns the
+    /// speed and plays the pad's sound.
+    pub fn bounce(&mut self, region: usize) -> Option<f32> {
+        let i = self.by_region.get(region).copied().flatten()?;
+        let RegionKind::Bounce { speed, sound } = &self.regions[i].kind else { return None };
+        let (speed, sound) = (*speed, sound.clone());
+        (speed > 0.0).then(|| {
+            self.sound_in(i, sound);
+            speed
+        })
     }
 
     /// Whether a region is a jump pad (physics adds its speed to jumps started there).

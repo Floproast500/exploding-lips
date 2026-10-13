@@ -382,7 +382,16 @@ impl Session {
         }
         self.tool = self.objects.tools.current;
         let mut contacts: Vec<PlayerEvent> = Vec::new();
+        let pad_before = (self.player.on_ground && !self.player.flying).then(|| self.effects.bounce_speed(self.level.world.solid_floor(self.player.region).1)).flatten();
         self.player.tick_with_events(&self.level.world, input, physics, &mut contacts);
+        // A jump started on a jump pad also gets the pad's speed (world-effects.md 3.3).
+        if let Some(a) = pad_before
+            && input.held(Action::Jump)
+            && self.player.vz > 0.0
+            && !self.player.on_ground
+        {
+            self.player.vz += a;
+        }
         if self.player.region != self.previous.region {
             self.region_background(self.player.region);
         }
@@ -398,6 +407,16 @@ impl Session {
             }
         }
         self.effects.on_player_events(&contacts);
+        // Jump pads relaunch a body on their floor that is not rising (world-effects.md 3.3);
+        // jumping as it touches the pad adds the jump's launch speed (a jump started on a pad
+        // gets the pad's speed on top).
+        let pad = self.level.world.solid_floor(self.player.region).1;
+        if self.player.on_ground && self.player.vz <= 0.0 && !self.player.flying
+            && let Some(vz) = self.effects.bounce(pad)
+        {
+            self.player.vz = vz + if input.held(Action::Jump) { physics.jump_speed } else { 0.0 };
+            self.player.on_ground = false;
+        }
         self.level.animate(dt);
         let occupancy = self.occupancy(physics);
         let now = self.ticks as f64 / TICK_RATE;
@@ -957,7 +976,6 @@ impl Session {
                         }
                         None => AudioEvent::sound(name),
                     }),
-                    EffectRequest::Launch(vz) => self.player.vz = vz,
                     EffectRequest::Rotated { region, pivot, angle } => self.carry_rotation(region, pivot, angle),
                 }
             }
