@@ -288,7 +288,7 @@ impl<'a> Bot<'a> {
             let reg = &w.regions[r];
             let ((x0, y0), (x1, y1)) = reg.bounds;
             let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            (reg.below.is_none() && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then(|| Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
+            (reg.below.is_none() && w.region_at_z(c.0, c.1, Some(reg.floor + 1.0)) == Some(r)).then_some(Goal { target: Target::Region(WAYPOINT), at: [c.0, c.1, reg.floor], face: None, shoot: false })
         })
     }
 
