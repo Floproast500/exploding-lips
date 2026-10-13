@@ -1238,3 +1238,28 @@ fn lips12_corridor_under_the_walkway() {
     let p = game.session().unwrap().player;
     assert!(p.x > 16000.0, "walked under the walkway: x = {} region {}", p.x, p.region);
 }
+
+/// g_fixes: LIPS02's sealed west room (pickup for door r13) is reached through the block r24
+/// in the corridor wall; classic data keeps its walls solid (the level cannot be finished).
+#[test]
+fn lips02_secret_passage_with_fixes() {
+    use godd_game::Action;
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS02") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 0.3);
+        let west = std::f32::consts::PI;
+        {
+            let s = game.session_mut().unwrap();
+            (s.player.x, s.player.y, s.player.z, s.player.region) = (26272.0, 18112.0, 128.0, 25);
+            s.previous = s.player;
+        }
+        hold(&mut game, &vfs, &[Action::Forward], 60, west);
+        let p = game.session().unwrap().player;
+        if fixes {
+            assert!(p.x < 26100.0 && p.region == 25, "through the passage: ({}, {}) r{}", p.x, p.y, p.region);
+        } else {
+            assert!(p.x > 26176.0, "classic: still in the corridor at x = {}", p.x);
+        }
+    }
+}

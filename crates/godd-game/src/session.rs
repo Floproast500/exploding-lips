@@ -67,6 +67,8 @@ pub struct Session {
     pub fixes: bool,
     /// The menu's "Options" item was chosen (the game opens the options screen).
     pub wants_options: bool,
+    /// Whether the level data fixes (`crate::fixes`) are applied now.
+    fixes_applied: bool,
     /// g_fixes trap pits: (region, starting floor, empty since).
     trap_floors: Vec<(usize, f32, Option<f64>)>,
     /// Lightning: everything full bright while set (OFLASH).
@@ -172,6 +174,7 @@ impl Session {
             god: false,
             fixes: false,
             wants_options: false,
+            fixes_applied: false,
             trap_floors: Vec::new(),
             flash: false,
             overlays: Vec::new(),
@@ -380,6 +383,10 @@ impl Session {
         self.effects.fixes = self.fixes;
         self.effects.tick(&mut self.level, now, dt, &|r| occupancy.get(r).copied().unwrap_or(0.0));
         self.process_effect_requests();
+        if self.fixes != self.fixes_applied {
+            crate::fixes::apply(&self.name, &mut self.level.world, self.fixes);
+            self.fixes_applied = self.fixes;
+        }
         if self.fixes {
             self.reset_traps(now, dt);
         }

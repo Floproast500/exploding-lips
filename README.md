@@ -169,6 +169,9 @@ behaviour. Currently:
   through (the original closes them in front of, or on, you). They still close on their timers.
 - **Trap pits** where landing sends you back to the start (LIPS00's sinking corridor) rise back
   once empty, so stepping onto the trigger and back out no longer locks you out of the exit.
+- **LIPS02 can be finished:** the item that opens the door out of the first area sits in a room
+  that is sealed in the shipped data (the door's other switch is behind the door itself). A block
+  in the corridor wall becomes a secret passage into that room.
 
 Netplay players should use the same setting.
 

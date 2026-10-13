@@ -761,6 +761,12 @@ impl<'a> Bot<'a> {
                 if d < close && level {
                     break;
                 }
+                // Right spot, wrong level (above or below where the plan went): this plan is
+                // off; give up on it so the next one starts from here.
+                if d < close && !level && p.on_ground && k > 0 {
+                    self.edges.clear();
+                    return false;
+                }
                 if d < best - 0.5 {
                     best = d;
                     stalled = 0;

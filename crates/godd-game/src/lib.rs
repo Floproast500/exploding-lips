@@ -10,6 +10,7 @@ pub mod bsp_world;
 mod audio;
 pub use engine_core::clock;
 pub mod effects;
+pub mod fixes;
 pub mod guides;
 pub use engine_core::frame;
 pub mod hud;
