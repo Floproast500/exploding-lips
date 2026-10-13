@@ -513,10 +513,18 @@ impl<'a> Bot<'a> {
                 .into_iter()
                 .map(|side| {
                     let n = (-dy / len * side, dx / len * side);
-                    (mid.0 + n.0 * 40.0, mid.1 + n.1 * 40.0)
+                    ((mid.0 + n.0 * 40.0, mid.1 + n.1 * 40.0), side)
                 })
-                // At the switch's own height (another level may lie above or below).
-                .filter_map(|at| w.region_at_z(at.0, at.1, Some(w.regions[wall.front].floor + 1.0)).filter(|&r| open(r)).map(|r| (at, r)))
+                // At the switch's own height (another level may lie above or below). A region
+                // with an open outline is not found by the lookup: the spot on the wall's right
+                // (its front side) then lies in its front region.
+                // (A one-sided wall is only faced from its front: behind it lies no level.)
+                .filter(|&(_, side)| wall.back.is_some() || side < 0.0)
+                .filter_map(|(at, side)| {
+                    let ((x0, y0), (x1, y1)) = w.regions[wall.front].bounds;
+                    let front = (side < 0.0 && at.0 >= x0 && at.0 <= x1 && at.1 >= y0 && at.1 <= y1).then_some(wall.front);
+                    w.region_at_z(at.0, at.1, Some(w.regions[wall.front].floor + 1.0)).or(front).filter(|&r| open(r)).map(|r| (at, r))
+                })
                 // Nothing solid (a wall, a shut door) between the spot and the switch.
                 .filter(|&(at, _)| {
                     let to = (mid.0 - (mid.0 - at.0) * 0.02, mid.1 - (mid.1 - at.1) * 0.02);
@@ -643,7 +651,7 @@ impl<'a> Bot<'a> {
                 p.on_ground = false;
             }
         };
-        for t in 0..48 {
+        for t in 0..72 {
             let before = (p.x - to.0).hypot(p.y - to.1);
             // Run while far, walk the last stretch; arrived once the spot is within one step.
             let mut i = Input::default();
@@ -796,7 +804,18 @@ impl<'a> Bot<'a> {
             // Straight one-cell moves that worked from here (diagonals need both beside them:
             // no cutting through a corner where two rooms only touch at a point).
             let mut straight_ok: HashSet<(i32, i32)> = HashSet::new();
-            for (dx, dy) in MOVES {
+            // Long running jumps across a pit (LIPS05's death-pit field: 640 to the pad r520).
+            const LONG: [(f32, f32); 32] = [
+                (10.0, 0.0), (-10.0, 0.0), (0.0, 10.0), (0.0, -10.0),
+                (12.0, 0.0), (-12.0, 0.0), (0.0, 12.0), (0.0, -12.0),
+                (14.0, 0.0), (-14.0, 0.0), (0.0, 14.0), (0.0, -14.0),
+                (16.0, 0.0), (-16.0, 0.0), (0.0, 16.0), (0.0, -16.0),
+                (18.0, 0.0), (-18.0, 0.0), (0.0, 18.0), (0.0, -18.0),
+                (20.0, 0.0), (-20.0, 0.0), (0.0, 20.0), (0.0, -20.0),
+                (22.0, 0.0), (-22.0, 0.0), (0.0, 22.0), (0.0, -22.0),
+                (24.0, 0.0), (-24.0, 0.0), (0.0, 24.0), (0.0, -24.0),
+            ];
+            for (dx, dy) in MOVES.into_iter().chain(LONG) {
                 if dx != 0.0 && dy != 0.0 && dx.abs() == 1.0 && dy.abs() == 1.0 && !(straight_ok.contains(&(dx as i32, 0)) && straight_ok.contains(&(0, dy as i32))) {
                     continue;
                 }
@@ -811,7 +830,13 @@ impl<'a> Bot<'a> {
                     let ledge = target.is_some_and(|f| f > p.z + physics.step_height);
                     let gap = target.is_some_and(|f| (f - p.z).abs() <= physics.step_height) && floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - physics.step_height);
                     let wide = dx.abs() > 3.0 || dy.abs() > 3.0;
-                    if (!ledge && !gap) || (wide && !gap) {
+                    // (The longest: also down onto ground somewhat lower, over a pit.)
+                    let far = dx.abs() > 8.0 || dy.abs() > 8.0;
+                    let pit_jump = far && target.is_some_and(|f| f <= p.z + physics.step_height && f >= p.z - 160.0) && floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - 160.0);
+                    if far && !pit_jump {
+                        continue;
+                    }
+                    if !far && ((!ledge && !gap) || (wide && !gap)) {
                         continue;
                     }
                 }
