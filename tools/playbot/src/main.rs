@@ -151,6 +151,8 @@ impl<'a> Bot<'a> {
         let s = self.session();
         let Some(tag) = s.objects.list.iter().find(|o| o.effect == OTELE && DEATH_TAGS.contains(&o.tag)).map(|o| o.tag) else { return false };
         let before = (s.player.x, s.player.y);
+        // A fresh start: what failed from elsewhere may work from here.
+        self.bad_moves.clear();
         self.game.session_mut().expect("session").fire_tag(tag as u32);
         let p = self.session().player;
         (p.x - before.0).hypot(p.y - before.1) > 64.0
