@@ -1581,7 +1581,12 @@ impl Objects {
             let (nx, ny) = (o.x + c * step, o.y + s * step);
             if let Some(region) = world.region_at_z(nx, ny, Some(o.z + 1.0)) {
                 let blocked = world.solid_floor(region).0 > o.z + 32.0 || world.regions[region].ceiling - world.regions[region].floor < o.height;
-                if !blocked && !crosses_solid_wall(world, o.x, o.y, nx, ny, o.radius) {
+                // Bodies keep radius + 12 from solid lines, as the player does (physics.md 8.1:
+                // the same object physics); one already that close may still back away.
+                let keep = o.radius + 12.0;
+                let squeezed = |x: f32, y: f32| [Some(region), o.region].into_iter().flatten().any(|r| near_solid_line(world, r, x, y, keep));
+                let too_close = squeezed(nx, ny) && (!squeezed(o.x, o.y) || near_solid_line(world, region, nx, ny, keep * 0.5));
+                if !blocked && !too_close && !crosses_solid_wall(world, o.x, o.y, nx, ny, o.radius) {
                     o.x = nx;
                     o.y = ny;
                     o.region = Some(region);
@@ -2000,6 +2005,26 @@ pub fn line_of_sight(world: &World, a: [f32; 3], b: [f32; 3]) -> bool {
         let (f, k) = (&world.regions[w.front], &world.regions[back]);
         let z = a[2] + (b[2] - a[2]) * t;
         z >= f.floor.max(k.floor) && z <= f.ceiling.min(k.ceiling)
+    })
+}
+
+/// Whether a solid or one-sided line of `region` is within `dist` of (x, y).
+fn near_solid_line(world: &World, region: usize, x: f32, y: f32, dist: f32) -> bool {
+    world.regions.get(region).is_some_and(|reg| {
+        reg.walls.iter().any(|&wi| {
+            let w = &world.walls[wi];
+            if w.back.is_some_and(|b| b != w.front) && !w.blocking {
+                return false;
+            }
+            let (a, b) = (world.vertices[w.a], world.vertices[w.b]);
+            let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+            let len2 = ex * ex + ey * ey;
+            if len2 < 1e-6 {
+                return false;
+            }
+            let t = (((x - a.0) * ex + (y - a.1) * ey) / len2).clamp(0.0, 1.0);
+            (x - a.0 - t * ex).hypot(y - a.1 - t * ey) < dist
+        })
     })
 }
 

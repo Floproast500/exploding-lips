@@ -214,3 +214,33 @@ fn lips07_overhead_switch_is_shot_open() {
     }
 }
 
+/// Bots keep their distance from walls like the player (radius + 12, physics.md 8.1): the
+/// death bots creeping at the player through a wall at the starts of LIPS01/02 used to push
+/// half their body into it.
+#[test]
+fn bots_stay_out_of_walls() {
+    for level in ["LIPS00", "LIPS01", "LIPS02", "LIPS06", "LIPS09"] {
+        let Some((vfs, mut game)) = start(level) else { return };
+        game.session_mut().unwrap().god = true;
+        for _ in 0..(15.0 * godd_game::TICK_RATE) as usize {
+            game.tick(&vfs, &godd_game::Input::default());
+            let s = game.session().unwrap();
+            let w = &s.level.world;
+            for (i, o) in s.objects.list.iter().enumerate().filter(|(_, o)| o.mover.is_some() && !o.hidden && !o.destroyed && o.region.is_some()) {
+                let r = o.region.unwrap();
+                let inside_wall = w.regions[r].walls.iter().any(|&wi| {
+                    let wall = &w.walls[wi];
+                    if wall.back.is_some() && !wall.blocking {
+                        return false;
+                    }
+                    let (a, b) = (w.vertices[wall.a], w.vertices[wall.b]);
+                    let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+                    let t = (((o.x - a.0) * ex + (o.y - a.1) * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
+                    (o.x - a.0 - t * ex).hypot(o.y - a.1 - t * ey) < o.radius * 0.5
+                });
+                assert!(!inside_wall, "{level}: bot #{i} {} half inside a wall at ({}, {})", o.name, o.x, o.y);
+            }
+        }
+    }
+}
+
