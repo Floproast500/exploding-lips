@@ -1013,3 +1013,147 @@ fn lips00_door_face_opens_from_a_doorway() {
     assert!(s.level.world.regions[81].ceiling > 64.0, "door 81 opened");
     assert!(s.player.y < 16500.0, "walked through: {}", s.player.y);
 }
+
+/// Put the player at (x, y) on the floor there, facing `angle`.
+fn place(game: &mut godd_game::Game, x: f32, y: f32, angle: f32) {
+    let s = game.session_mut().unwrap();
+    let w = &s.level.world;
+    let r = w.region_at(x, y).unwrap();
+    s.player.x = x;
+    s.player.y = y;
+    s.player.region = r;
+    s.player.z = w.regions[r].floor;
+    s.player.vz = 0.0;
+    s.player.angle = angle;
+    s.previous = s.player;
+}
+
+/// Hold `actions` for `ticks`, keeping the facing.
+fn hold(game: &mut godd_game::Game, vfs: &godd_game::Vfs, actions: &[godd_game::Action], ticks: usize, angle: f32) {
+    let mut input = godd_game::Input::default();
+    for &a in actions {
+        input.set(a, true);
+    }
+    for _ in 0..ticks {
+        game.session_mut().unwrap().player.angle = angle;
+        game.tick(vfs, &input);
+    }
+}
+
+/// Solid walls hold the body radius + 12 away (physics.md §8.1), so LIPS00's 16-deep elevator
+/// button alcove (r134) cannot be stepped into: pressing "up" from the elevator rides it up
+/// instead of leaving the player stranded under it.
+#[test]
+fn lips00_elevator_button_keeps_the_player_on_the_elevator() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    game.session_mut().unwrap().fire_tag(24); // elevator down
+    run(&mut game, &vfs, 14.0);
+    place(&mut game, 16800.0, 15936.0, 0.0);
+    hold(&mut game, &vfs, &[Action::Forward], 60, 0.0);
+    let s = game.session().unwrap();
+    assert!(s.player.x <= 16912.0 - 28.0 + 0.5, "x = {}", s.player.x);
+    assert_eq!(s.player.region, 76, "on the elevator, not in the alcove");
+    run(&mut game, &vfs, 12.0);
+    let s = game.session().unwrap();
+    assert!(s.player.z > -100.0, "rode up with the elevator: z = {}", s.player.z);
+}
+
+/// A body standing right against a blocking line is pushed back to the side it came from,
+/// never through the walls beyond (it used to pop 100 units north into LIPS00's pit r249).
+#[test]
+fn lips00_pushes_never_tunnel_through_walls() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    place(&mut game, 17793.5, 16927.7, std::f32::consts::FRAC_PI_2);
+    hold(&mut game, &vfs, &[Action::Forward], 30, std::f32::consts::FRAC_PI_2);
+    let s = game.session().unwrap();
+    assert!(s.player.y < 16928.0, "y = {}", s.player.y);
+    assert_eq!(s.player.region, 0);
+}
+
+/// A plain OWALK bot fires its own tag when the player bumps it (object-effects.md
+/// FUN_0045fe91): LIPS00's tag-71 walker sends the player to the raft (OTELE on tag 71).
+#[test]
+fn lips00_plain_walker_fires_its_tag_when_bumped() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let (x, y) = {
+        let o = &game.session().unwrap().objects.list[243];
+        assert_eq!((o.effect, o.tag), (5, 71));
+        (o.x, o.y)
+    };
+    place(&mut game, x - 60.0, y, 0.0);
+    hold(&mut game, &vfs, &[Action::Forward], 40, 0.0);
+    run(&mut game, &vfs, 0.5);
+    // CHEIRAFT rides the raft path, so only its row is fixed.
+    let p = game.session().unwrap().player;
+    assert!((p.x - x).hypot(p.y - y) > 1000.0 && (p.y - 16736.0).abs() < 64.0, "teleported to CHEIRAFT: at ({}, {})", p.x, p.y);
+}
+
+/// Teleporting re-homes the player and sends leave/enter region events: LIPS00's pit alcove
+/// r483 opens SECRET2 (r12, tag 57) when left, and the death teleport is the way out of the pit.
+#[test]
+fn lips00_teleport_out_of_a_region_fires_its_leave_tag() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    place(&mut game, 16768.0, 15808.0, 0.0);
+    run(&mut game, &vfs, 0.2);
+    assert_eq!(game.session().unwrap().player.region, 483);
+    game.session_mut().unwrap().fire_tag(3); // DEATH01 → RBIRTH01
+    run(&mut game, &vfs, 4.0);
+    let s = game.session().unwrap();
+    assert_ne!(s.player.region, 483);
+    let r = &s.level.world.regions[12];
+    assert!(r.ceiling - r.floor > 56.0, "SECRET2 open: {} / {}", r.floor, r.ceiling);
+}
+
+/// Crossing onto a raised region nested in another (LIPS00's ELIXIR02 pedestal, 48 up)
+/// re-homes the body onto it once a jump has it within step height (physics.md §8.2).
+#[test]
+fn lips00_jump_onto_the_elixir_pedestal() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let west = std::f32::consts::PI;
+    place(&mut game, 16240.0, 14816.0, west);
+    hold(&mut game, &vfs, &[Action::Forward, Action::Jump], 2, west);
+    hold(&mut game, &vfs, &[Action::Forward], 40, west);
+    let s = game.session().unwrap();
+    assert_eq!(s.player.region, 611, "at ({}, {}, {})", s.player.x, s.player.y, s.player.z);
+    assert!((s.player.z + 112.0).abs() < 1.0);
+}
+
+/// LIPS00's FALLZ trap: walking straight in, the sinking floor carries the player down (no
+/// landing, so no death tag), and a jump gets them out at the far end.
+#[test]
+fn lips00_fallz_rides_down_and_jumps_out() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    let south = -std::f32::consts::FRAC_PI_2;
+    place(&mut game, 16544.0, 16100.0, south);
+    hold(&mut game, &vfs, &[Action::Forward], 100, south);
+    let s = game.session().unwrap();
+    assert_eq!(s.player.region, 466, "still in FALLZ, not sent back to the start");
+    assert!((s.player.z + 448.0).abs() < 1.0);
+    hold(&mut game, &vfs, &[Action::Forward, Action::Jump], 40, south);
+    assert_eq!(game.session().unwrap().player.region, 178);
+}
+
+/// An OSETF fired while its region is still moving is queued and runs after the move
+/// (object-effects.md OSETF "pending"): LIPS00's elevator called up mid-descent comes back up.
+#[test]
+fn lips00_elevator_call_during_a_ride_is_queued() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.3);
+    game.session_mut().unwrap().fire_tag(24); // down
+    run(&mut game, &vfs, 1.0);
+    game.session_mut().unwrap().fire_tag(25); // up, while still going down
+    run(&mut game, &vfs, 30.0);
+    let r = &game.session().unwrap().level.world.regions[76];
+    assert!(r.floor.abs() < 0.5, "elevator floor {}", r.floor);
+}

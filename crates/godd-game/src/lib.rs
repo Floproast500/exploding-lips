@@ -310,7 +310,7 @@ impl Game {
     }
 
     fn console_input(&mut self, vfs: &Vfs, input: &Input) {
-        const COMMANDS: [&str; 10] = ["set", "get", "toggle", "reset", "cvarlist", "bind", "unbind", "unbindall", "warp", "help"];
+        const COMMANDS: [&str; 11] = ["set", "get", "toggle", "reset", "cvarlist", "bind", "unbind", "unbindall", "warp", "god", "help"];
         let words: Vec<&str> = COMMANDS.iter().copied().chain(self.cvars.iter().map(|v| v.name)).collect();
         self.console.edit(&input.text, &words);
         if input.pressed(Action::Menu) {
@@ -356,7 +356,14 @@ impl Game {
                 },
                 None => "usage: warp LIPSnn".into(),
             },
-            Some("help") => "warp LEVEL | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500 | Tab completes, Up/Down history, PgUp/PgDn scroll".into(),
+            Some("god") => match self.session_mut() {
+                Some(s) => {
+                    s.god = !s.god;
+                    format!("god mode {}", if s.god { "on" } else { "off" })
+                }
+                None => "no level loaded".into(),
+            },
+            Some("help") => "warp LEVEL | god | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500 | Tab completes, Up/Down history, PgUp/PgDn scroll".into(),
             _ => match self.session_mut() {
                 Some(s) => {
                     s.run_command(&line);

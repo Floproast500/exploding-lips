@@ -222,6 +222,11 @@ impl Level {
     }
 
     /// Name of the level's music track (Sounds record +0x0c), if any.
+    /// Region names (for effects that name their target region), by region index.
+    pub fn region_names(&self) -> Vec<String> {
+        self.orb.records(Section::Regions).iter().map(|r| name_at(r, 0xa4, 8)).collect()
+    }
+
     pub fn music_name(&self) -> Option<String> {
         let record = self.orb.records(Section::Sounds).get(self.music?)?;
         let name = name_at(record, 0x0c, 12);

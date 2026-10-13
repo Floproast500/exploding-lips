@@ -61,6 +61,8 @@ pub struct Session {
     remote_players: std::collections::HashMap<u8, usize>,
     /// Movement overrides from morphs (OOTOO on the player).
     pub physics_override: Option<PhysicsParams>,
+    /// Cheat: enemy shots do not fire their hit tag (which usually sends the player back).
+    pub god: bool,
     /// Lightning: everything full bright while set (OFLASH).
     pub flash: bool,
     /// Screen overlays (OTEXOVER): Tex, 320x200 position, animation.
@@ -161,6 +163,7 @@ impl Session {
             outgoing_tags: Vec::new(),
             remote_players: std::collections::HashMap::new(),
             physics_override: None,
+            god: false,
             flash: false,
             overlays: Vec::new(),
             tvs,
@@ -489,7 +492,9 @@ impl Session {
 
     fn object_request(&mut self, r: ObjRequest) {
         match r {
-            ObjRequest::Tag(t) | ObjRequest::PlayerHit(t) => self.script.activate_tag(t),
+            ObjRequest::Tag(t) => self.script.activate_tag(t),
+            ObjRequest::PlayerHit(_) if self.god => {}
+            ObjRequest::PlayerHit(t) => self.script.activate_tag(t),
             ObjRequest::SharedTag(t) => {
                 self.outgoing_tags.push(t);
                 self.script.activate_tag(t);
@@ -677,6 +682,7 @@ impl Session {
 
     fn teleport(&mut self, x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize>) {
         let region = region.or_else(|| self.level.world.region_at_z(x, y, z)).unwrap_or(self.player.region);
+        let left = self.player.region;
         self.player.x = x;
         self.player.y = y;
         self.player.region = region;
@@ -686,6 +692,11 @@ impl Session {
             self.player.angle = a;
         }
         self.previous = self.player;
+        // Re-homing the player sends the leave and enter events like walking across
+        // (world-effects.md §1: FUN_004d85a1), e.g. LIPS00's pit alcove opens SECRET2 on leave.
+        if region != left {
+            self.effects.on_player_events(&[PlayerEvent::LeftRegion(left), PlayerEvent::EnteredRegion(region)]);
+        }
     }
 
     /// Run a console command line (INI command syntax).

@@ -300,6 +300,9 @@ impl ToolDef {
     }
 }
 
+/// The tag Lips bot scripts fire on touching the player (`ON BP { XT(661) }`).
+const BOT_TOUCH_TAG: u32 = 661;
+
 /// Things the session must carry out.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObjRequest {
@@ -321,7 +324,7 @@ pub enum ObjRequest {
     TurnPlayer { units_per_frame: i32, frames: u32 },
     /// Trigger (event 0x80) sent to a wall/region by name.
     TriggerNamed(String),
-    /// A projectile hit the player and carried this tag.
+    /// The player was hurt: a projectile carrying this tag hit them, or a bot touched them.
     PlayerHit(u32),
     /// Looping/channel audio (positional or chained sounds).
     Audio(crate::audio::AudioEvent),
@@ -404,6 +407,9 @@ pub struct Objects {
     frame: u64,
     /// OSETF/OSETC motions: (object, region, target, speed per second, is ceiling).
     motions: Vec<(usize, usize, f32, f32, bool)>,
+    /// OSETF/OSETC triggered while their region was busy: (object, region), started when the
+    /// running move ends (object-effects.md "pending").
+    pending_motions: Vec<(usize, usize)>,
     /// Sprites whose Tex changed (XN), applied at the next sync.
     retex: Vec<(usize, Option<usize>)>,
     rng: u32,
@@ -462,6 +468,7 @@ impl Objects {
             frame_accum: 0.0,
             frame: 0,
             motions: Vec::new(),
+            pending_motions: Vec::new(),
             retex: Vec::new(),
             rng: 0x1234_5678,
             point_names: points
@@ -1155,7 +1162,13 @@ impl Objects {
         let target = aux.ints[0] as f32;
         let speed = aux.ints[1] as f32;
         let ceiling = o.effect == fx::OSETC;
-        if speed <= 0.0 || (target - current).abs() < 0.01 || self.motions.iter().any(|m| m.1 == region && m.4 == ceiling) {
+        if self.motions.iter().any(|m| m.1 == region && m.4 == ceiling) {
+            if !self.pending_motions.contains(&(object, region)) {
+                self.pending_motions.push((object, region));
+            }
+            return;
+        }
+        if speed <= 0.0 || (target - current).abs() < 0.01 {
             return;
         }
         let sounds = aux.sounds.clone();
@@ -1182,6 +1195,20 @@ impl Objects {
             self.motions.remove(k);
             let stop = self.list[obj].aux.as_ref().and_then(|a| a.sounds[2].clone());
             self.sound_from(obj, stop);
+        }
+        // Queued moves start once their region is free.
+        let mut k = 0;
+        while k < self.pending_motions.len() {
+            let (obj, region) = self.pending_motions[k];
+            let ceiling = self.list[obj].effect == fx::OSETC;
+            if self.motions.iter().any(|m| m.1 == region && m.4 == ceiling) {
+                k += 1;
+                continue;
+            }
+            self.pending_motions.remove(k);
+            let r = &level.world.regions[region];
+            let current = if ceiling { r.ceiling } else { r.floor };
+            self.start_height_motion(obj, region, current);
         }
 
         self.frame_accum += dt * FRAME_RATE;
@@ -1299,6 +1326,10 @@ impl Objects {
             return;
         }
         let effect = o.effect;
+        if effect == fx::OWALK {
+            self.walker_reward(i, by_projectile);
+            return;
+        }
         let accepts = match effect {
             fx::OBUMPSW | fx::OTELE | fx::OSELTOOL | fx::ORPOLY => !by_projectile,
             fx::OTAGSW | fx::OPICKUP | fx::OSOUND | fx::OTEXT | fx::OTIMER | fx::OSTRAP | fx::OSETF | fx::OSETC | fx::OSNDSEQ
@@ -1311,10 +1342,55 @@ impl Objects {
         }
     }
 
+    /// A plain (unscripted) OWALK bumped by the player or hit by their shot (object-effects.md
+    /// FUN_0045fe91): aux int1 units digit 1 = bodies only, 2 = shots only; with flag 0x1000 the
+    /// own tag fires once per hit while the +0x54 counter lasts, then a used-up counter "kills"
+    /// when the tens digit is 1 (destroyed unless aux slot 7 names an object; then int3 fires).
+    fn walker_reward(&mut self, i: usize, by_projectile: bool) {
+        let o = &self.list[i];
+        let aux = o.aux.clone();
+        let int = |k: usize| aux.as_ref().map_or(0, |a| a.ints[k]);
+        let code = int(1);
+        let (units, tens) = (code % 10, code / 10 % 10);
+        if (units == 1 && by_projectile) || (units == 2 && !by_projectile) {
+            return;
+        }
+        let tag = if code == 3 && by_projectile { int(2) } else { o.tag };
+        let mut kill = false;
+        if o.flags & 0x1000 == 0 {
+            self.push_tag(tag);
+        } else {
+            let left = o.counter;
+            self.list[i].counter = if left == 0 { -1 } else { left - 1 };
+            if left > 0 {
+                self.push_tag(tag);
+            } else if left == 0 {
+                kill = tens == 1;
+            }
+        }
+        self.sound_from(i, aux.as_ref().and_then(|a| a.sounds[if by_projectile { 4 } else { 3 }].clone()));
+        if kill {
+            let survives = aux.as_ref().and_then(|a| a.slot(7)).is_some_and(|n| !self.find(n).is_empty());
+            if !survives {
+                self.list[i].destroyed = true;
+            }
+            self.push_tag(int(3));
+        }
+    }
+
+    fn push_tag(&mut self, tag: i32) {
+        if tag > 0 {
+            self.requests.push(ObjRequest::Tag(tag as u32));
+        }
+    }
+
     fn apply_mover_requests(&mut self, i: usize, reqs: Vec<MoverRequest>, player: Option<&PlayerView>) {
         for r in reqs {
             match r {
                 MoverRequest::Ini(line) => self.requests.push(ObjRequest::Ini(line)),
+                // Lips scripts fire 661 when a bot touches the player (combat.md §4.3): the player
+                // is hit, like a shot's tag.
+                MoverRequest::Tag(BOT_TOUCH_TAG) => self.requests.push(ObjRequest::PlayerHit(BOT_TOUCH_TAG)),
                 MoverRequest::Tag(t) => self.requests.push(ObjRequest::Tag(t)),
                 MoverRequest::TagRange(a, b) => self.requests.push(ObjRequest::TagRange(a, b)),
                 MoverRequest::Message { color, text } => self.requests.push(ObjRequest::Message { color, text }),
@@ -1542,7 +1618,7 @@ impl Objects {
                 // Object hits.
                 if from_player {
                     let target = self.list.iter().enumerate().position(|(j, t)| {
-                        j != i && t.in_world() && matches!(t.kind, Kind::Normal) && t.mover.is_some() && (t.x - x).abs() < t.radius + PROJECTILE_RADIUS
+                        j != i && t.in_world() && matches!(t.kind, Kind::Normal) && (t.mover.is_some() || t.effect == fx::OWALK) && (t.x - x).abs() < t.radius + PROJECTILE_RADIUS
                             && (t.y - y).abs() < t.radius + PROJECTILE_RADIUS && z <= t.z + t.height && t.z <= z + PROJECTILE_HEIGHT
                     });
                     if let Some(t) = target {

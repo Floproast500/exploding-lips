@@ -172,7 +172,9 @@ impl Player {
         // our height: blocking walls, closed portals and passable lines being approached. Each
         // fires once per continuous contact; a closed door face touched while standing on an
         // open doorway line is still touched.
-        let reach = params.radius + CONTACT_MARGIN;
+        // Walls hold the body exactly radius + margin away, so allow a unit for rounding (the
+        // original tests the attempted position, before the push-out).
+        let reach = params.radius + CONTACT_MARGIN + 1.0;
         let height = if self.crouching { params.crouch_eye } else { params.height };
         let mut near: Vec<(f32, usize)> = Vec::new();
         for (wi, wall) in world.walls.iter().enumerate() {
@@ -340,7 +342,9 @@ impl Player {
         let (sx, sy) = (dx / steps as f32, dy / steps as f32);
         for _ in 0..steps {
             let (mut nx, mut ny) = (self.x + sx, self.y + sy);
-            // Push out of every blocking wall within the radius (two passes settle corners).
+            // Push out of every blocking wall to radius + 12 (physics.md §8.1: solid walls hold
+            // the body that far away; two passes settle corners).
+            let keep = params.radius + CONTACT_MARGIN;
             for _ in 0..2 {
                 for (wi, wall) in world.walls.iter().enumerate() {
                     if !self.wall_blocks(world, params, wi) {
@@ -348,29 +352,55 @@ impl Player {
                     }
                     let (ax, ay) = world.vertices[wall.a];
                     let (bx, by) = world.vertices[wall.b];
-                    if nx < ax.min(bx) - params.radius
-                        || nx > ax.max(bx) + params.radius
-                        || ny < ay.min(by) - params.radius
-                        || ny > ay.max(by) + params.radius
-                    {
+                    if nx < ax.min(bx) - keep || nx > ax.max(bx) + keep || ny < ay.min(by) - keep || ny > ay.max(by) + keep {
                         continue;
                     }
-                    let (px, py) = closest_point(ax, ay, bx, by, nx, ny);
-                    let (ox, oy) = (nx - px, ny - py);
-                    let d2 = ox * ox + oy * oy;
-                    if d2 < params.radius * params.radius && d2 > 1e-8 {
-                        let d = d2.sqrt();
-                        let push = params.radius - d;
-                        nx += ox / d * push;
-                        ny += oy / d * push;
+                    let (ex, ey) = (bx - ax, by - ay);
+                    let len = ex.hypot(ey);
+                    let t = if len > 0.0 { ((nx - ax) * ex + (ny - ay) * ey) / (len * len) } else { 0.0 };
+                    if len > 0.0 && (0.0..=1.0).contains(&t) {
+                        // Along the wall: back out to `keep` on the side the body came from, so
+                        // it can never be pushed through (physics.md §8.1).
+                        let (ux, uy) = (-ey / len, ex / len);
+                        let side_of = |x: f32, y: f32| (x - ax) * ux + (y - ay) * uy;
+                        let old = side_of(self.x, self.y);
+                        let new = side_of(nx, ny);
+                        let sign = if old.abs() > 1e-3 { old.signum() } else if new != 0.0 { new.signum() } else { 1.0 };
+                        if new * sign < keep {
+                            let push = sign * keep - new;
+                            nx += ux * push;
+                            ny += uy * push;
+                        }
+                    } else {
+                        // Past an end: push radially off the corner.
+                        let (px, py) = closest_point(ax, ay, bx, by, nx, ny);
+                        let (ox, oy) = (nx - px, ny - py);
+                        let d2 = ox * ox + oy * oy;
+                        if d2 < keep * keep && d2 > 1e-8 {
+                            let d = d2.sqrt();
+                            let push = keep - d;
+                            nx += ox / d * push;
+                            ny += oy / d * push;
+                        }
                     }
                 }
+            }
+            // A gap too narrow for the body: the whole step is undone (unless already squeezed,
+            // e.g. placed there, so the body can always get out).
+            if self.near_blocking_wall(world, params, nx, ny, keep - 1.0) && !self.near_blocking_wall(world, params, self.x, self.y, keep - 1.0) {
+                continue;
             }
             let current = &world.regions[self.region];
             let target = if current.below.is_none() && current.above.is_none() && world.point_in_region(nx, ny, self.region) {
                 Some(self.region)
             } else {
-                world.region_at_z(nx, ny, Some(self.z))
+                // The region the point is in, if the body can step onto its floor (a raised
+                // region nested in another, like a pedestal: crossing onto it re-homes the body
+                // and raises it, physics.md §8.2); else the one at our height (stacked levels).
+                world.region_at(nx, ny).filter(|&r| {
+                    let reg = &world.regions[r];
+                    reg.floor - self.z <= params.step_height && self.z < reg.ceiling
+                }).or_else(|| world.region_at_z(nx, ny, Some(self.z)))
             };
             if let Some(region) = target {
                 let floor = world.solid_floor(region).0;
@@ -386,6 +416,19 @@ impl Player {
                 }
             }
         }
+    }
+
+    /// Whether a blocking wall is closer than `dist` to (x, y).
+    fn near_blocking_wall(&self, world: &World, params: &PhysicsParams, x: f32, y: f32, dist: f32) -> bool {
+        world.walls.iter().enumerate().any(|(wi, wall)| {
+            let (ax, ay) = world.vertices[wall.a];
+            let (bx, by) = world.vertices[wall.b];
+            if x < ax.min(bx) - dist || x > ax.max(bx) + dist || y < ay.min(by) - dist || y > ay.max(by) + dist {
+                return false;
+            }
+            let (px, py) = closest_point(ax, ay, bx, by, x, y);
+            (x - px).hypot(y - py) < dist && self.wall_blocks(world, params, wi)
+        })
     }
 
     fn wall_blocks(&self, world: &World, params: &PhysicsParams, wall: usize) -> bool {
@@ -436,7 +479,7 @@ mod tests {
         for _ in 0..200 {
             player.tick(&world, &input, &params);
         }
-        assert!((player.x - (256.0 - params.radius)).abs() < 1.0, "x = {}", player.x);
+        assert!((player.x - (256.0 - params.radius - CONTACT_MARGIN)).abs() < 1.0, "x = {}", player.x);
         assert!((player.y - 128.0).abs() < 0.01);
     }
 

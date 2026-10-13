@@ -208,8 +208,35 @@ impl Effects {
         self.regions.iter().filter(|r| matches!(r.kind, RegionKind::Door { .. } | RegionKind::Rotate(_))).map(|r| (r.region, r.tag)).collect()
     }
 
+    /// Auto-close delay (seconds) of each RTDOOR that has one.
+    pub fn door_waits(&self) -> Vec<(usize, f64)> {
+        self.regions.iter().filter_map(|r| match r.kind {
+            RegionKind::Door { wait: Some(w), .. } => Some((r.region, w)),
+            _ => None,
+        }).collect()
+    }
+
+    /// Perpetual lifts (RFUP1): (region, bottom floor).
+    pub fn lifts(&self) -> Vec<(usize, f32)> {
+        self.regions.iter().filter_map(|r| match r.kind {
+            RegionKind::Lift { bottom, .. } => Some((r.region, bottom)),
+            _ => None,
+        }).collect()
+    }
+
     /// Regions that fire tags when entered, left, landed on or bumped (ceiling): (region,
     /// the tags, 0 = none).
+    /// Activator codes (aux +0x98) of trigger regions.
+    pub fn trigger_codes(&self) -> Vec<(usize, i32)> {
+        self.regions
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RegionKind::Trigger { aux: Some(a), .. } => Some((r.region, a.p98())),
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn triggers(&self) -> Vec<(usize, [i32; 4])> {
         self.regions
             .iter()
