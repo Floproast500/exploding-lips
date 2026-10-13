@@ -57,6 +57,9 @@ struct Goal {
 /// places: a corridor under a walkway that is solid from the room around it).
 type Cell = (i32, i32, i32, usize);
 
+/// A move that failed: from cell, to cell (x, y in grid steps), doors key at the time.
+type BadMove = ((i32, i32), (i32, i32), u64);
+
 /// A cached planner step: where it starts and ends, and the heights it was tested with.
 #[derive(Debug, Clone, Copy)]
 struct Edge {
@@ -108,7 +111,8 @@ struct Bot<'a> {
     /// Regions the last failed plan got to (seeds for the region-level route).
     reached: HashSet<usize>,
     /// Cell-to-cell moves that failed in the real game.
-    bad_moves: HashSet<((i32, i32), (i32, i32))>,
+    /// (with the doors as they were: a door shutting in our face does not make the way bad).
+    bad_moves: HashSet<BadMove>,
     /// Every region the player has stood in.
     visited: HashSet<usize>,
     /// Planner steps already simulated: (grid spot, direction) → result.
@@ -309,7 +313,8 @@ impl<'a> Bot<'a> {
         let cell = |p: (f32, f32)| ((p.0 / STEP).round() as i32, (p.1 / STEP).round() as i32);
         let to = cell(steps[k].to);
         let from = if k == 0 { let p = self.session().player; cell((p.x, p.y)) } else { cell(steps[k - 1].to) };
-        self.bad_moves.insert((from, to));
+        let doors = self.doors_key();
+        self.bad_moves.insert((from, to, doors));
     }
 
     /// Regions connected to the player's through open portals.
@@ -660,7 +665,7 @@ impl<'a> Bot<'a> {
                 };
                 let Some((q, (jump, crouch))) = result else { continue };
                 let cell_of = |x: f32, y: f32| ((x / STEP).round() as i32, (y / STEP).round() as i32);
-                if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y))) {
+                if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y), doors)) {
                     continue;
                 }
                 if (dx == 0.0 || dy == 0.0) && dx.abs() + dy.abs() == 1.0 {
@@ -1217,8 +1222,8 @@ impl<'a> Bot<'a> {
             if self.used.contains(&goal.target) || goal.target == Target::Region(WAYPOINT) {
                 self.repeats += 1;
                 // Shut in with only old switches (a one-way area): back to the start, as a
-                // player would get out by dying; give up if that changes nothing twice.
-                if self.repeats > 60 && self.idle_respawns < 2 && self.respawn() {
+                // player would get out by dying; give up if that changes nothing five times.
+                if self.repeats > 60 && self.idle_respawns < 5 && self.respawn() {
                     let p = self.session().player;
                     self.note(format!("     only old switches here: back to the start at ({:.0}, {:.0})", p.x, p.y));
                     self.idle_respawns += 1;
