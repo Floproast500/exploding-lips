@@ -1637,6 +1637,17 @@ impl<'a> Bot<'a> {
             if reached {
                 let before = self.area();
                 self.interact(&goal);
+                // A switch may have set a door moving: plan once it is open (or shut), not
+                // while it is still a closed doorway (up to 4 s).
+                if matches!(goal.target, Target::Wall(_) | Target::Object(_)) {
+                    let idle = Input::default();
+                    for _ in 0..(TICK_RATE as usize * 4) {
+                        if !self.session().effects.doors_moving() || self.level_done() {
+                            break;
+                        }
+                        self.tick(&idle);
+                    }
+                }
                 // A trigger that fires on leaving: step back out the way we came.
                 if let Target::Region(r) = goal.target
                     && self.session().effects.triggers().iter().any(|(t, tags)| *t == r && tags[1] > 0)
