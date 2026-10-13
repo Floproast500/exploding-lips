@@ -1341,3 +1341,21 @@ fn lips09_raised_strip_door_lets_the_player_through() {
     let p = game.session().unwrap().player;
     assert!(p.y < 18960.0 || p.region != 540, "through the door: ({}, {}) r{}", p.x, p.y, p.region);
 }
+
+/// Running at LIPS09's strip r532 (16 deep, door r533 shut behind it): the body crosses into
+/// the strip and the door pushes it back out within one tick, which is still a re-home into
+/// it, so its enter tag opens the door (world-effects.md §1: enter fires on every re-home).
+#[test]
+fn lips09_running_at_a_thin_strip_opens_its_door() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS09") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (13248.0, 18900.0, 0.0, 170);
+        s.previous = s.player;
+    }
+    hold(&mut game, &vfs, &[Action::Forward, Action::Run], 120, -std::f32::consts::FRAC_PI_2);
+    let p = game.session().unwrap().player;
+    assert!(p.y < 18680.0, "ran through the door: ({}, {}) r{}", p.x, p.y, p.region);
+}

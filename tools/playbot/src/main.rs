@@ -841,9 +841,25 @@ impl<'a> Bot<'a> {
                 if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level && !need_inside {
                     break;
                 }
-                // Pressed against a thin strip a shut door pushes us out of: entering it at all
-                // fired it.
-                if need_inside && stalled > 30 && d < 24.0 {
+                // Held just short of a thin strip a shut door pushes us out of: back off and take
+                // a run-up (crossing into it at all fires it); then let it count.
+                if need_inside && stalled == 30 && d < 24.0 {
+                    let away = facing(step.to, (p.x, p.y));
+                    for (ticks, angle, run) in [(20, away, false), (40, facing((p.x, p.y), step.to), true)] {
+                        for _ in 0..ticks {
+                            let s = self.game.session_mut().expect("session");
+                            s.player.angle = angle;
+                            let mut input = Input::default();
+                            input.set(Action::Forward, true);
+                            input.set(Action::Run, run);
+                            self.tick(&input);
+                            if run && inside.is_some_and(|r| self.session().player.region == r) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                if need_inside && stalled > 80 && d < 24.0 {
                     return true;
                 }
                 if d < close && dz > 40.0 && p.on_ground && k > 0 {

@@ -107,6 +107,11 @@ pub struct Player {
     /// Last wall touched; a wall fires once per continuous contact (world-effects.md §1.1).
     /// Walls in contact at the last update (each fires once per continuous contact).
     touching: [u32; MAX_CONTACTS],
+    /// Regions re-homed into during the last tick, in order (physics.md §8.2: every crossing
+    /// re-homes, and each re-home sends leave/enter, world-effects.md §1: a body bounced back
+    /// out of a thin region within one tick still entered it).
+    crossed: [u32; MAX_CROSSINGS],
+    crossed_n: u8,
     /// Yaw (radians) and look (units) the last tick took from mouse/stick look. The camera
     /// shows that part immediately instead of interpolating it, so look stays 1:1.
     pub direct_turn: f32,
@@ -129,6 +134,8 @@ pub enum PlayerEvent {
 
 /// Extra distance beyond the radius at which walls count as touched.
 const CONTACT_MARGIN: f32 = 12.0;
+/// Region changes recorded per tick (a tick moves at most a few sub-steps).
+const MAX_CROSSINGS: usize = 8;
 
 impl Player {
     pub fn new(world: &World, x: f32, y: f32, angle: f32) -> Self {
@@ -138,7 +145,7 @@ impl Player {
 
     pub fn in_region(world: &World, x: f32, y: f32, angle: f32, region: usize) -> Self {
         let z = world.regions.get(region).map_or(0.0, |r| r.floor);
-        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, touching: [u32::MAX; MAX_CONTACTS], direct_turn: 0.0, direct_look: 0.0 }
+        Self { x, y, z, vz: 0.0, angle, look: 0.0, region, on_ground: true, crouching: false, jumping: false, flying: false, touching: [u32::MAX; MAX_CONTACTS], crossed: [0; MAX_CROSSINGS], crossed_n: 0, direct_turn: 0.0, direct_look: 0.0 }
     }
 
     pub fn eye_z(&self, params: &PhysicsParams) -> f32 {
@@ -155,8 +162,18 @@ impl Player {
         let airborne_before = !self.on_ground;
         let vz_before = self.vz;
         self.tick(world, input, params);
-        if self.region != region_before {
-            events.push(PlayerEvent::LeftRegion(region_before));
+        let mut at = region_before;
+        for &r in &self.crossed[..self.crossed_n as usize] {
+            let r = r as usize;
+            if r != at {
+                events.push(PlayerEvent::LeftRegion(at));
+                events.push(PlayerEvent::EnteredRegion(r));
+                at = r;
+            }
+        }
+        // (Changes made outside the moves, or past the record's end.)
+        if self.region != at {
+            events.push(PlayerEvent::LeftRegion(at));
             events.push(PlayerEvent::EnteredRegion(self.region));
         }
         if airborne_before && self.on_ground {
@@ -205,6 +222,7 @@ impl Player {
     }
 
     pub fn tick(&mut self, world: &World, input: &Input, params: &PhysicsParams) {
+        self.crossed_n = 0;
         let strafe_mod = input.held(Action::StrafeModifier);
         let mut turn = 0.0;
         let mut strafe = input.move_axis.0;
@@ -440,6 +458,10 @@ impl Player {
                     self.y = ny;
                     if region != self.region {
                         self.region = region;
+                        if (self.crossed_n as usize) < MAX_CROSSINGS {
+                            self.crossed[self.crossed_n as usize] = region as u32;
+                            self.crossed_n += 1;
+                        }
                         if floor > self.z {
                             self.z = floor; // step up
                         }
