@@ -612,7 +612,13 @@ impl<'a> Bot<'a> {
                 (7.0, 0.0), (-7.0, 0.0), (0.0, 7.0), (0.0, -7.0),
                 (8.0, 0.0), (-8.0, 0.0), (0.0, 8.0), (0.0, -8.0),
             ];
+            // Straight one-cell moves that worked from here (diagonals need both beside them:
+            // no cutting through a corner where two rooms only touch at a point).
+            let mut straight_ok: HashSet<(i32, i32)> = HashSet::new();
             for (dx, dy) in MOVES {
+                if dx != 0.0 && dy != 0.0 && dx.abs() == 1.0 && dy.abs() == 1.0 && !(straight_ok.contains(&(dx as i32, 0)) && straight_ok.contains(&(0, dy as i32))) {
+                    continue;
+                }
                 let to = (((p.x / STEP).round() + dx) * STEP, ((p.y / STEP).round() + dy) * STEP);
                 let long = dx.abs() > 1.0 || dy.abs() > 1.0;
                 if long {
@@ -640,6 +646,9 @@ impl<'a> Bot<'a> {
                     }
                 };
                 let Some((q, (jump, crouch))) = result else { continue };
+                if (dx == 0.0 || dy == 0.0) && dx.abs() + dy.abs() == 1.0 {
+                    straight_ok.insert((dx as i32, dy as i32));
+                }
                 // Never into a region that kills on entry (tag 3 sends you back to the start),
                 // nor jump where landing does.
                 // (Landing kills: no jump into it, and no drop of more than a step either.)
@@ -712,8 +721,11 @@ impl<'a> Bot<'a> {
     fn walk_to(&mut self, steps: &[Step], close_last: f32, inside: Option<usize>) -> bool {
         let last = steps.len().saturating_sub(1);
         for (k, step) in steps.iter().enumerate() {
-            // Intermediate spots only need passing near; the goal itself a little closer.
-            let close = if k == last { close_last } else { 16.0 };
+            // Intermediate spots only need passing near; the goal itself a little closer; and
+            // right before a change of level (a drop or a jump planned from this very spot)
+            // close enough to start it from where the planner did.
+            let next_level_change = steps.get(k + 1).is_some_and(|n| n.jump || matches!((step.z, n.z), (Some(a), Some(b)) if (a - b).abs() > 24.0));
+            let close = if k == last { close_last } else if next_level_change { 5.0 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
             loop {
@@ -1148,7 +1160,7 @@ impl<'a> Bot<'a> {
             };
             self.waits = 0;
             // Only ever re-pressing old switches: nothing new is reachable.
-            if self.used.contains(&goal.target) {
+            if self.used.contains(&goal.target) || goal.target == Target::Region(WAYPOINT) {
                 self.repeats += 1;
                 // Shut in with only old switches (a one-way area): back to the start, as a
                 // player would get out by dying; give up if that changes nothing twice.
