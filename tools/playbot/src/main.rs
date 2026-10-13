@@ -649,7 +649,11 @@ impl<'a> Bot<'a> {
             let moved = (p.x - x0).hypot(p.y - y0);
             // Arrived: on the spot, about to pass it, or held up just short of it.
             let after = (p.x - to.0).hypot(p.y - to.1);
-            if after < 6.0 || (before <= moved + 1.0 && moved > 0.5) || (after < 16.0 && moved < 0.5 && p.on_ground) {
+            if after < 6.0 || (before <= moved + 1.0 && moved > 0.5) || (after < 16.0 && moved < 0.5 && (p.on_ground || p.flying)) {
+                // Flying (swimming): no ground to come to rest on.
+                if p.flying {
+                    return Some(p);
+                }
                 // Settle: come to rest on the ground.
                 let idle = Input::default();
                 for _ in 0..300 {
@@ -841,6 +845,31 @@ impl<'a> Bot<'a> {
                     open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
                 }
             }
+            // Flying (swimming): also straight up (Jump held) or down (Crouch held), a band of
+            // 48 at a time.
+            if p.flying {
+                for up in [true, false] {
+                    let mut q = p;
+                    let mut i = Input::default();
+                    i.set(if up { Action::Jump } else { Action::Crouch }, true);
+                    for _ in 0..90 {
+                        let z0 = q.z;
+                        q.tick(world, &i, &physics);
+                        if (q.z - p.z).abs() >= 48.0 || (q.z - z0).abs() < 0.01 {
+                            break;
+                        }
+                    }
+                    if (q.z - p.z).abs() < 12.0 || !q.flying {
+                        continue;
+                    }
+                    let qk = key(&q);
+                    let c = cost + 1.5;
+                    if came.get(&qk).is_none_or(|e| c < e.1) {
+                        came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump: up, crouch: !up }))));
+                        open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
+                    }
+                }
+            }
         }
         self.reached = came.keys().map(|c| c.3).collect();
         None
@@ -942,7 +971,8 @@ impl<'a> Bot<'a> {
                 // Arrived only at about the planned height (a step 16 up in the next region is
                 // not the spot); far off it, the plan went another way: give up on it.
                 let dz = step.z.map_or(0.0, |z| (p.z - z).abs());
-                let level = dz < 12.0 || !p.on_ground;
+                // (Flying, height is steered: arrived only at it.)
+                let level = dz < 12.0 || (!p.on_ground && !p.flying);
                 // Held up just short of a precise spot before a drop (a wall in the way from
                 // this side): close enough. Not before a jump, which needs its run-up spot.
                 let next_jump = steps.get(k + 1).is_some_and(|n| n.jump);
@@ -982,8 +1012,10 @@ impl<'a> Bot<'a> {
                     self.mark_bad(steps, k);
                     return false;
                 }
-                if d < best - 0.5 {
-                    best = d;
+                // (Flying, rising or sinking toward the planned height is progress too.)
+                let progress = if p.flying { d + dz } else { d };
+                if progress < best - 0.5 {
+                    best = progress;
                     stalled = 0;
                 } else {
                     stalled += 1;
@@ -1020,7 +1052,16 @@ impl<'a> Bot<'a> {
                 // The planned jump, or a hop when stuck against a ledge.
                 let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && self.death_tags().contains(&t.1[2]));
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
-                input.set(Action::Jump, (step.jump && stalled == 0 && best == d) || (!deadly && (stalled == 30 || stalled == 60)));
+                input.set(Action::Jump, (step.jump && stalled == 0 && best == progress) || (!deadly && (stalled == 30 || stalled == 60)));
+                // Flying (swimming): hold Jump to rise, Crouch to sink to the planned height;
+                // straight up or down, no forward.
+                if p.flying && let Some(z) = step.z {
+                    input.set(Action::Jump, z > p.z + 6.0);
+                    input.set(Action::Crouch, z < p.z - 6.0);
+                    if d < 6.0 {
+                        input.set(Action::Forward, false);
+                    }
+                }
                 self.tick(&input);
             }
         }
