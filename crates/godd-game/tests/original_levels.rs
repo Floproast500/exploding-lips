@@ -1359,3 +1359,28 @@ fn lips09_running_at_a_thin_strip_opens_its_door() {
     let p = game.session().unwrap().player;
     assert!(p.y < 18680.0, "ran through the door: ({}, {}) r{}", p.x, p.y, p.region);
 }
+
+/// g_fixes: firing in LIPS00's BSP world plays the tool's use animation (the orb, and its
+/// tool, is frozen there, so in the original nothing at all shows); classic keeps it still.
+#[test]
+fn lips00_firing_in_the_bsp_world_animates_the_tool_with_fixes() {
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS00") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 0.2);
+        game.session_mut().unwrap().fire_tag(132);
+        run(&mut game, &vfs, 0.5);
+        let s = game.session().unwrap();
+        assert!(s.in_bsp);
+        let idle = s.objects.weapon_pic(&s.level);
+        let mut fire = godd_game::Input::default();
+        fire.set(godd_game::Action::Use, true);
+        let mut changed = false;
+        for _ in 0..60 {
+            game.tick(&vfs, &fire);
+            let s = game.session().unwrap();
+            changed |= s.objects.weapon_pic(&s.level) != idle;
+        }
+        assert_eq!(changed, fixes, "fixes {fixes}: tool animated {changed}");
+    }
+}

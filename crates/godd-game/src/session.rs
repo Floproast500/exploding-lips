@@ -351,6 +351,9 @@ impl Session {
             }
         }
         if self.in_bsp {
+            if self.fixes {
+                self.objects.dry_fire_tick(&self.level, 1.0 / TICK_RATE as f32, input.held(Action::Use));
+            }
             self.bsp_tick(input);
             return;
         }

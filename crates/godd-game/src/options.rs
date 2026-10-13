@@ -47,12 +47,12 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.float("joy_gyro_sensitivity", "Gyro speed", Controls, (0.2, 4.0, 0.1), 1.0);
     c.bool("cl_autorun", "Always run", Controls, false);
     c.bool("cl_togglecrouch", "Toggle crouch", Controls, false);
-    c.choice("hud_style", "HUD", Hud, &["classic", "modern"], 1);
+    c.choice("hud_style", "HUD style", Hud, &["classic", "modern"], 1);
     c.int("hud_scale", "HUD scale (0 = auto)", Hud, (0, 8, 1), 0);
     c.choice("crosshair", "Crosshair", Hud, &["off", "dot", "cross", "circle"], 0);
     c.bool("hud_fps", "Show FPS", Hud, false);
     c.bool("hud_hd", "HD HUD and menus (GPU)", Hud, true);
-    c.bool("hud_guides", "Show the way forward (glowing teleporters, switches, exit)", Hud, true);
+    c.bool("hud_guides", "Guides (glowing exits)", Hud, true);
     c.bool("hud_smooth", "Smooth HD text", Hud, true);
     c.bool("am_textured", "Map: textured floors", Hud, true);
     c.bool("am_rotate", "Map: rotate with view", Hud, true);
@@ -545,7 +545,10 @@ impl OptionsMenu {
 
 fn draw_panel(frame: &mut Frame, title: &str, rows: &[String], selected: usize, colors: (u8, u8, u8, u8)) {
     let (bg, border, text, highlight) = colors;
-    let s = (frame.height / 200).max(1);
+    // As big as the screen height allows, but never wider than the screen (values sit at the
+    // right end of long rows).
+    let widest = rows.iter().map(|r| r.chars().count()).chain(std::iter::once(title.chars().count())).max().unwrap_or(0);
+    let s = (frame.height / 200).min(frame.width / ((widest + 2) * GLYPH).max(1)).max(1);
     let line = (GLYPH + 4) * s;
     // Long pages scroll: show a window of rows that keeps the selection visible.
     let fits = (frame.height / line).saturating_sub(3).max(3);
@@ -595,6 +598,31 @@ mod tests {
             }
             for (_, a) in t.iter() {
                 assert!(Action::from_name(a).is_some(), "unknown action {a}");
+            }
+        }
+    }
+
+    /// Every page fits the screen, values included (the HUD page's long labels used to push
+    /// the values off the right edge).
+    #[test]
+    fn pages_fit_the_screen() {
+        let mut c = CvarRegistry::default();
+        register_cvars(&mut c);
+        let b = default_binds(Profile::Modern);
+        let mut pages = vec![Page::Main, Page::Bindings, Page::Packs];
+        pages.extend(categories(&c).into_iter().map(Page::Category));
+        for (w, h) in [(640, 480), (1720, 720), (3440, 1440), (320, 200)] {
+            for &page in &pages {
+                let mut m = OptionsMenu { open: true, page, ..OptionsMenu::default() };
+                m.selected = 0;
+                let mut frame = Frame::new(w, h);
+                frame.record_ui(true);
+                m.draw(&mut frame, &c, &b, (1, 2, 3, 4));
+                for cmd in frame.ui_list.as_ref().unwrap() {
+                    if let engine_core::frame::UiCmd::Glyph { x, scale, .. } = *cmd {
+                        assert!(x >= 0 && x as usize + GLYPH * scale as usize <= w, "{page:?} at {w}x{h}: glyph at x {x}");
+                    }
+                }
             }
         }
     }

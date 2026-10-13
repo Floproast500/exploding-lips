@@ -1711,6 +1711,35 @@ impl Objects {
         }
     }
 
+    /// g_fixes, in the BSP world (where the orb, and with it the tool, is frozen and a shot
+    /// shows nothing): the current tool still plays its use animation and sound, with no shot
+    /// and no cost. Called per tick.
+    pub fn dry_fire_tick(&mut self, level: &Level, dt: f32, use_held: bool) {
+        self.tools.cooldown = (self.tools.cooldown - dt).max(0.0);
+        if let Some((tex, anim)) = &mut self.tools.anim
+            && let Some(seq) = level.sequences.get(*tex).and_then(Option::as_ref)
+        {
+            anim.advance(seq, dt);
+            anim.finished = false;
+        }
+        if !use_held || self.tools.cooldown > 0.0 {
+            return;
+        }
+        let Some(def) = self.tools.defs[self.tools.current].clone() else { return };
+        if let Some((tex, anim)) = &self.tools.anim
+            && level.sequences.get(*tex).and_then(Option::as_ref).is_some_and(|seq| !anim.is_idle(seq))
+        {
+            return;
+        }
+        self.tools.cooldown = 0.36;
+        self.sound(def.sounds[0].clone().or(def.sounds[4].clone()));
+        if let Some((tex, anim)) = self.tools.anim.as_mut()
+            && let Some(seq) = level.sequences.get(*tex).and_then(Option::as_ref)
+        {
+            *anim = anim::Player::start(seq, 1);
+        }
+    }
+
     /// Use key: start the current tool (cost check, use animation, sound).
     /// `states` are the player's OS values (OTOOLCON deducts from them).
     pub fn use_tool(&mut self, states: &mut [i32; 16], level: &Level) {
