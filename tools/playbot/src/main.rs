@@ -1174,7 +1174,9 @@ impl<'a> Bot<'a> {
                 if self.verbose {
                     println!("     waypoint plan {:?}", r.as_ref().map(|r| r.1.len()));
                 }
-                r
+                // Only worth it far away (the search ran out); a waypoint next to us means
+                // something else (a door) is in the way.
+                r.filter(|r| r.1.len() >= 10)
             });
             // Among old switches, the one pressed longest ago first (the nearest ones would
             // just cycle, e.g. an elevator's buttons).
