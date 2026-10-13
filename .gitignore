@@ -10,3 +10,5 @@ tools/pilot/launcher/*.exe
 tools/pilot/node_modules/
 re/*.log
 packs/
+__pycache__/
+*.pyc
