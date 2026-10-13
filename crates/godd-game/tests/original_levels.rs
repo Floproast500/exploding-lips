@@ -1322,3 +1322,22 @@ fn lips09_thin_strip_door_lets_the_player_through() {
     let p = game.session().unwrap().player;
     assert!(p.y < 18680.0, "through the door: ({}, {}) r{}", p.x, p.y, p.region);
 }
+
+/// LIPS09's door r543 (toggle, tag 25): its trigger strip r542 is a step (32) up from the
+/// room r540 and only 16 deep; walking at it opens the door and the player gets through (to
+/// the teleporter behind it).
+#[test]
+fn lips09_raised_strip_door_lets_the_player_through() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS09") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (15888.0, 19060.0, 0.0, 540);
+        s.previous = s.player;
+    }
+    let south = -std::f32::consts::FRAC_PI_2;
+    hold(&mut game, &vfs, &[Action::Forward], 120, south);
+    let p = game.session().unwrap().player;
+    assert!(p.y < 18960.0 || p.region != 540, "through the door: ({}, {}) r{}", p.x, p.y, p.region);
+}

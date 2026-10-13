@@ -219,15 +219,43 @@ impl<'a> Bot<'a> {
         }
         let Some(door) = first else { return Vec::new() };
         let tag = doors[&door];
+        // The door's tag, or a lock's (an ODROP firing it) while we carry the lock's key.
+        let carried: Vec<&str> = s.objects.inventory.iter().map(|&k| s.objects.list[k].name.as_str()).collect();
+        let tags: HashSet<i32> = std::iter::once(tag)
+            .chain(s.objects.list.iter().filter(|o| {
+                o.effect == 131 && o.tag > 0 && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag && a.slot(9).is_some_and(|item| carried.iter().any(|c| c.eq_ignore_ascii_case(item))))
+            }).map(|o| o.tag))
+            .collect();
         let opens: HashSet<Target> = s
             .effects
             .switches()
             .iter()
-            .filter(|sw| sw.tags.contains(&tag))
+            .filter(|sw| tags.iter().any(|t| sw.tags.contains(t)))
             .map(|sw| Target::Wall(sw.wall))
-            .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && o.tag == tag).map(|(i, _)| Target::Object(i)))
+            .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && tags.contains(&o.tag)).map(|(i, _)| Target::Object(i)))
             .collect();
         switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect()
+    }
+
+    /// Switch walls and objects that fire a lock (ODROP) whose key we carry and that has not
+    /// taken it yet.
+    fn key_locks(&self) -> HashSet<Target> {
+        let s = self.session();
+        let carried: Vec<&str> = s.objects.inventory.iter().map(|&k| s.objects.list[k].name.as_str()).collect();
+        let tags: HashSet<i32> = s
+            .objects
+            .list
+            .iter()
+            .filter(|o| o.effect == 131 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|item| carried.iter().any(|c| c.eq_ignore_ascii_case(item))))
+            .map(|o| o.tag)
+            .collect();
+        s.effects
+            .switches()
+            .iter()
+            .filter(|sw| tags.iter().any(|t| sw.tags.contains(t)))
+            .map(|sw| Target::Wall(sw.wall))
+            .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && tags.contains(&o.tag)).map(|(i, _)| Target::Object(i)))
+            .collect()
     }
 
     /// A spot about 24 regions along the region-level route (doors and floors as they are
@@ -459,14 +487,17 @@ impl<'a> Bot<'a> {
             let walk_into = match o.effect {
                 OPICKUP => true,
                 OTELE => o.name.is_empty() && o.aux.is_some(),
-                OTAGSW | OBUMPSW => true,
+                // (Tag switches out of reach overhead are shot: projectiles hit them.)
+                OTAGSW => o.region.is_some_and(|r| o.z - w.regions[r].floor < 72.0),
+                OBUMPSW => true,
                 // Plain walking bots fire their tag when bumped (or shot, if out of reach).
                 OWALK => o.mover.is_none() && o.tag > 0 && o.region.is_some_and(|r| o.z - w.regions[r].floor < 40.0),
                 _ => false,
             };
             if walk_into {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: false });
-            } else if (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) || self.boss.is_some_and(|(b, _)| b == i) {
+            } else if o.effect == OTAGSW
+                || (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) || self.boss.is_some_and(|(b, _)| b == i) {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
             }
         }
@@ -582,7 +613,7 @@ impl<'a> Bot<'a> {
                     if g.shoot {
                         // In range, not right underneath (aim is limited to about 60 degrees).
                         let dz = g.at[2] - p.z;
-                        d < 200.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0
+                        d < 320.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0
                     } else {
                         d < STEP * 0.75 && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)
                     }
@@ -809,6 +840,11 @@ impl<'a> Bot<'a> {
                 let need_inside = k == last && inside.is_some();
                 if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level && !need_inside {
                     break;
+                }
+                // Pressed against a thin strip a shut door pushes us out of: entering it at all
+                // fired it.
+                if need_inside && stalled > 30 && d < 24.0 {
+                    return true;
                 }
                 if d < close && dz > 40.0 && p.on_ground && k > 0 {
                     self.mark_bad(steps, k);
@@ -1177,7 +1213,9 @@ impl<'a> Bot<'a> {
                 }
             }
             // Switches never pressed before ones that were (toggling the same doors forever).
-            let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target));
+            // (A lock switch pressed before we had its key is new again once we carry it.)
+            let locks = self.key_locks();
+            let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
             let found = found.or_else(|| if new.is_empty() { None } else { self.plan(&new) });
             // Only old switches left: open the next shut door on the way to the nearest thing
             // not yet reached.
