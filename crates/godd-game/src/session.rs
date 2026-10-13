@@ -922,7 +922,8 @@ impl Session {
         }
     }
 
-    fn wall_named(&self, name: &str) -> Option<usize> {
+    /// A wall by its editor name (OWTOW targets and sources).
+    pub fn wall_named(&self, name: &str) -> Option<usize> {
         use godd_formats::xrb::Section;
         self.level.orb.records(Section::Walls).iter().position(|w| c_name(&w[0xb0..0xb8]).eq_ignore_ascii_case(name))
     }

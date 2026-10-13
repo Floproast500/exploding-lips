@@ -40,10 +40,23 @@ fn main() {
             None => 48.0,
         }
     };
+    // Walls an OWTOW can overwrite with a passable one (wall doors) count as open.
+    let opened: Vec<usize> = s
+        .objects
+        .list
+        .iter()
+        .filter(|o| o.effect == 67)
+        .filter_map(|o| {
+            let a = o.aux.as_ref()?;
+            let (t, src) = (s.wall_named(a.slot(9)?)?, s.wall_named(a.slot(8)?)?);
+            (!w.walls[src].blocking).then_some(t)
+        })
+        .collect();
     // Why the step from region r into o is not possible (None: it is).
     let blocked = |r: usize, o: usize, x: &godd_game::world::Wall| -> Option<&'static str> {
         let door = doors.contains(&o) || doors.contains(&r);
-        if x.blocking && !door {
+        let wall_door = w.walls.iter().position(|y| std::ptr::eq(y, x)).is_some_and(|i| opened.contains(&i));
+        if x.blocking && !door && !wall_door {
             Some("solid")
         } else if deadly.contains(&o) {
             Some("death pit")
@@ -64,6 +77,56 @@ fn main() {
             })
             .collect()
     };
+    // Teleports (OTELE onto an object, not back to a start point): from the region of a walk-in
+    // teleporter, or of the trigger region / wall switch firing a tag-driven one, to the
+    // destination's region; a flying destination template (LIPS00's swimmer) lets the player
+    // climb anywhere until a teleport onto a walking one.
+    let triggers = s.effects.triggers();
+    let switches = s.effects.switches();
+    let mut teleports: Vec<(usize, usize, bool)> = Vec::new();
+    for o in s.objects.list.iter().filter(|o| o.effect == 15 && !death.contains(&o.tag)) {
+        let Some(dest) = o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| s.objects.list.iter().find(|d| d.name.eq_ignore_ascii_case(n))) else { continue };
+        let Some(to) = dest.region else { continue };
+        let flying = dest.flags & 2 != 0;
+        let mut from_regions: Vec<usize> = o.region.into_iter().collect();
+        if o.tag > 0 {
+            from_regions.extend(triggers.iter().filter(|(_, t)| t[0] == o.tag || t[2] == o.tag).map(|(r, _)| *r));
+            from_regions.extend(switches.iter().filter(|sw| sw.tags.contains(&o.tag)).map(|sw| w.walls[sw.wall].front));
+        }
+        for f in from_regions {
+            teleports.push((f, to, flying));
+        }
+    }
+    // Forward, with the flying state.
+    let ahead = {
+        let mut seen = vec![[false; 2]; w.regions.len()];
+        seen[from][0] = true;
+        let mut queue = VecDeque::from([(from, false)]);
+        while let Some((r, fly)) = queue.pop_front() {
+            let mut next: Vec<(usize, bool)> = links(r)
+                .into_iter()
+                .filter(|(o, x)| match blocked(r, *o, x) {
+                    None => true,
+                    Some("too high") | Some("no headroom") => fly,
+                    _ => false,
+                })
+                .map(|(o, _)| (o, fly))
+                .collect();
+            next.extend(teleports.iter().filter(|t| t.0 == r).map(|t| (t.1, t.2)));
+            // Stacked levels: drop through a see-through floor; climb into the one above when
+            // it is in reach.
+            let reg = &w.regions[r];
+            next.extend(reg.below.filter(|b| !deadly.contains(b)).map(|b| (b, fly)));
+            next.extend(reg.above.filter(|&a| fly || rise(r, a) <= climb(r)).map(|a| (a, fly)));
+            for (o, f) in next {
+                if !seen[o][f as usize] {
+                    seen[o][f as usize] = true;
+                    queue.push_back((o, f));
+                }
+            }
+        }
+        seen.iter().map(|s| s[0] || s[1]).collect::<Vec<bool>>()
+    };
     let search = |starts: &[usize], forward: bool| -> Vec<bool> {
         let mut seen = vec![false; w.regions.len()];
         let mut queue: VecDeque<usize> = starts.iter().copied().collect();
@@ -81,7 +144,6 @@ fn main() {
         }
         seen
     };
-    let ahead = search(&[from], true);
     let behind = search(&exits, false);
     let reached = ahead.iter().filter(|&&a| a).count();
     match exits.iter().find(|&&e| ahead[e]) {
@@ -114,6 +176,15 @@ fn main() {
                 r = prev[r];
             }
             path.reverse();
+            if std::env::var("FRONTIER").is_ok() {
+                for r in (0..w.regions.len()).filter(|&r| ahead[r]) {
+                    for (o, x) in links(r) {
+                        if !ahead[o] {
+                            println!("  frontier r{r} (floor {}) -> r{o} (floor {}): {}", w.regions[r].floor, w.regions[o].floor, blocked(r, o, x).unwrap_or("?"));
+                        }
+                    }
+                }
+            }
             println!("  shortest way across:");
             for (a, b) in path {
                 let x = links(a).into_iter().find(|(o, _)| *o == b).map(|(_, x)| x).unwrap();
