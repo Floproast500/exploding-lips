@@ -1404,3 +1404,50 @@ fn lips00_bot_growls_are_positional() {
     assert!(!growls.is_empty(), "the bots growl");
     assert!(growls.iter().all(Option::is_some), "every growl has a position: {growls:?}");
 }
+
+/// LIPS06's corridor r53 is 64 wide with a chamfered corner (wall 103): walking into it, the
+/// two walls' pushes fight, and the body used to be shoved out through the diagonal (the view
+/// then sees out of the level). A push that lands outside the region undoes the step.
+#[test]
+fn lips06_chamfered_corner_never_pushes_the_body_out() {
+    use godd_game::Action;
+    // From inside the corridor, and from r80 through the foot of the portal (the playbot's
+    // way: re-homed into r53 beyond its diagonal).
+    for (from, target) in [((14880.0f32, 16300.0f32, 16.0f32, 53usize), (14850.0f32, 16050.0f32)), ((14880.0, 16300.0, 16.0, 53), (14840.0, 16100.0)), ((14944.0, 16081.0, 0.0, 80), (14887.0, 16078.0)), ((14944.0, 16081.0, 0.0, 80), (14860.0, 16060.0))] {
+        let Some((vfs, mut game)) = start("LIPS06") else { return };
+        run(&mut game, &vfs, 0.3);
+        {
+            let s = game.session_mut().unwrap();
+            (s.player.x, s.player.y, s.player.z, s.player.region) = from;
+            s.previous = s.player;
+        }
+        for _ in 0..60 {
+            let p = game.session().unwrap().player;
+            let angle = (target.1 - p.y).atan2(target.0 - p.x);
+            hold(&mut game, &vfs, &[Action::Forward, Action::Run], 1, angle);
+            let s = game.session().unwrap();
+            let p = s.player;
+            assert!(s.level.world.point_in_region(p.x, p.y, p.region), "toward {target:?}: out of r{} at ({}, {})", p.region, p.x, p.y);
+        }
+    }
+}
+
+/// Letting go of crouch in a space too low to stand (LIPS12's 39-high pickup nook r160) keeps
+/// the body crouched (physics.md §5.4), so the eye never pokes out above the ceiling.
+#[test]
+fn lips12_no_standing_up_under_a_low_ceiling() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS12") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (16384.0, 15552.0, 33.0, 160);
+        s.player.crouching = true;
+        s.previous = s.player;
+    }
+    hold(&mut game, &vfs, &[Action::Crouch], 10, 0.0);
+    run(&mut game, &vfs, 1.0);
+    let s = game.session().unwrap();
+    let eye = s.player.eye_z(&s.physics_override.unwrap_or_default());
+    assert!(s.player.crouching && eye < s.level.world.regions[160].ceiling, "eye {eye} under the ceiling {}", s.level.world.regions[160].ceiling);
+}

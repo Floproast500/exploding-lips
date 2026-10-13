@@ -264,7 +264,11 @@ impl Player {
         self.direct_look = self.look - before;
         self.direct_turn = -input.look_delta.0;
 
-        self.crouching = input.held(Action::Crouch) && !self.flying;
+        // Released, the body only stands up where there is room: Height <= ceil - floor - 8
+        // (physics.md §5.4, you stay crouched under low ceilings; else the eye pokes out above
+        // the ceiling).
+        let no_room = self.crouching && world.regions.get(self.region).is_some_and(|_| world.solid_ceiling(self.region).0 - self.z < params.height + params.head_clearance);
+        self.crouching = (input.held(Action::Crouch) || no_room) && !self.flying;
         let speed = PhysicsParams::per_tick(params.walk_speed) * if input.held(Action::Run) { 2.0 } else { 1.0 };
         let len = (forward * forward + strafe * strafe).sqrt();
         if len > 1.0 {
@@ -433,10 +437,15 @@ impl Player {
             let stacked = current.below.is_some() || current.above.is_some();
             let lost = !stacked && !world.point_in_region(self.x, self.y, self.region) && !world.point_in_region(nx, ny, self.region);
             let target = if let Some(r) = crossed {
-                Some(r)
+                // (Likewise a crossing that lands beyond the new region's own solid lines: the
+                // end of a portal where the region behind it is cut off by a diagonal.)
+                (world.point_in_region(nx, ny, r) || !world.point_in_region(self.x, self.y, self.region)).then_some(r)
             } else if !stacked && !lost {
-                // No line crossed: still in the same region.
-                Some(self.region)
+                // No line crossed: still in the same region, unless the push put the body out
+                // of it through a solid line (two walls of a narrow corner pushing against each
+                // other): a push that lands outside every region undoes the step (physics.md
+                // §8.1).
+                (world.point_in_region(nx, ny, self.region) || !world.point_in_region(self.x, self.y, self.region)).then_some(self.region)
             } else {
                 // The region the point is in, if the body can step onto its floor (a raised
                 // region nested in another, like a pedestal: crossing onto it re-homes the body

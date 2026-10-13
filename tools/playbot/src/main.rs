@@ -111,6 +111,8 @@ struct Bot<'a> {
     false_portals: std::cell::OnceCell<HashSet<usize>>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
+    /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
+    cam_reported: HashSet<(i32, i32, usize)>,
     /// The last level's boss (object, look): killing it ends the game.
     boss: Option<(usize, Option<usize>)>,
     /// Regions the last failed plan got to (seeds for the region-level route).
@@ -806,6 +808,23 @@ impl<'a> Bot<'a> {
         self.ticks += 1;
         if let Some(s) = self.game.session() {
             self.visited.insert(s.player.region);
+            // The camera must stay inside the level: the eye under its region's ceiling and
+            // over its floor, and the spot inside the region (else the view sees out).
+            if std::env::var("PLAYBOT_CAMCHECK").is_ok() && !s.in_bsp {
+                let p = &s.player;
+                let w = &s.level.world;
+                let physics = s.physics_override.unwrap_or_default();
+                let eye = p.eye_z(&physics);
+                let (ceiling, _) = w.solid_ceiling(p.region);
+                let (floor, _) = w.solid_floor(p.region);
+                let inside = w.point_in_region(p.x, p.y, p.region);
+                if eye > ceiling - 0.5 || eye < floor || !inside {
+                    let key = ((p.x / 64.0) as i32, (p.y / 64.0) as i32, p.region);
+                    if self.cam_reported.insert(key) {
+                        println!("CAMOUT t={:.1}s ({:.0},{:.0}) eye {:.0} r{} floor {} ceil {} inside {} crouch {}", self.ticks as f32 / TICK_RATE, p.x, p.y, eye, p.region, floor, ceiling, inside, p.crouching);
+                    }
+                }
+            }
             if self.ticks < 600 && std::env::var("PLAYBOT_TRACE0").is_ok() {
                 println!("       trace t{} r{} ({:.0},{:.0},{:.0}) r16 floor {}", self.ticks, s.player.region, s.player.x, s.player.y, s.player.z, s.level.world.regions.get(16).map_or(0.0, |r| r.floor));
             }
@@ -1505,7 +1524,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), route_fails: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), route_fails: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
