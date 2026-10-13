@@ -1074,13 +1074,21 @@ impl<'a> Bot<'a> {
             // ones do nothing). Not for switches and walkers: a long shot can hit a trap switch
             // further off.
             let boss = self.boss.is_some_and(|(b, _)| b == i);
-            if boss {
-                for &tool in Action::TOOLS.iter().rev().take(8) {
-                    let mut pick = Input::default();
-                    pick.set(tool, true);
-                    self.tick(&pick);
-                    self.tick(&Input::default());
-                }
+            // A switch overhead needs an aimed tool (the starting ones are lobbed: their shots
+            // stay low); missing tools do nothing, so the last available one pressed wins.
+            let overhead = self.session().objects.list.get(i).is_some_and(|o| o.effect == OTAGSW);
+            let picks: Vec<Action> = if boss {
+                Action::TOOLS.iter().rev().take(8).copied().collect()
+            } else if overhead {
+                [9, 7, 5, 4, 2].iter().filter_map(|&k| Action::TOOLS.get(k).copied()).collect()
+            } else {
+                Vec::new()
+            };
+            for tool in picks {
+                let mut pick = Input::default();
+                pick.set(tool, true);
+                self.tick(&pick);
+                self.tick(&Input::default());
             }
             let mut fire = Input::default();
             fire.set(Action::Use, true);
