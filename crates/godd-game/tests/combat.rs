@@ -343,3 +343,39 @@ fn lips05_jump_pads_carry_the_player_to_the_blue_gem() {
     assert_eq!(p.region, 368, "on the gem's pedestal: ({}, {}, {}) r{}", p.x, p.y, p.z, p.region);
 }
 
+
+/// LIPS00's water room: landing in r468 fires tag 77, and WATER1 (OTELE) sends the player onto
+/// the template SWIMMER1 in r303, taking on its body (MoveObjToObject, object-effects.md
+/// OTELE): it flies (flag 0x2), so Jump swims up (the original rises to z = 454 in 3 s, measured
+/// under Wine). WATER2 sends the player onto SWIMMER2, which walks again.
+#[test]
+fn lips00_water_teleport_makes_the_player_swim() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    game.tick(&vfs, &godd_game::Input::default());
+    {
+        let s = game.session_mut().unwrap();
+        s.god = true;
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (17760.0, 14400.0, -100.0, 468);
+        s.player.on_ground = false;
+        s.previous = s.player;
+    }
+    for _ in 0..60 {
+        game.tick(&vfs, &godd_game::Input::default());
+    }
+    let p = game.session().unwrap().player;
+    assert_eq!(p.region, 303, "in the water room: ({}, {}, {}) r{}", p.x, p.y, p.z, p.region);
+    assert!(p.flying, "swimming");
+    let start_z = p.z;
+    let mut up = godd_game::Input::default();
+    up.set(Action::Jump, true);
+    for _ in 0..(3.0 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &up);
+    }
+    let z = game.session().unwrap().player.z;
+    assert!((380.0..520.0).contains(&(z - start_z)), "swam up from {start_z} to {z} (original: about 450 in 3 s)");
+    game.session_mut().unwrap().fire_tag(78);
+    game.tick(&vfs, &godd_game::Input::default());
+    let s = game.session().unwrap();
+    assert!(!s.player.flying, "SWIMMER2 walks again");
+}

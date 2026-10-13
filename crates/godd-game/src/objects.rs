@@ -162,6 +162,9 @@ pub struct Obj {
     home: (f32, f32, f32),
     /// Max forward speed (+0x7c, units per 1.2 s).
     pub speed: f32,
+    /// Max speeds +0x7c..+0x88: forward, sideways, vertical, turn (-1.0 = "keep" in a teleport
+    /// template).
+    pub max_speeds: [f32; 4],
     /// Leader object (OORIENT) / path holder (OFOLLOW), from +0x198.
     link: Option<usize>,
     /// Path (OFOLLOW), from +0x110, and the current node.
@@ -225,6 +228,7 @@ impl Obj {
             wander: (0, 0.0),
             home: (0.0, 0.0, 0.0),
             speed: 0.0,
+            max_speeds: [0.0; 4],
             link: None,
             path: None,
             path_node: 0,
@@ -342,7 +346,9 @@ pub enum ObjRequest {
     PlayerState { index: usize, op: char, value: i32 },
     /// OINCOS: add through the threshold logic.
     IncState { index: usize, delta: i32 },
-    Teleport { x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize> },
+    /// `template`: the destination object, whose body the player takes on (OTELE onto an
+    /// object: MoveObjToObject).
+    Teleport { x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize>, template: Option<usize> },
     LevelExit { level: String, start: Option<String> },
     TurnPlayer { units_per_frame: i32, frames: u32 },
     /// Trigger (event 0x80) sent to a wall/region by name.
@@ -523,6 +529,7 @@ impl Objects {
         // regions carried by RMOVE carriers (region +0xfc).
         for (i, o) in level.orb.records(Section::Objects).iter().enumerate() {
             objects.list[i].speed = o.fixed(0x7c);
+            objects.list[i].max_speeds = [o.fixed(0x7c), o.fixed(0x80), o.fixed(0x84), o.fixed(0x88)];
             objects.list[i].link = usize::try_from(o.le_i32(0x198)).ok().filter(|&l| l < objects.list.len());
             objects.list[i].path = usize::try_from(o.le_i32(0x110)).ok().filter(|&p| p < objects.paths.len());
         }
@@ -780,7 +787,7 @@ impl Objects {
                 let Some(dest) = slot(9) else { return };
                 if let Some(&d) = self.find(&dest).first() {
                     let t = &self.list[d];
-                    self.requests.push(ObjRequest::Teleport { x: t.x, y: t.y, z: Some(t.z), angle: Some(t.angle), region: t.region });
+                    self.requests.push(ObjRequest::Teleport { x: t.x, y: t.y, z: Some(t.z), angle: Some(t.angle), region: t.region, template: Some(d) });
                 } else {
                     self.requests.push(ObjRequest::TriggerNamed(format!("@teleport:{dest}")));
                 }

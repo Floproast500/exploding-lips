@@ -593,7 +593,12 @@ impl Session {
                 }
             }
             ObjRequest::IncState { index, delta } => self.script.change_state(index, delta),
-            ObjRequest::Teleport { x, y, z, angle, region } => self.teleport(x, y, z, angle, region),
+            ObjRequest::Teleport { x, y, z, angle, region, template } => {
+                self.teleport(x, y, z, angle, region);
+                if let Some(t) = template {
+                    self.take_on_template(t);
+                }
+            }
             ObjRequest::EnterBsp { pos, heading, sound } => {
                 if let Some(world) = &mut self.bsp {
                     world.place(pos, heading);
@@ -777,6 +782,35 @@ impl Session {
                 reg.floor = (reg.floor + 200.0 / 1.2 * dt).min(home);
             }
         }
+    }
+
+    /// MoveObjToObject (object-effects.md OTELE): the player takes on the destination template's
+    /// body: its flying flag (both ways: LIPS00's SWIMMER1 swims, SWIMMER2 walks again), and its
+    /// height, radius and forward max speed unless they are "keep" (-1.0).
+    fn take_on_template(&mut self, t: usize) {
+        let Some(o) = self.objects.list.get(t) else { return };
+        let keep = |v: f32| v < 0.0;
+        let mut p = self.physics_override.unwrap_or_default();
+        if !keep(o.height) && o.height > 0.0 {
+            p.height = o.height;
+        }
+        if !keep(o.radius) && o.radius > 0.0 {
+            p.radius = o.radius;
+        }
+        // (The vertical max speed is not taken: flying up and down goes at the player's fly
+        // speeds (physics.md 5.5, ext+0x204/+0x208, 200), which the port keeps in fall_speed;
+        // the swimmer's 150 would slow swimming below the original's.)
+        let forward = o.max_speeds[0];
+        if !keep(forward) && forward > 0.0 {
+            p.walk_speed = forward;
+        }
+        let flying = o.flags & 0x2 != 0;
+        self.physics_override = Some(p);
+        if flying != self.player.flying {
+            self.player.flying = flying;
+            self.player.vz = 0.0;
+        }
+        self.previous = self.player;
     }
 
     fn teleport(&mut self, x: f32, y: f32, z: Option<f32>, angle: Option<f32>, region: Option<usize>) {
