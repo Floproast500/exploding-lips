@@ -271,6 +271,7 @@ impl<'a> Bot<'a> {
         let triggers = s.effects.triggers();
         let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[0])).map(|t| t.0).collect();
         let deadly_land: HashSet<usize> = triggers.iter().filter(|t| DEATH_TAGS.contains(&t.1[2])).map(|t| t.0).collect();
+        let door_regions: HashSet<usize> = s.effects.doors().iter().map(|d| d.0).collect();
         // From everywhere the grid planner could get to (it knows jumps across gaps).
         let mut prev = vec![usize::MAX; w.regions.len()];
         let mut queue = VecDeque::new();
@@ -283,7 +284,10 @@ impl<'a> Bot<'a> {
         while let Some(r) = queue.pop_front() {
             for &wi in &w.regions[r].walls {
                 let x = &w.walls[wi];
-                let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
+                // (Lines flagged solid block, as they are now: wall copies change them; door
+                // lines carry the flag too.)
+                let solid = |y: &godd_game::world::Wall| y.blocking && !door_regions.contains(&y.front) && !y.back.is_some_and(|b| door_regions.contains(&b));
+                let Some(b) = x.back.filter(|&b| b != x.front && !solid(x)) else { continue };
                 let o = if x.front == r { b } else { x.front };
                 if prev[o] != usize::MAX || deadly_enter.contains(&o) {
                     continue;
@@ -294,7 +298,7 @@ impl<'a> Bot<'a> {
                     .walls
                     .iter()
                     .map(|&wj| &w.walls[wj])
-                    .filter(|y| (y.front == r && y.back == Some(o)) || (y.front == o && y.back == Some(r)))
+                    .filter(|y| !solid(y) && ((y.front == r && y.back == Some(o)) || (y.front == o && y.back == Some(r))))
                     .map(|y| {
                         let (pa, pb) = (w.vertices[y.a], w.vertices[y.b]);
                         (pa.0 - pb.0).hypot(pa.1 - pb.1)
