@@ -182,6 +182,42 @@ impl<'a> Bot<'a> {
         (p.x - before.0).hypot(p.y - before.1) > 64.0
     }
 
+    /// Shut doors and the regions their openers sit in (switch walls, trigger regions,
+    /// switch objects, pickups firing the tag); None when some opener is of another kind
+    /// (a lock, a timer): then the door counts as passable.
+    fn door_openers(&self) -> HashMap<usize, Option<Vec<usize>>> {
+        let s = self.session();
+        let w = &s.level.world;
+        s
+            .effects
+            .doors()
+            .iter()
+            .filter(|(d, _)| w.regions[*d].ceiling - w.regions[*d].floor < 20.0)
+            .map(|&(d, tag)| {
+                let mut regions: Vec<usize> = Vec::new();
+                for sw in s.effects.switches().iter().filter(|sw| sw.tags.contains(&tag)) {
+                    let wall = &w.walls[sw.wall];
+                    regions.push(wall.front);
+                    regions.extend(wall.back);
+                }
+                regions.extend(s.effects.triggers().iter().filter(|(_, t)| t.contains(&tag)).map(|(r, _)| *r));
+                let mut other = false;
+                for o in s.objects.list.iter() {
+                    let fires = o.tag == tag && matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag);
+                    if fires {
+                        match o.region {
+                            Some(r) => regions.push(r),
+                            None => other = true,
+                        }
+                    } else if o.effect == 131 && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag) {
+                        other = true;
+                    }
+                }
+                (d, (!other && !regions.is_empty()).then_some(regions))
+            })
+            .collect()
+    }
+
     /// The switches (among `switches`) that open the first shut door on the region route to
     /// the nearest unreached non-switch goal. Doors count as open for routing; steps up to a
     /// jump and any drop are allowed.
@@ -196,6 +232,7 @@ impl<'a> Bot<'a> {
             let floor = reg.floor;
             (floor, if doors.contains_key(&r) { reg.ceiling.max(reg.floor + 128.0) } else { reg.ceiling })
         };
+        let openers = self.door_openers();
         let start = s.player.region;
         let mut prev = vec![usize::MAX; w.regions.len()];
         prev[start] = start;
@@ -206,6 +243,12 @@ impl<'a> Bot<'a> {
                 let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
                 let o = if x.front == r { b } else { x.front };
                 if prev[o] != usize::MAX || x.blocking && !doors.contains_key(&o) && !doors.contains_key(&r) {
+                    continue;
+                }
+                // (Not into a shut door that only opens from its other side.)
+                if let Some(Some(list)) = openers.get(&o)
+                    && !list.iter().any(|&q| q < prev.len() && prev[q] != usize::MAX)
+                {
                     continue;
                 }
                 let ((ff, fc), (tf, tc)) = (span(r), span(o));
@@ -418,37 +461,7 @@ impl<'a> Bot<'a> {
                 queue.push_back(r);
             }
         }
-        // Shut doors and the regions their openers sit in (switch walls, trigger regions,
-        // switch objects, pickups firing the tag); None when some opener is of another kind
-        // (a lock, a timer): then the door counts as passable.
-        let openers: HashMap<usize, Option<Vec<usize>>> = s
-            .effects
-            .doors()
-            .iter()
-            .filter(|(d, _)| w.regions[*d].ceiling - w.regions[*d].floor < 20.0)
-            .map(|&(d, tag)| {
-                let mut regions: Vec<usize> = Vec::new();
-                for sw in s.effects.switches().iter().filter(|sw| sw.tags.contains(&tag)) {
-                    let wall = &w.walls[sw.wall];
-                    regions.push(wall.front);
-                    regions.extend(wall.back);
-                }
-                regions.extend(s.effects.triggers().iter().filter(|(_, t)| t.contains(&tag)).map(|(r, _)| *r));
-                let mut other = false;
-                for o in s.objects.list.iter() {
-                    let fires = o.tag == tag && matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag);
-                    if fires {
-                        match o.region {
-                            Some(r) => regions.push(r),
-                            None => other = true,
-                        }
-                    } else if o.effect == 131 && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag) {
-                        other = true;
-                    }
-                }
-                (d, (!other && !regions.is_empty()).then_some(regions))
-            })
-            .collect();
+        let openers = self.door_openers();
         while let Some(r) = queue.pop_front() {
             for &wi in &w.regions[r].walls {
                 let x = &w.walls[wi];
