@@ -102,6 +102,9 @@ struct Bot<'a> {
     opened: HashSet<usize>,
     /// Consecutive plans that only re-used something.
     repeats: u32,
+    /// The last old goal chosen and how many times running.
+    last_goal: Option<Target>,
+    same_goal: u32,
     /// Respawns since the last new thing.
     idle_respawns: u32,
     /// Set when a tick moved the player far (a teleport).
@@ -366,6 +369,10 @@ impl<'a> Bot<'a> {
                     queue.push_back(o);
                 }
             }
+        }
+        if let Ok(list) = std::env::var("PLAYBOT_ROUTECHK") {
+            let got: Vec<String> = list.split(',').filter_map(|x| x.parse::<usize>().ok()).map(|r| format!("r{r}{}", if prev.get(r).is_some_and(|&p| p != usize::MAX) { "+" } else { "-" })).collect();
+            println!("     route reach {}", got.join(" "));
         }
         let len = |mut r: usize| {
             let mut n = 0;
@@ -1547,6 +1554,13 @@ impl<'a> Bot<'a> {
             // Only ever re-pressing old switches: nothing new is reachable.
             if self.used.contains(&goal.target) || goal.target == Target::Region(WAYPOINT) {
                 self.repeats += 1;
+                // The same old switch again and again (a door that leads nowhere new): as shut in.
+                self.same_goal = if self.last_goal == Some(goal.target) { self.same_goal + 1 } else { 0 };
+                self.last_goal = Some(goal.target);
+                if self.same_goal >= 8 {
+                    self.repeats = self.repeats.max(61);
+                    self.same_goal = 0;
+                }
                 // Shut in with only old switches (a one-way area): back to the start, as a
                 // player would get out by dying; give up if that changes nothing five times.
                 if self.repeats > 60 && self.idle_respawns < 5 && self.respawn() {
@@ -1567,6 +1581,8 @@ impl<'a> Bot<'a> {
             } else {
                 self.repeats = 0;
                 self.idle_respawns = 0;
+                self.last_goal = None;
+                self.same_goal = 0;
             }
             self.note(format!("t={:.0}s → {:?} ({} steps)", self.ticks as f32 / TICK_RATE, goal.target, steps.len()));
             let start = { let p = self.session().player; (p.x, p.y) };
@@ -1697,7 +1713,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, last_goal: None, same_goal: 0, idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
