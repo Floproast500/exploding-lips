@@ -1019,6 +1019,20 @@ impl<'a> Bot<'a> {
             let close = if k == last { close_last } else if next_level_change { 5.5 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
+            let mut launched = false;
+            // A jump needs ground under us: come down first (off a stair, a hop).
+            if step.jump {
+                let idle = Input::default();
+                for _ in 0..120 {
+                    let s = self.session();
+                    let p = s.player;
+                    let pad = s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0);
+                    if p.on_ground || p.flying || pad || self.teleported || self.level_done() {
+                        break;
+                    }
+                    self.tick(&idle);
+                }
+            }
             loop {
                 if self.level_done() {
                     return true;
@@ -1128,7 +1142,10 @@ impl<'a> Bot<'a> {
                 // The planned jump, or a hop when stuck against a ledge.
                 let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && self.death_tags().contains(&t.1[2]));
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
-                input.set(Action::Jump, (step.jump && stalled == 0 && best == progress) || (!deadly && (stalled == 30 || stalled == 60)));
+                // (A planned jump is pressed until it happens: a step down a stair just before it leaves
+                // us in the air for a tick or two.)
+                // (No unplanned hop right before a planned jump: it would start that jump in the air.)
+                input.set(Action::Jump, (step.jump && !launched && best == progress) || (!deadly && !next_jump && (stalled == 30 || stalled == 60)));
                 // Over a jump pad on a hop: hold Jump, so the landing that relaunches us adds it
                 // (the pad fires on the tick of contact).
                 {
@@ -1153,6 +1170,25 @@ impl<'a> Bot<'a> {
                     }
                 }
                 self.tick(&input);
+                let q = self.session().player;
+                if step.jump && !q.on_ground && q.vz > 0.0 {
+                    launched = true;
+                }
+            }
+            // A jump that got there in the air: come down here (as the plan's simulation does,
+            // with no forward) before the next step, rather than running on past the spot.
+            if step.jump && k < last {
+                let idle = Input::default();
+                for _ in 0..120 {
+                    let s = self.session();
+                    let p = s.player;
+                    // (Over a jump pad there is no coming to rest: its own steering handles it.)
+                    let pad = s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0);
+                    if p.on_ground || p.flying || pad || self.teleported || self.level_done() {
+                        break;
+                    }
+                    self.tick(&idle);
+                }
             }
         }
         true
