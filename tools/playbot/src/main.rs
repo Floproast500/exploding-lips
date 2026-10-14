@@ -1048,6 +1048,16 @@ impl<'a> Bot<'a> {
         // Switch objects fire (and toggle doors back) on touch: walk around the ones that are
         // not the goal.
         let goal_objects: HashSet<usize> = goals.iter().filter_map(|g| if let Target::Object(i) = g.target { Some(i) } else { None }).collect();
+        let death_walls: Vec<((f32, f32), (f32, f32))> = s
+            .effects
+            .switches()
+            .iter()
+            .filter(|sw| sw.usable && sw.tags.clone().all(|t| self.death_tags().contains(&t)))
+            .map(|sw| {
+                let x = &world.walls[sw.wall];
+                (world.vertices[x.a], world.vertices[x.b])
+            })
+            .collect();
         let avoid: Vec<(f32, f32, f32, f32)> = s
             .objects
             .list
@@ -1169,6 +1179,18 @@ impl<'a> Bot<'a> {
                                 Self::try_move(world, &physics, &pads, p, t, true, false).filter(|q| !deadly_land.contains(&q.region)).map(|q| (q, (true, false)))
                             }).or(r);
                         }
+                        // (A jump over it must also clear it taken off 12 back: the walk drifts,
+                        // and falling short there is death, LIPS03's strip r176.)
+                        if over_death && let Some((q, (true, _))) = r && !deadly_land.contains(&q.region) {
+                            let len = dx.hypot(dy).max(1e-3);
+                            let mut back = p;
+                            (back.x, back.y) = (p.x - dx / len * 12.0, p.y - dy / len * 12.0);
+                            let short = world.region_at_z(back.x, back.y, Some(p.z + 1.0)) != Some(p.region)
+                                || Self::try_move(world, &physics, &pads, back, (q.x, q.y), true, false).is_none_or(|b| deadly_land.contains(&b.region));
+                            if short {
+                                r = None;
+                            }
+                        }
                         self.edges.insert(edge, Edge { doors, from_region: p.region, from_heights: heights(p.region), to: r, to_heights: r.map_or((0, 0), |(q, _)| heights(q.region)) });
                         r
                     }
@@ -1197,6 +1219,15 @@ impl<'a> Bot<'a> {
                     jump || rim - floor > physics.step_height
                 };
                 if deadly_enter.contains(&q.region) || falls_in {
+                    continue;
+                }
+                // Nor up against a wall that kills when touched (LIPS03's maze r180-r189: walls
+                // firing tag 3, back to the start), with room for the walk's drift.
+                if death_walls.iter().any(|&((ax, ay), (bx, by))| {
+                    let (dx, dy) = (bx - ax, by - ay);
+                    let t = (((q.x - ax) * dx + (q.y - ay) * dy) / (dx * dx + dy * dy).max(1e-3)).clamp(0.0, 1.0);
+                    (q.x - ax - t * dx).hypot(q.y - ay - t * dy) < physics.radius + 12.0 + 10.0
+                }) {
                     continue;
                 }
                 if avoid.iter().any(|&(x, y, z, r)| (q.x - x).abs() < r && (q.y - y).abs() < r && (q.z - z).abs() < 64.0) {
@@ -1850,6 +1881,7 @@ impl<'a> Bot<'a> {
             // (A used teleporter, object or trigger region, only when nothing new is left.)
             let teleporter = |g: &Goal| self.used.contains(&g.target) && (matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r)));
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)) && !teleporter(g));
+            let tele_targets: HashSet<Target> = goals.iter().filter(|g| teleporter(g)).map(|g| g.target).collect();
             let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
             let under_us: HashSet<Target> = {
                 let s = self.session();
@@ -1974,6 +2006,10 @@ impl<'a> Bot<'a> {
             let found = found.or_else(|| if new_last.is_empty() { None } else { self.plan(&new_last) });
             // Among old switches, the one pressed longest ago first (the nearest ones would
             // just cycle, e.g. an elevator's buttons).
+            // (Teleporters used before only after every other old goal: LIPS01's REST01/PARK01
+            // pair is always nearest and would bounce us to and fro while the lift switch 829,
+            // the way up to door r8, waits further off.)
+            let (old_tele, old): (Vec<Goal>, Vec<Goal>) = old.iter().partition(|g| tele_targets.contains(&g.target));
             let found = found.or_else(|| {
                 let mut old = old.clone();
                 old.sort_by_key(|g| self.last_used.get(&g.target).copied().unwrap_or(0));
@@ -1991,6 +2027,7 @@ impl<'a> Bot<'a> {
                 // The rest together (one search).
                 if k < old.len() { self.plan(&old[k..]) } else { None }
             });
+            let found = found.or_else(|| if old_tele.is_empty() { None } else { self.plan(&old_tele) });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
                 let idle = Input::default();
