@@ -128,6 +128,8 @@ struct Bot<'a> {
     last_expanded: usize,
     /// Waypoints taken towards each route target since something new was used.
     route_tries: HashMap<usize, u32>,
+    /// The switch tags each pressed wall had when pressed.
+    used_tags: HashMap<usize, Option<std::ops::RangeInclusive<i32>>>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
@@ -1899,6 +1901,17 @@ impl<'a> Bot<'a> {
             // Switches never pressed before ones that were (toggling the same doors forever).
             // (A lock switch pressed before we had its key is new again once we carry it.)
             let locks = self.key_locks();
+            // (A wall pressed back when it did something else is new again.)
+            let changed: Vec<Target> = {
+                let now = self.session().effects.switches();
+                self.used_tags.iter().filter(|(wi, was)| now.iter().find(|x| x.wall == **wi).map(|x| x.tags.clone()) != **was).map(|(wi, _)| Target::Wall(*wi)).collect()
+            };
+            for t in changed {
+                if let Target::Wall(wi) = t {
+                    self.used_tags.remove(&wi);
+                }
+                self.used.remove(&t);
+            }
             let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
             // (A switch that moves the floor we stand on, the down button of the lift we just
             // rode up, only once nothing else is reachable.)
@@ -2206,6 +2219,12 @@ impl<'a> Bot<'a> {
                 } else {
                     self.opened.clear();
                 }
+                // (What a wall did when pressed: an OWTOW may make it a switch for something else
+                // later, LIPS01's door faces once DUCK3 is picked up.)
+                if let Target::Wall(wi) = goal.target {
+                    let tags = self.session().effects.switches().into_iter().find(|x| x.wall == wi).map(|x| x.tags);
+                    self.used_tags.insert(wi, tags);
+                }
                 let fresh = !self.used.contains(&goal.target);
                 if fresh {
                     self.bad_moves.clear();
@@ -2277,7 +2296,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
         // settle (doors, lifts) after each group.
         if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
