@@ -385,7 +385,11 @@ impl<'a> Bot<'a> {
         let (n, target) = goals
             .iter()
             .filter(|g| !self.used.contains(&g.target))
-            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (len(r), r)))
+            // (An object's own region: the lookup may pick a level stacked above it.)
+            .filter_map(|g| {
+                let own = if let Target::Object(i) = g.target { s.objects.list.get(i).and_then(|o| o.region) } else { None };
+                own.or_else(|| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0))).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (len(r), r))
+            })
             .min()?;
         let _ = n;
         // Walk back from the target to the region `n - 24` steps from it... i.e. 24 from us.
@@ -755,7 +759,9 @@ impl<'a> Bot<'a> {
                         let dz = g.at[2] - p.z;
                         d < 320.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0
                     } else {
-                        d < STEP * 0.75 && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)
+                        // (A lock set in a doorway is touched from the wall's distance.)
+                        let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) { 40.0 } else { STEP * 0.75 };
+                        d < reach && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)
                     }
                 })
                 .copied()
