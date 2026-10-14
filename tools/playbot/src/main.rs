@@ -791,7 +791,9 @@ impl<'a> Bot<'a> {
                 steps.reverse();
                 if !goal.shoot {
                     let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
-                    steps.push(Step { to: (goal.at[0], goal.at[1]), z: None, crouch, jump: false });
+                    // (Swimming: up or down to the thing's own height.)
+                    let z = came.get(&k).is_some_and(|e| e.0.flying).then_some(goal.at[2]);
+                    steps.push(Step { to: (goal.at[0], goal.at[1]), z, crouch, jump: false });
                 }
                 return Some((goal, steps));
             }
@@ -1702,9 +1704,13 @@ impl<'a> Bot<'a> {
                     }
                     let angle = facing((s.player.x, s.player.y), (o.x, o.y));
                     let near = (s.player.x - o.x).hypot(s.player.y - o.y) < 4.0;
+                    // Swimming: rise or sink to it as well.
+                    let (rise, sink) = if s.player.flying { (o.z > s.player.z + 4.0, o.z < s.player.z - 4.0) } else { (false, false) };
                     self.game.session_mut().expect("session").player.angle = angle;
-                    let idle = Input::default();
-                    self.tick(if near { &idle } else { &input });
+                    let mut step_input = if near { Input::default() } else { input.clone() };
+                    step_input.set(Action::Jump, rise);
+                    step_input.set(Action::Crouch, sink);
+                    self.tick(&step_input);
                 }
                 let o = &self.session().objects.list[i];
                 reached = o.hidden || o.destroyed || self.level_done();
