@@ -1246,6 +1246,11 @@ impl<'a> Bot<'a> {
                 let brink = [(14.0f32, 0.0f32), (-14.0, 0.0), (0.0, 14.0), (0.0, -14.0), (10.0, 10.0), (10.0, -10.0), (-10.0, 10.0), (-10.0, -10.0)].iter().any(|&(ox, oy)| {
                     world.region_at_z(q.x + ox, q.y + oy, Some(q.z + 1.0)).is_some_and(|r| r != q.region && deadly_land.contains(&r) && q.z - world.regions[r].floor > physics.step_height)
                 });
+                // (No jump lands on such a brink at all: a landing drifts more than a step does,
+                // LIPS03's hops along the 32-wide ledge r275 beside the deadly strip r176.)
+                if brink && jump {
+                    continue;
+                }
                 let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 } + if brink { 24.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
                     came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch, region: Some(q.region) }))));
