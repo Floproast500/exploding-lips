@@ -1195,8 +1195,9 @@ impl<'a> Bot<'a> {
                 let dz = step.z.map_or(0.0, |z| (p.z - z).abs());
                 // (Flying, height is steered: arrived only at it.)
                 let level = dz < 12.0 || (!p.on_ground && !p.flying);
-                // Held up just short of a precise spot before a drop (a wall in the way from
-                // this side): close enough. Not before a jump, which needs its run-up spot.
+                // Held up just short of a precise spot (a wall in the way from this side, up to
+                // its contact distance: a spot planned on a ledge's edge we dropped off): close
+                // enough. Not before a jump, which needs its run-up spot.
                 let next_jump = steps.get(k + 1).is_some_and(|n| n.jump);
                 // (A region goal counts only from inside: a thin trigger strip lies within the
                 // "close enough" of its centre.)
@@ -1212,7 +1213,7 @@ impl<'a> Bot<'a> {
                     let on_pad_spot = step.z.is_some_and(|z| (z - floor.0).abs() < 24.0);
                     s.effects.bounce_speed(floor.1).is_some_and(|v| v > 0.0) && on_pad_spot && !(p.vz <= 0.0 && p.z - floor.0 < 24.0)
                 };
-                if (d < close || (stalled > 30 && d < if next_jump { 8.0 } else { 10.0 })) && level && !need_inside && !pad_launch {
+                if (d < close || (stalled > 30 && d < if next_jump { 8.0 } else { 30.0 })) && level && !need_inside && !pad_launch {
                     break;
                 }
                 // Held just short of a thin strip a shut door pushes us out of: back off and take
