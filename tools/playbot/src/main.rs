@@ -275,12 +275,20 @@ impl<'a> Bot<'a> {
     /// After pressing switch wall `wi`: if it opens a door that closes on a timer, wait until
     /// it is open enough to pass, then walk to a spot just beyond it (the side away from us).
     fn through_timed_door(&mut self, wi: usize) {
+        let tags: Vec<i32> = match self.session().effects.switches().into_iter().find(|x| x.wall == wi) {
+            Some(sw) => sw.tags.collect(),
+            None => return,
+        };
+        self.through_timed_door_of(&tags);
+    }
+
+    /// Through a self-closing door that one of `tags` opens, at once (see `through_timed_door`).
+    fn through_timed_door_of(&mut self, tags: &[i32]) {
         let (door, beyond) = {
             let s = self.session();
             let w = &s.level.world;
-            let Some(sw) = s.effects.switches().into_iter().find(|x| x.wall == wi) else { return };
             let waits: Vec<usize> = s.effects.door_waits().iter().map(|d| d.0).collect();
-            let Some(&(door, _)) = s.effects.doors().iter().find(|(d, t)| sw.tags.contains(t) && waits.contains(d)) else { return };
+            let Some(&(door, _)) = s.effects.doors().iter().find(|(d, t)| tags.contains(t) && waits.contains(d)) else { return };
             let p = s.player;
             // The door's portal lines; the far one is the farthest from us.
             let far = w.regions[door].walls.iter().filter_map(|&x| {
@@ -1959,6 +1967,14 @@ impl<'a> Bot<'a> {
                     let back = steps.len().checked_sub(2).map_or(start, |k| steps[k].to);
                     let out = self.door_side_exit(r, leave).unwrap_or(back);
                     let _ = self.walk(&[Step { to: out, z: None, jump: false, crouch: false, region: None }]);
+                    // (A door that shuts itself again: through it now.)
+                    self.through_timed_door_of(&[leave]);
+                }
+                // An enter trigger that opens a door which shuts itself again: through it now.
+                if let Target::Region(r) = goal.target
+                    && let Some(enter) = self.session().effects.triggers().iter().find(|(t, tags)| *t == r && tags[0] > 0).map(|(_, tags)| tags[0])
+                {
+                    self.through_timed_door_of(&[enter]);
                 }
                 if matches!(goal.target, Target::Wall(_) | Target::Lift(_)) {
                     let after = self.area();
