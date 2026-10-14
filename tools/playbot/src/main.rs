@@ -120,6 +120,8 @@ struct Bot<'a> {
     /// Tags that kill: the base ones and any firing a teleport back to a start point (LIPS05's
     /// pits fire 75, DETH2 → RBIRTH02).
     death_tags: std::cell::OnceCell<HashSet<i32>>,
+    /// Rotating doors' wall endpoints as the level starts (shut).
+    rot_home: std::cell::OnceCell<HashMap<usize, Vec<(f32, f32)>>>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
@@ -601,6 +603,18 @@ impl<'a> Bot<'a> {
         h
     }
 
+    /// The wall endpoints of region `r` (a rotating door's pose).
+    fn rot_points(w: &godd_game::world::World, r: usize) -> Vec<(f32, f32)> {
+        w.regions[r].walls.iter().map(|&x| w.vertices[w.walls[x].a]).collect()
+    }
+
+    fn rot_home(&self) -> &HashMap<usize, Vec<(f32, f32)>> {
+        self.rot_home.get_or_init(|| {
+            let s = self.session();
+            s.effects.doors().iter().filter(|(r, _)| s.effects.region_kind(*r) == Some("rotate")).map(|&(r, _)| (r, Self::rot_points(&s.level.world, r))).collect()
+        })
+    }
+
     /// Everything still worth walking to.
     fn goals(&self) -> Vec<Goal> {
         let s = self.session();
@@ -618,6 +632,13 @@ impl<'a> Bot<'a> {
             // (A rotating door is full height open or shut: its switches count as new ones,
             // used once, below.)
             let door: Vec<usize> = doors.iter().filter(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) != Some("rotate")).map(|&(r, _)| r).collect();
+            // A rotating door is worth turning while it is back where it started (shut); not
+            // while it is turned (open) or still turning.
+            let rotating: Vec<usize> = doors.iter().filter(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) == Some("rotate")).map(|&(r, _)| r).collect();
+            if !rotating.is_empty() {
+                let home = self.rot_home();
+                return Some(rotating.iter().any(|r| home.get(r).is_some_and(|h| *h == Self::rot_points(w, *r))));
+            }
             let movers: Vec<bool> = s
                 .objects
                 .list
@@ -1009,6 +1030,7 @@ impl<'a> Bot<'a> {
                 }
                 let to = (((p.x / STEP).round() + dx) * STEP, ((p.y / STEP).round() + dy) * STEP);
                 let long = dx.abs() > 1.0 || dy.abs() > 1.0;
+                let mut over_death = false;
                 if long {
                     // Only onto a ledge too high to step onto, or across a gap to ground about
                     // level with us (an elevator top to its landing).
@@ -1016,7 +1038,11 @@ impl<'a> Bot<'a> {
                     let mid = ((p.x + to.0) / 2.0, (p.y + to.1) / 2.0);
                     let target = floor_at(to.0, to.1);
                     let ledge = target.is_some_and(|f| f > p.z + physics.step_height);
-                    let gap = target.is_some_and(|f| (f - p.z).abs() <= physics.step_height) && floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - physics.step_height);
+                    // (A region where landing kills is a gap however shallow: LIPS05's pit r24,
+                    // 17 below its surroundings.)
+                    let deadly_mid = world.region_at_z(mid.0, mid.1, Some(p.z + 1.0)).or_else(|| world.region_at(mid.0, mid.1)).is_some_and(|r| deadly_land.contains(&r));
+                    let gap = target.is_some_and(|f| (f - p.z).abs() <= physics.step_height) && (deadly_mid || floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - physics.step_height));
+                    over_death = deadly_mid;
                     let wide = dx.abs() > 3.0 || dy.abs() > 3.0;
                     // (The longest: also down onto ground somewhat lower, over a pit.)
                     let far = dx.abs() > 8.0 || dy.abs() > 8.0;
@@ -1040,11 +1066,23 @@ impl<'a> Bot<'a> {
                     None => {
                         // (A crouched jump gets into a low duct up a ledge.)
                         let kinds: &[(bool, bool)] = if long { &[(true, false), (true, true)] } else { &[(false, false), (true, false), (false, true), (true, true)] };
-                        let r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, &pads, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
+                        let mut r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, &pads, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
+                        // Over a gap where landing kills: half a cell short or long too (a
+                        // rim between two grid lines, LIPS05's r23), never a landing in it.
+                        if over_death && r.is_none_or(|(q, _)| deadly_land.contains(&q.region)) {
+                            let (len, half) = (dx.hypot(dy), STEP / 2.0);
+                            r = [-half, half].into_iter().find_map(|o| {
+                                let t = (to.0 + dx / len * o, to.1 + dy / len * o);
+                                Self::try_move(world, &physics, &pads, p, t, true, false).filter(|q| !deadly_land.contains(&q.region)).map(|q| (q, (true, false)))
+                            }).or(r);
+                        }
                         self.edges.insert(edge, Edge { doors, from_region: p.region, from_heights: heights(p.region), to: r, to_heights: r.map_or((0, 0), |(q, _)| heights(q.region)) });
                         r
                     }
                 };
+                if std::env::var("PLAYBOT_EDGEDBG").is_ok() && long && dx.abs().max(dy.abs()) >= 3.0 {
+                    println!("     edge ({:.0},{:.0},{:.0}) r{} -> ({:.0},{:.0}): {:?}", p.x, p.y, p.z, p.region, to.0, to.1, result.map(|(q, _)| (q.x as i32, q.y as i32, q.z as i32, q.region)));
+                }
                 let Some((q, (jump, crouch))) = result else { continue };
                 let cell_of = |x: f32, y: f32| ((x / STEP).round() as i32, (y / STEP).round() as i32);
                 if self.bad_moves.contains(&(cell_of(p.x, p.y), cell_of(q.x, q.y), 0)) {
@@ -1055,8 +1093,16 @@ impl<'a> Bot<'a> {
                 }
                 // Never into a region that kills on entry (tag 3 sends you back to the start),
                 // nor jump where landing does.
-                // (Landing kills: no jump into it, and no drop of more than a step either.)
-                let falls_in = deadly_land.contains(&q.region) && (jump || p.z - world.regions[q.region].floor > physics.step_height);
+                // (Landing kills: no jump into it, and no drop of more than a step either, from
+                // the highest floor the move crosses: LIPS05's pit r24 has a raised rim, r23.)
+                let falls_in = deadly_land.contains(&q.region) && {
+                    let floor = world.regions[q.region].floor;
+                    let rim = (1..8).filter_map(|k| {
+                        let t = k as f32 / 8.0;
+                        world.region_at_z(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t, Some(p.z.max(q.z) + physics.step_height)).map(|r| world.regions[r].floor)
+                    }).fold(p.z, f32::max);
+                    jump || rim - floor > physics.step_height
+                };
                 if deadly_enter.contains(&q.region) || falls_in {
                     continue;
                 }
@@ -1762,7 +1808,7 @@ impl<'a> Bot<'a> {
                     wp = self.route_waypoint(&goals);
                 }
                 if self.verbose {
-                    println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.0.at), self.reached.len());
+                    println!("     waypoint {:?} (reached {} regions; fails {}, routes set aside {:?})", wp.map(|g| g.0.at), self.reached.len(), self.waypoint_fails, self.route_fails);
                 }
                 let (wp, target) = wp?;
                 let r = self.plan(&[wp]);
@@ -1803,6 +1849,18 @@ impl<'a> Bot<'a> {
                     self.tick(&idle);
                 }
                 self.waits += 1;
+                // (Halfway: forget what failed before, moves that stalled and cached steps,
+                // which may be stale, and look again before giving up.)
+                if self.waits == 4 {
+                    if self.verbose {
+                        println!("     stuck: forgetting {} bad moves, {} cached steps, {} failed plans", self.bad_moves.len(), self.edges.len(), self.failed_plans.len());
+                    }
+                    self.bad_moves.clear();
+                    self.edges.clear();
+                    self.failed_plans.clear();
+                    self.unreachable.clear();
+                    self.route_fails.clear();
+                }
                 let stuck_at = self.session().player;
                 if self.waits > 8 && self.respawn() {
                     // Trapped (a pit with no way up): a player gets out by dying, which sends them
@@ -2010,6 +2068,21 @@ impl<'a> Bot<'a> {
                 }
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
+                // (A rotating door's other switches are spent with it: pressing its far face
+                // right after would swing it shut again, LIPS14's r21.)
+                if let Target::Wall(wi) = goal.target {
+                    let s = self.session();
+                    let switches = s.effects.switches();
+                    let tags: Vec<i32> = switches.iter().find(|x| x.wall == wi).map(|x| x.tags.clone().collect()).unwrap_or_default();
+                    let rotates = s.effects.doors().iter().any(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) == Some("rotate"));
+                    if rotates {
+                        let twins: Vec<Target> = switches.iter().filter(|x| x.wall != wi && tags.iter().any(|t| x.tags.contains(t))).map(|x| Target::Wall(x.wall)).collect();
+                        for t in twins {
+                            self.used.insert(t);
+                            self.last_used.insert(t, self.ticks);
+                        }
+                    }
+                }
                 self.waypoint_fails = 0;
                 self.failures.clear(); // something changed: try the others again
                 self.route_fails.clear();
@@ -2041,19 +2114,9 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
-        // PLAYBOT_START="x,y,z,region": start there (debugging a spot deep in a level).
-        if let Ok(v) = std::env::var("PLAYBOT_START") {
-            let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
-            if n.len() == 4
-                && let Some(s) = bot.game.session_mut()
-            {
-                (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
-                s.previous = s.player;
-            }
-        }
-        // PLAYBOT_FIRE="21,30;21": fire those tags first, letting things settle (doors, lifts)
-        // after each group.
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
+        // settle (doors, lifts) after each group.
         if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
             for group in v.split(';') {
                 for t in group.split(',').filter_map(|x| x.parse().ok()) {
@@ -2064,6 +2127,16 @@ fn main() -> AnyResult {
                 for _ in 0..(TICK_RATE as usize * 8) {
                     bot.tick(&Input::default());
                 }
+            }
+        }
+        // PLAYBOT_START="x,y,z,region": start there (debugging a spot deep in a level).
+        if let Ok(v) = std::env::var("PLAYBOT_START") {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if n.len() == 4
+                && let Some(s) = bot.game.session_mut()
+            {
+                (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
+                s.previous = s.player;
             }
         }
         let started = std::time::Instant::now();

@@ -1353,7 +1353,11 @@ impl Objects {
             if !o.in_world() || matches!(o.kind, Kind::Projectile { .. } | Kind::Explosion { .. }) {
                 continue;
             }
-            let touching = overlaps((o.x, o.y, o.z, o.radius, o.height), (player.x, player.y, player.z, player.radius, player.height));
+            // (Things that stay put, pickups and switches, are touched by the |dx|, |dy| box as
+            // in the original (object-effects.md 1.5): LIPS01's #257 lies in a corner of its
+            // niche that a round test never reaches. Bots touch round, see `overlaps`.)
+            let (a, b) = ((o.x, o.y, o.z, o.radius, o.height), (player.x, player.y, player.z, player.radius, player.height));
+            let touching = if o.mover.is_none() { overlaps_box(a, b) } else { overlaps(a, b) };
             let was = o.contact;
             let distance = (o.x - player.x).hypot(o.y - player.y);
             self.list[i].contact = touching;
@@ -2038,6 +2042,12 @@ fn overlaps(a: (f32, f32, f32, f32, f32), b: (f32, f32, f32, f32, f32)) -> bool 
     (a.0 - b.0).abs() < reach && (a.1 - b.1).abs() < reach && (a.0 - b.0).hypot(a.1 - b.1) < reach && a.2 <= b.2 + b.4 && b.2 <= a.2 + a.4
 }
 
+/// The original's contact box: |dx| and |dy| both within the radii, and the heights overlap.
+fn overlaps_box(a: (f32, f32, f32, f32, f32), b: (f32, f32, f32, f32, f32)) -> bool {
+    let reach = a.3 + b.3;
+    (a.0 - b.0).abs() < reach && (a.1 - b.1).abs() < reach && a.2 <= b.2 + b.4 && b.2 <= a.2 + a.4
+}
+
 /// Whether the straight line from `a` to `b` (x, y, z) is clear: it crosses no solid or
 /// one-sided line, and every portal it crosses is open at the height the line passes it (the
 /// higher floor to the lower ceiling of the two sides; a shut door has no opening).
@@ -2125,5 +2135,14 @@ mod tests {
         assert!(!overlaps((30.0, 30.0, 0.0, 16.0, 32.0), player), "the box corner is out of reach");
         assert!(overlaps((20.0, 20.0, 0.0, 16.0, 32.0), player), "28 units off: touching");
         assert!(!overlaps((10.0, 0.0, 60.0, 16.0, 32.0), player), "overhead, above the player's head");
+    }
+
+    /// Things that stay put are touched by the box: the corner counts.
+    #[test]
+    fn pickups_touch_by_the_box() {
+        let player = (0.0, 0.0, 0.0, 16.0, 48.0);
+        assert!(overlaps_box((20.0, 12.0, 0.0, 6.0, 30.0), player), "LIPS01's #257 from the niche's corner");
+        assert!(!overlaps((20.0, 12.0, 0.0, 6.0, 30.0), player));
+        assert!(!overlaps_box((23.0, 0.0, 0.0, 6.0, 30.0), player));
     }
 }

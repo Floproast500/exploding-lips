@@ -1498,3 +1498,21 @@ fn lips01_door_faces_unlock_with_the_duck() {
         }
     }
 }
+
+/// LIPS01's pickup #257 (the one starting the niche chain) lies in a corner of a 24-deep niche
+/// behind door r309: walls keep the body 20 off it one way and 12 the other. Things that stay put
+/// are touched by the original's |dx|, |dy| box, so walking in picks it up.
+#[test]
+fn lips01_niche_pickup_reached() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS01") else { return };
+    game.session_mut().unwrap().fire_tag(118);
+    run(&mut game, &vfs, 5.0);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (14984.0, 16964.0, 672.0, 310);
+        s.previous = s.player;
+    }
+    hold(&mut game, &vfs, &[Action::Forward], 40, 0.0);
+    assert!(game.session().unwrap().objects.inventory.contains(&257), "#257 picked up");
+}

@@ -138,7 +138,7 @@ fn main() {
                 }
             }
         }
-        // PATH_TO=1: the way found to the first target, with how each step is made (not walking).
+        // PATH_TO=1: the way found to the first target, with how each step is made (PATH_ALL=1: walking too).
         if std::env::var("PATH_TO").is_ok()
             && let Some(&t) = exits.first()
         {
@@ -149,7 +149,7 @@ fn main() {
                 r = p;
             }
             steps.reverse();
-            for (p, r, how) in steps.iter().filter(|s| s.2 != "walk") {
+            for (p, r, how) in steps.iter().filter(|s| s.2 != "walk" || std::env::var("PATH_ALL").is_ok()) {
                 println!("  r{p} -> r{r}: {how}");
             }
         }
