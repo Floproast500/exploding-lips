@@ -343,13 +343,24 @@ impl<'a> Bot<'a> {
             let waits: Vec<usize> = s.effects.door_waits().iter().map(|d| d.0).collect();
             let Some(&(door, _)) = s.effects.doors().iter().find(|(d, t)| tags.contains(t) && waits.contains(d)) else { return };
             let p = s.player;
+            // Our side: the region beyond the door's portal line nearest us.
+            let line_dist = |x: usize| {
+                let wall = &w.walls[x];
+                let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
+                ((ax + bx) / 2.0 - p.x).hypot((ay + by) / 2.0 - p.y)
+            };
+            let ours = w.regions[door].walls.iter().filter_map(|&x| {
+                let wall = &w.walls[x];
+                let o = if wall.front == door { wall.back? } else { wall.front };
+                (o != door).then_some((line_dist(x), o))
+            }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|t| t.1);
             // The door's portal lines; the far one is the farthest from us.
             let far = w.regions[door].walls.iter().filter_map(|&x| {
                 let wall = &w.walls[x];
                 let o = if wall.front == door { wall.back? } else { wall.front };
-                // (Not a line back into where we stand: LIPS01's door r8 has a stray line, 302,
-                // far off on our side, which would be "the farthest".)
-                if o == door || o == p.region {
+                // (Not a line back to our side: LIPS01's door r8 has a stray line, 302, far off
+                // into r49, the strip we pressed its face from, which would be "the farthest".)
+                if o == door || o == p.region || Some(o) == ours {
                     return None;
                 }
                 let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
@@ -1022,6 +1033,9 @@ impl<'a> Bot<'a> {
             .map(|(_, o)| (o.x, o.y, o.z, o.radius + 16.0 + 2.0))
             // (Not one we stand in: just used, walking off it is the way on.)
             .filter(|&(x, y, z, r)| !((start.x - x).abs() < r && (start.y - y).abs() < r && (start.z - z).abs() < 64.0))
+            // (Nor one over a goal's spot: LIPS00's trigger strip r298, 64 wide, has a row of
+            // switch objects down its middle.)
+            .filter(|&(x, y, z, r)| !goals.iter().any(|g| (g.at[0] - x).abs() < r && (g.at[1] - y).abs() < r && (g.at[2] - z).abs() < 64.0))
             .collect();
         // Spot → (player there, path cost, where it was reached from).
         type Visit = (Player, f32, Option<(Cell, Step)>);
@@ -1303,6 +1317,7 @@ impl<'a> Bot<'a> {
             let close = if k == last { close_last } else if next_level_change { 5.5 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
+            let mut air_ticks = 0u32;
             let mut launched = false;
             // A jump needs ground under us: come down first (off a stair, a hop).
             if step.jump {
@@ -1393,7 +1408,16 @@ impl<'a> Bot<'a> {
                 } else if !p.on_ground && p.vz > 0.0 {
                     // Still rising (pressed against a wall a jump goes over): not stuck yet.
                 } else {
-                    stalled += 1;
+                    // (A third as fast while a pad's bounce carries us: a 600 pad keeps us up for
+                    // seconds, waiting to come down on it before the hop, LIPS05's spiral.)
+                    let bouncing = !p.on_ground && {
+                        let s = self.session();
+                        s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0)
+                    };
+                    air_ticks += 1;
+                    if !bouncing || air_ticks % 3 == 0 {
+                        stalled += 1;
+                    }
                     if stalled > 90 {
                         if self.verbose {
                             let w = &self.session().level.world;
