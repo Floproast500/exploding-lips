@@ -765,7 +765,9 @@ impl<'a> Bot<'a> {
                     } else {
                         // (A lock set in a doorway is touched from the wall's distance.)
                         let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) { 40.0 } else { STEP * 0.75 };
-                        d < reach && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0)
+                        // (A pickup hanging up to a jump above us counts: the approach jumps for it.)
+                        let pickup_above = matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) && g.at[2] > p.z && g.at[2] - p.z < 96.0;
+                        d < reach && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0 || pickup_above)
                     }
                 })
                 .copied()
