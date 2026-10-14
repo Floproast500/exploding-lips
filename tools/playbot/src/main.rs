@@ -1044,10 +1044,14 @@ impl<'a> Bot<'a> {
                 let need_inside = k == last && inside.is_some();
                 // Before a hop off a jump pad: arrive as the bounce comes down onto the pad (the
                 // hop's Jump then catches the very next contact, here).
-                let pad_launch = next_jump && {
+                // (A long hop off the pad, not a bounce up to a ledge right above.)
+                let next_far = steps.get(k + 1).is_some_and(|n| (n.to.0 - step.to.0).hypot(n.to.1 - step.to.1) > 96.0);
+                let pad_launch = next_jump && next_far && {
                     let s = self.session();
                     let floor = s.level.world.solid_floor(p.region);
-                    s.effects.bounce_speed(floor.1).is_some_and(|v| v > 0.0) && !(p.vz <= 0.0 && p.z - floor.0 < 24.0)
+                    // (Only for a spot on the pad itself, not a ledge it carries us up to.)
+                    let on_pad_spot = step.z.is_some_and(|z| (z - floor.0).abs() < 24.0);
+                    s.effects.bounce_speed(floor.1).is_some_and(|v| v > 0.0) && on_pad_spot && !(p.vz <= 0.0 && p.z - floor.0 < 24.0)
                 };
                 if (d < close || (stalled > 30 && d < if next_jump { 8.0 } else { 10.0 })) && level && !need_inside && !pad_launch {
                     break;
@@ -1130,10 +1134,10 @@ impl<'a> Bot<'a> {
                 {
                     let s = self.session();
                     let pad_here = s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0);
-                    if pad_here && step.jump {
+                    if pad_here && (step.jump || (next_jump && !next_far)) {
                         input.set(Action::Jump, true);
-                        // Not off the pad's edge before it has launched us.
-                        if !p.on_ground && p.vz <= 0.0 {
+                        // Not off the pad's edge before it has launched us (a long hop).
+                        if step.jump && d > 96.0 && !p.on_ground && p.vz <= 0.0 {
                             input.set(Action::Forward, false);
                             input.set(Action::Run, false);
                         }
