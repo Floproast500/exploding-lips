@@ -317,10 +317,20 @@ impl<'a> Bot<'a> {
     fn death_tags(&self) -> &HashSet<i32> {
         self.death_tags.get_or_init(|| {
             let s = self.session();
+            // (A teleport to a birth point that a switch fires is a way somewhere, not a death:
+            // LIPS03's SWYYOFF, shot, sends the player to RBIRTH02 in r99, the only way in.)
+            let switched: HashSet<i32> = s
+                .objects
+                .list
+                .iter()
+                .filter(|o| matches!(o.effect, OTAGSW | OBUMPSW) && o.tag > 0)
+                .map(|o| o.tag)
+                .chain(s.effects.switches().iter().flat_map(|sw| sw.tags.clone()))
+                .collect();
             BASE_DEATH_TAGS
                 .iter()
                 .copied()
-                .chain(s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag))
+                .chain(s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !switched.contains(&o.tag) && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag))
                 .collect()
         })
     }
@@ -332,11 +342,20 @@ impl<'a> Bot<'a> {
             Some(sw) => sw.tags.collect(),
             None => return,
         };
-        self.through_timed_door_of(&tags);
+        // (Our side is the face's other region: we may already stand in the doorway, as close
+        // to its far face as to this one.)
+        let ours = { let w = &self.session().level.world.walls[wi]; Some(w.front).into_iter().chain(w.back).collect::<Vec<_>>() };
+        self.through_timed_door_from(&tags, Some(&ours));
     }
 
     /// Through a self-closing door that one of `tags` opens, at once (see `through_timed_door`).
     fn through_timed_door_of(&mut self, tags: &[i32]) {
+        self.through_timed_door_from(tags, None);
+    }
+
+    /// As `through_timed_door_of`; `face`: the regions either side of the switch face pressed
+    /// (the one that is not the door is our side).
+    fn through_timed_door_from(&mut self, tags: &[i32], face: Option<&[usize]>) {
         let (door, beyond) = {
             let s = self.session();
             let w = &s.level.world;
@@ -349,11 +368,14 @@ impl<'a> Bot<'a> {
                 let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
                 ((ax + bx) / 2.0 - p.x).hypot((ay + by) / 2.0 - p.y)
             };
-            let ours = w.regions[door].walls.iter().filter_map(|&x| {
-                let wall = &w.walls[x];
-                let o = if wall.front == door { wall.back? } else { wall.front };
-                (o != door).then_some((line_dist(x), o))
-            }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|t| t.1);
+            let ours = match face.and_then(|f| f.iter().copied().find(|&r| r != door)) {
+                Some(r) => Some(r),
+                None => w.regions[door].walls.iter().filter_map(|&x| {
+                    let wall = &w.walls[x];
+                    let o = if wall.front == door { wall.back? } else { wall.front };
+                    (o != door).then_some((line_dist(x), o))
+                }).min_by(|a, b| a.0.total_cmp(&b.0)).map(|t| t.1),
+            };
             // The door's portal lines; the far one is the farthest from us.
             let far = w.regions[door].walls.iter().filter_map(|&x| {
                 let wall = &w.walls[x];
