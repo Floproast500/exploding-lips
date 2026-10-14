@@ -844,20 +844,20 @@ impl<'a> Bot<'a> {
         // Trigger regions that move a floor or ceiling (an elevator's): like a switch, always
         // usable again.
         // (Only movers not yet where they would go: a raised bridge is done.)
-        let mover_tags: HashSet<i32> = s
-            .objects
-            .list
-            .iter()
-            .filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0)
-            .filter(|o| {
-                let Some(a) = o.aux.as_ref() else { return true };
-                let Some(r) = a.slot(9).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) else { return true };
-                let reg = &w.regions[r];
-                let at = if o.effect == 41 { reg.floor } else { reg.ceiling };
-                (at - a.ints[0] as f32).abs() > 1.0
-            })
-            .map(|o| o.tag)
-            .collect();
+        let away = |o: &&godd_game::objects::Obj| {
+            let Some(a) = o.aux.as_ref() else { return true };
+            let Some(r) = a.slot(9).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) else { return true };
+            let reg = &w.regions[r];
+            let at = if o.effect == 41 { reg.floor } else { reg.ceiling };
+            (at - a.ints[0] as f32).abs() > 1.0
+        };
+        let movers: Vec<&godd_game::objects::Obj> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49)).filter(away).collect();
+        let mut mover_tags: HashSet<i32> = movers.iter().filter(|o| o.tag > 0).map(|o| o.tag).collect();
+        // (Also a trigger-by-name (80) of a mover by its name: LIPS13's r364 fires 36, whose
+        // UP01 raises the lift LIFT07 back to the landing r369.)
+        mover_tags.extend(s.objects.list.iter().filter(|o| o.effect == 80 && o.tag > 0).filter(|o| {
+            o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| movers.iter().any(|m| m.name.eq_ignore_ascii_case(n)))
+        }).map(|o| o.tag));
         let moves = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| mover_tags.contains(x)));
         // And trigger regions that teleport (not back to a start): a way on, again and again.
         let tele_tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
@@ -974,6 +974,7 @@ impl<'a> Bot<'a> {
         let start = s.player;
         let key = |p: &Player| ((p.x / STEP).round() as i32, (p.y / STEP).round() as i32, (p.z / 24.0).round() as i32, p.region);
         // Lifts move: reaching their floor area at any height counts.
+        let pads: Vec<Option<f32>> = (0..world.regions.len()).map(|r| s.effects.bounce_speed(r).filter(|&v| v > 0.0)).collect();
         let near_goal = |p: &Player| {
             goals
                 .iter()
@@ -987,7 +988,13 @@ impl<'a> Bot<'a> {
                         // (A lock set in a doorway is touched from the wall's distance.)
                         let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) { 40.0 } else { STEP * 0.75 };
                         // (A pickup hanging up to a jump above us counts: the approach jumps for it.)
-                        let pickup_above = matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) && g.at[2] > p.z && g.at[2] - p.z < 96.0;
+                        // (On a jump pad, up to the bounce: LIPS05's TURNKEY1 hangs 384 over its
+                        // 600 pad, a bounce of about 768.)
+                        let above = match pads.get(world.solid_floor(p.region).1).copied().flatten() {
+                            Some(v) => 48.0 * ((v + physics.jump_speed) / physics.jump_speed).powi(2),
+                            None => 96.0,
+                        };
+                        let pickup_above = matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) && g.at[2] > p.z && g.at[2] - p.z < above;
                         d < reach && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0 || pickup_above)
                     }
                 })
@@ -996,7 +1003,6 @@ impl<'a> Bot<'a> {
         let heuristic = |p: &Player| goals.iter().map(|g| (p.x - g.at[0]).hypot(p.y - g.at[1])).fold(f32::MAX, f32::min) / STEP;
         let heights = |r: usize| world.regions.get(r).map_or((0, 0), |reg| (reg.floor.to_bits(), reg.ceiling.to_bits()));
         let doors = self.doors_key();
-        let pads: Vec<Option<f32>> = (0..world.regions.len()).map(|r| s.effects.bounce_speed(r).filter(|&v| v > 0.0)).collect();
         let triggers = s.effects.triggers();
         let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[0])).map(|t| t.0).collect();
         let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
