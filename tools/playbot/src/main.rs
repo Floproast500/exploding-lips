@@ -271,6 +271,32 @@ impl<'a> Bot<'a> {
         })
     }
 
+    /// A spot just out of region `r` into a neighbour that borders a door opened by `tag`.
+    fn door_side_exit(&self, r: usize, tag: i32) -> Option<(f32, f32)> {
+        let s = self.session();
+        let w = &s.level.world;
+        let doors: Vec<usize> = s.effects.doors().iter().filter(|(_, t)| *t == tag).map(|d| d.0).collect();
+        if doors.is_empty() {
+            return None;
+        }
+        let joins = |a: usize, b: usize| w.regions[a].walls.iter().any(|&wi| {
+            let x = &w.walls[wi];
+            (x.front == a && x.back == Some(b)) || (x.front == b && x.back == Some(a))
+        });
+        w.regions[r].walls.iter().find_map(|&wi| {
+            let x = &w.walls[wi];
+            let o = if x.front == r { x.back? } else if x.back == Some(r) { x.front } else { return None };
+            if o == r || !doors.iter().any(|&d| d == o || joins(o, d)) {
+                return None;
+            }
+            let ((ax, ay), (bx, by)) = (w.vertices[x.a], w.vertices[x.b]);
+            let len = (bx - ax).hypot(by - ay).max(1e-3);
+            let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
+            // 40 units past the line, on the side of the neighbour.
+            [1.0f32, -1.0].into_iter().map(|side| (mid.0 - (by - ay) / len * 40.0 * side, mid.1 + (bx - ax) / len * 40.0 * side)).find(|p| w.point_in_region(p.0, p.1, o))
+        })
+    }
+
     /// Switch walls and objects that fire a lock (ODROP) whose key we carry and that has not
     /// taken it yet.
     fn key_locks(&self) -> HashSet<Target> {
@@ -649,7 +675,21 @@ impl<'a> Bot<'a> {
         let reswitch = |i: usize| s.objects.list.get(i).is_some_and(|o| matches!(o.effect, OTAGSW | OBUMPSW) && shut_tags.contains(&o.tag));
         // Trigger regions that move a floor or ceiling (an elevator's): like a switch, always
         // usable again.
-        let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
+        // (Only movers not yet where they would go: a raised bridge is done.)
+        let mover_tags: HashSet<i32> = s
+            .objects
+            .list
+            .iter()
+            .filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0)
+            .filter(|o| {
+                let Some(a) = o.aux.as_ref() else { return true };
+                let Some(r) = a.slot(9).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) else { return true };
+                let reg = &w.regions[r];
+                let at = if o.effect == 41 { reg.floor } else { reg.ceiling };
+                (at - a.ints[0] as f32).abs() > 1.0
+            })
+            .map(|o| o.tag)
+            .collect();
         let moves = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| mover_tags.contains(x)));
         // And trigger regions that teleport (not back to a start): a way on, again and again.
         let tele_tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
@@ -1771,12 +1811,15 @@ impl<'a> Bot<'a> {
                         self.tick(&idle);
                     }
                 }
-                // A trigger that fires on leaving: step back out the way we came.
+                // A trigger that fires on leaving: step back out the way we came; but where the
+                // leave opens a door, out on the door's side (the door then stands open in front
+                // of us; going back would mean crossing the region again after it shut).
                 if let Target::Region(r) = goal.target
-                    && self.session().effects.triggers().iter().any(|(t, tags)| *t == r && tags[1] > 0)
+                    && let Some(leave) = self.session().effects.triggers().iter().find(|(t, tags)| *t == r && tags[1] > 0).map(|(_, tags)| tags[1])
                 {
                     let back = steps.len().checked_sub(2).map_or(start, |k| steps[k].to);
-                    let _ = self.walk(&[Step { to: back, z: None, jump: false, crouch: false }]);
+                    let out = self.door_side_exit(r, leave).unwrap_or(back);
+                    let _ = self.walk(&[Step { to: out, z: None, jump: false, crouch: false }]);
                 }
                 if matches!(goal.target, Target::Wall(_) | Target::Lift(_)) {
                     let after = self.area();
