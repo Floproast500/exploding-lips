@@ -531,7 +531,12 @@ impl<'a> Bot<'a> {
             // (An object's own region: the lookup may pick a level stacked above it.)
             .filter_map(|g| {
                 let own = if let Target::Object(i) = g.target { s.objects.list.get(i).and_then(|o| o.region) } else { None };
-                own.or_else(|| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0))).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (len(r), r))
+                own.or_else(|| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)))
+                    .filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r))
+                    // (Not a thing hanging high over its floor, an apple waiting for its lift
+                    // to rise: the way there is down the empty shaft, LIPS13's LIFT04.)
+                    .filter(|&r| !matches!(g.target, Target::Object(_)) || g.at[2] <= w.regions[r].floor + 48.0)
+                    .map(|r| (len(r), r))
             })
             .min()?;
         let _ = n;
@@ -548,7 +553,31 @@ impl<'a> Bot<'a> {
         // the furthest whose middle lies in it and is not the one we stand in.
         let here = s.player.region;
         // (The route's first region is one the planner reached: certainly within its budget.)
-        (0..=2.min(path.len() - 1)).filter(|&k| path[k] != here).find_map(|k| {
+        // (Only where we can climb back out of: not the bottom of a pit or a lift shaft.)
+        let here_floor = w.regions[here].floor;
+        let climbs_out = |from: usize| {
+            let mut seen = HashSet::from([from]);
+            let mut queue = VecDeque::from([from]);
+            while let Some(r) = queue.pop_front() {
+                if r == here || w.regions[r].floor >= here_floor - 48.0 {
+                    return true;
+                }
+                if seen.len() > 400 {
+                    return true;
+                }
+                for &wi in &w.regions[r].walls {
+                    let x = &w.walls[wi];
+                    let Some(b) = x.back.filter(|&b| b != x.front && !x.blocking) else { continue };
+                    let o = if x.front == r { b } else { x.front };
+                    let (a, c) = (&w.regions[r], &w.regions[o]);
+                    if c.floor - a.floor <= 48.0 && a.ceiling.min(c.ceiling) - a.floor.max(c.floor) >= 20.0 && seen.insert(o) {
+                        queue.push_back(o);
+                    }
+                }
+            }
+            false
+        };
+        (0..=2.min(path.len() - 1)).filter(|&k| path[k] != here && climbs_out(path[k])).find_map(|k| {
             let r = path[k];
             let reg = &w.regions[r];
             let ((x0, y0), (x1, y1)) = reg.bounds;
