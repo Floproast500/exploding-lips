@@ -122,6 +122,10 @@ struct Bot<'a> {
     death_tags: std::cell::OnceCell<HashSet<i32>>,
     /// Rotating doors' wall endpoints as the level starts (shut).
     rot_home: std::cell::OnceCell<HashMap<usize, Vec<(f32, f32)>>>,
+    /// Plan through switch objects' keep-clear zones too (a retry).
+    no_avoid: bool,
+    /// Spots the last failed search expanded.
+    last_expanded: usize,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
@@ -501,7 +505,9 @@ impl<'a> Bot<'a> {
                 // grid planner works out whether it can), but no waypoint in such a pit.
                 let (a, c) = (&w.regions[r], &w.regions[o]);
                 let (af, cf) = (a.floor, c.floor);
-                if a.ceiling.min(c.ceiling) - af.max(cf) >= 20.0 && cf - af <= 48.0 {
+                // (A shut door counts as open: its openers were checked above.)
+                let top = |q: usize, reg: &godd_game::world::Region| if door_regions.contains(&q) { reg.ceiling.max(reg.floor + 128.0) } else { reg.ceiling };
+                if top(r, a).min(top(o, c)) - af.max(cf) >= 20.0 && cf - af <= 48.0 {
                     prev[o] = r;
                     queue.push_back(o);
                 }
@@ -909,7 +915,15 @@ impl<'a> Bot<'a> {
             return None;
         }
         let started = std::time::Instant::now();
-        let r = self.plan_search(goals);
+        self.last_expanded = usize::MAX;
+        let mut r = self.plan_search(goals);
+        // (Boxed in, maybe by switch objects we keep clear of, a corridor one fills, LIPS13's
+        // #211 in r141: brushing it again beats staying put.)
+        if r.is_none() && self.last_expanded < 2000 {
+            self.no_avoid = true;
+            r = self.plan_search(goals);
+            self.no_avoid = false;
+        }
         if r.is_none() {
             self.failed_plans.insert(memo);
         }
@@ -963,7 +977,7 @@ impl<'a> Bot<'a> {
             .list
             .iter()
             .enumerate()
-            .filter(|(i, o)| matches!(o.effect, OTAGSW | OBUMPSW) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
+            .filter(|(i, o)| !self.no_avoid && matches!(o.effect, OTAGSW | OBUMPSW) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
             .map(|(_, o)| (o.x, o.y, o.z, o.radius + 16.0 + 2.0))
             // (Not one we stand in: just used, walking off it is the way on.)
             .filter(|&(x, y, z, r)| !((start.x - x).abs() < r && (start.y - y).abs() < r && (start.z - z).abs() < 64.0))
@@ -1155,6 +1169,7 @@ impl<'a> Bot<'a> {
             }
         }
         self.reached = came.keys().map(|c| c.3).collect();
+        self.last_expanded = expanded;
         if std::env::var("PLAYBOT_PLANDBG").is_ok() {
             println!("     search failed: {} cells, {} expanded, from ({:.0},{:.0},{:.0}) r{} ground {} crouch {} flying {}", came.len(), expanded, start.x, start.y, start.z, start.region, start.on_ground, start.crouching, start.flying);
         }
@@ -2076,6 +2091,22 @@ impl<'a> Bot<'a> {
                     let tags: Vec<i32> = switches.iter().find(|x| x.wall == wi).map(|x| x.tags.clone().collect()).unwrap_or_default();
                     let rotates = s.effects.doors().iter().any(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) == Some("rotate"));
                     if rotates {
+                        // Let it finish turning before planning on: half-turned it blocks the
+                        // way it opens, and a walk past would bump it shut again.
+                        let doors: Vec<usize> = s.effects.doors().iter().filter(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) == Some("rotate")).map(|d| d.0).collect();
+                        let pose = |b: &Self| doors.iter().map(|&r| Self::rot_points(&b.session().level.world, r)).collect::<Vec<_>>();
+                        let (mut last, mut still) = (pose(self), 0);
+                        for _ in 0..TICK_RATE as usize * 10 {
+                            self.tick(&Input::default());
+                            let now = pose(self);
+                            still = if now == last { still + 1 } else { 0 };
+                            last = now;
+                            if still > TICK_RATE as usize / 2 {
+                                break;
+                            }
+                        }
+                        let s = self.session();
+                        let switches = s.effects.switches();
                         let twins: Vec<Target> = switches.iter().filter(|x| x.wall != wi && tags.iter().any(|t| x.tags.contains(t))).map(|x| Target::Wall(x.wall)).collect();
                         for t in twins {
                             self.used.insert(t);
@@ -2114,7 +2145,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
         // settle (doors, lifts) after each group.
         if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
