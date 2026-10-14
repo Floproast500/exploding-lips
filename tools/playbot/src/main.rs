@@ -1861,6 +1861,10 @@ impl<'a> Bot<'a> {
                 }
                 continue;
             }
+            if std::env::var("PLAYBOT_PATH").is_ok_and(|v| v == format!("{:?}", goal.target)) {
+                let path: Vec<String> = steps.iter().map(|st| format!("({:.0},{:.0},{:?}{}{}) r{:?}", st.to.0, st.to.1, st.z, if st.jump { " J" } else { "" }, if st.crouch { " C" } else { "" }, st.region)).collect();
+                println!("     path to {:?}: {}", goal.target, path.join(" "));
+            }
             let inside = if let Target::Region(r) = goal.target { Some(r) } else { None };
             let mut reached = self.walk_to(&steps, close, inside);
             // Teleported on the way (a trigger region or teleporter did its thing): that goal

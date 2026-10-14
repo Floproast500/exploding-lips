@@ -181,6 +181,8 @@ pub struct Effects {
     frame_accum: f32,
     /// Original-game fixes on (cvar `g_fixes`).
     pub fixes: bool,
+    /// Doors that stay open once opened while fixes are on (`crate::fixes`).
+    pub stay_open: Vec<usize>,
     /// Switch wall → the door region it is a face of.
     door_faces: std::collections::HashMap<usize, usize>,
     /// Door regions open (or opening) at the last tick.
@@ -569,6 +571,7 @@ impl Effects {
             step_slots(&mut w.slots, world, sequences, dt);
         }
         let mut sounds = Vec::new();
+        let keep_open: Vec<usize> = if self.fixes { self.stay_open.clone() } else { Vec::new() };
         for r in &mut self.regions {
             step_slots(&mut r.slots, world, sequences, dt);
             let region = &mut world.regions[r.region];
@@ -595,7 +598,7 @@ impl Effects {
                         region.ceiling = *open;
                         *speed = -speed.abs();
                         *moving = false;
-                        *close_at = wait.map(|w| now + w);
+                        *close_at = if keep_open.contains(&r.region) { None } else { wait.map(|w| now + w) };
                         sounds.push(aux.as_ref().and_then(|a| a.sound(2)));
                     } else if region.ceiling <= region.floor + h {
                         if h == 0.0 {

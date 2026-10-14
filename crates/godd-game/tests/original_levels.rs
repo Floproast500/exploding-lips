@@ -1467,3 +1467,20 @@ fn lips02_bots_behind_walls_are_not_heard_with_fixes() {
         assert_eq!(growls == 0, fixes, "fixes {fixes}: {growls} growls");
     }
 }
+
+/// g_fixes: LIPS01's door r8 (tag 104) stays open once opened. Its switch (wall 302) is a stray
+/// line only touched from inside r49's open outline, and its pickup opener (#104) is on the
+/// ground floor far below, so with its 5 s close the exit chain could not be started; classic
+/// keeps the original close.
+#[test]
+fn lips01_door_r8_stays_open_with_fixes() {
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS01") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 0.3);
+        game.session_mut().unwrap().fire_tag(104);
+        run(&mut game, &vfs, 12.0);
+        let r = &game.session().unwrap().level.world.regions[8];
+        assert_eq!(r.ceiling > r.floor + 60.0, fixes, "fixes {fixes}: door r8 floor {} ceiling {}", r.floor, r.ceiling);
+    }
+}

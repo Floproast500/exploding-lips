@@ -18,6 +18,24 @@ const OPEN_WALLS: &[(&str, usize, usize, usize)] = &[
     ("LIPS02", 1542, 25, 24),
 ];
 
+/// Doors that stay open once opened: (level, door region, its tag).
+const DOORS_STAY_OPEN: &[(&str, usize, i32)] = &[
+    // LIPS01: door r8 (tag 104, closes after 5 s) is the only way to the pickup that starts the
+    // exit chain. Its switch, wall 302, is a stray line 450 units off the door that is only
+    // touched from inside r49's open outline, which no walking route reaches; its other opener,
+    // pickup #104, is on the ground floor far below. Once opened it stays open.
+    ("LIPS01", 8, 104),
+];
+
+/// The doors of `level` that stay open once opened (with fixes on).
+pub fn doors_staying_open(level: &str, doors: &[(usize, i32)]) -> Vec<usize> {
+    DOORS_STAY_OPEN
+        .iter()
+        .filter(|(name, d, tag)| name.eq_ignore_ascii_case(level) && doors.contains(&(*d, *tag)))
+        .map(|&(_, d, _)| d)
+        .collect()
+}
+
 /// Apply (`on`) or undo the fixes for `level`. Returns how many walls changed.
 pub fn apply(level: &str, world: &mut World, on: bool) -> usize {
     let mut changed = 0;

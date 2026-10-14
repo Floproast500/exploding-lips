@@ -139,7 +139,8 @@ impl Session {
             level.world.walls.len(),
             level.world.sprites.len()
         );
-        let effects = Effects::new(&level);
+        let mut effects = Effects::new(&level);
+        effects.stay_open = crate::fixes::doors_staying_open(name, &effects.doors());
         let level_ini = read_text(vfs, &format!("{name}.INI"));
         let objects = Objects::new(&level, &level_ini);
         let ini = godd_formats::ini::Ini::parse(&level_ini);
