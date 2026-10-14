@@ -405,6 +405,37 @@ impl<'a> Bot<'a> {
                 queue.push_back(r);
             }
         }
+        // Shut doors and the regions their openers sit in (switch walls, trigger regions,
+        // switch objects, pickups firing the tag); None when some opener is of another kind
+        // (a lock, a timer): then the door counts as passable.
+        let openers: HashMap<usize, Option<Vec<usize>>> = s
+            .effects
+            .doors()
+            .iter()
+            .filter(|(d, _)| w.regions[*d].ceiling - w.regions[*d].floor < 20.0)
+            .map(|&(d, tag)| {
+                let mut regions: Vec<usize> = Vec::new();
+                for sw in s.effects.switches().iter().filter(|sw| sw.tags.contains(&tag)) {
+                    let wall = &w.walls[sw.wall];
+                    regions.push(wall.front);
+                    regions.extend(wall.back);
+                }
+                regions.extend(s.effects.triggers().iter().filter(|(_, t)| t.contains(&tag)).map(|(r, _)| *r));
+                let mut other = false;
+                for o in s.objects.list.iter() {
+                    let fires = o.tag == tag && matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag);
+                    if fires {
+                        match o.region {
+                            Some(r) => regions.push(r),
+                            None => other = true,
+                        }
+                    } else if o.effect == 131 && o.aux.as_ref().is_some_and(|a| a.ints[0] == tag) {
+                        other = true;
+                    }
+                }
+                (d, (!other && !regions.is_empty()).then_some(regions))
+            })
+            .collect();
         while let Some(r) = queue.pop_front() {
             for &wi in &w.regions[r].walls {
                 let x = &w.walls[wi];
@@ -414,6 +445,13 @@ impl<'a> Bot<'a> {
                 let Some(b) = x.back.filter(|&b| b != x.front && !solid(x) && !false_portals.contains(&wi)) else { continue };
                 let o = if x.front == r { b } else { x.front };
                 if prev[o] != usize::MAX || deadly_enter.contains(&o) {
+                    continue;
+                }
+                // Not into a shut door none of whose openers we can get to (yet): a door that
+                // only opens from its other side.
+                if let Some(Some(list)) = openers.get(&o)
+                    && !list.iter().any(|&q| q < prev.len() && prev[q] != usize::MAX)
+                {
                     continue;
                 }
                 // Not through an opening narrower than the body (the bars of a grate): all the
