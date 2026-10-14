@@ -964,7 +964,7 @@ impl<'a> Bot<'a> {
             // PLAYBOT_TRACE=from-to: every tick in that range (PLAYBOT_TRACE0: the first 600).
             let range = std::env::var("PLAYBOT_TRACE").ok().and_then(|v| v.split_once('-').and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))))
                 .or_else(|| std::env::var("PLAYBOT_TRACE0").is_ok().then_some((0, 600)));
-            if range.is_some_and(|(a, b)| (a..b).contains(&(self.ticks as u64))) {
+            if range.is_some_and(|(a, b)| (a..b).contains(&self.ticks)) {
                 println!("       trace t{} r{} ({:.0},{:.0},{:.0}) vz {:.0} ground {} jump {} fwd {}", self.ticks, s.player.region, s.player.x, s.player.y, s.player.z, s.player.vz, s.player.on_ground, input.held(Action::Jump), input.held(Action::Forward));
             }
         }
