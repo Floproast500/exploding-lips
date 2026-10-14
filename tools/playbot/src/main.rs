@@ -229,7 +229,7 @@ impl<'a> Bot<'a> {
     /// The switches (among `switches`) that open the first shut door on the region route to
     /// the nearest unreached non-switch goal. Doors count as open for routing; steps up to a
     /// jump and any drop are allowed.
-    fn door_on_route(&self, goals: &[Goal], switches: &[Goal]) -> Vec<Goal> {
+    fn door_on_route(&self, goals: &[Goal], switches: &[Goal]) -> (Vec<Goal>, Option<usize>) {
         use std::collections::VecDeque;
         let s = self.session();
         let w = &s.level.world;
@@ -284,7 +284,8 @@ impl<'a> Bot<'a> {
         if self.verbose {
             println!("     route target: {:?}", target);
         }
-        let Some((_, mut r)) = target else { return Vec::new() };
+        let Some((_, mut r)) = target else { return (Vec::new(), None) };
+        let goal_region = r;
         // Walk back to the first shut door on the route.
         let mut first = None;
         while prev[r] != r {
@@ -293,7 +294,7 @@ impl<'a> Bot<'a> {
             }
             r = prev[r];
         }
-        let Some(door) = first else { return Vec::new() };
+        let Some(door) = first else { return (Vec::new(), None) };
         let tag = doors[&door];
         // The door's tag, or a lock's (an ODROP firing it) while we carry the lock's key.
         let carried: Vec<&str> = s.objects.inventory.iter().map(|&k| s.objects.list[k].name.as_str()).collect();
@@ -310,7 +311,7 @@ impl<'a> Bot<'a> {
             .map(|sw| Target::Wall(sw.wall))
             .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && tags.contains(&o.tag)).map(|(i, _)| Target::Object(i)))
             .collect();
-        switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect()
+        (switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect(), Some(goal_region))
     }
 
     fn death_tags(&self) -> &HashSet<i32> {
@@ -1857,7 +1858,17 @@ impl<'a> Bot<'a> {
             // Only old switches left: open the next shut door on the way to the nearest thing
             // not yet reached.
             let found = found.or_else(|| {
-                let pick = self.door_on_route(&goals, &old);
+                let (mut pick, target) = self.door_on_route(&goals, &old);
+                // (The same target again and again with nothing new used: set aside, as the
+                // waypoint search does; LIPS03's r9 behind the locked door r21.)
+                if let Some(t) = target.filter(|_| !pick.is_empty()) {
+                    let tries = self.route_tries.entry(t).or_default();
+                    *tries += 1;
+                    if *tries > 3 {
+                        self.route_fails.insert(t);
+                        pick.clear();
+                    }
+                }
                 if self.verbose {
                     println!("     route switches: {:?}", pick.iter().map(|g| g.target).collect::<Vec<_>>());
                 }
@@ -2083,9 +2094,16 @@ impl<'a> Bot<'a> {
                 let before = self.area();
                 self.interact(&goal);
                 // A switch that set the floor under us moving (an elevator's own button): ride it
-                // to the end before planning on (up to 15 s).
-                if matches!(goal.target, Target::Wall(_) | Target::Object(_)) {
+                // to the end before planning on (up to 15 s). Likewise a trigger region that is
+                // itself a lift (LIPS13's LIFT07, raised by stepping on): stay on.
+                if matches!(goal.target, Target::Wall(_) | Target::Object(_) | Target::Region(_)) {
                     let idle = Input::default();
+                    if matches!(goal.target, Target::Region(_)) {
+                        // (Its mover starts a moment after the trigger fires.)
+                        for _ in 0..TICK_RATE as usize / 3 {
+                            self.tick(&idle);
+                        }
+                    }
                     for _ in 0..(TICK_RATE as usize * 15) {
                         let s = self.session();
                         let under = s.level.world.solid_floor(s.player.region).1;
