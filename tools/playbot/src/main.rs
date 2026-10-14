@@ -1744,9 +1744,11 @@ impl<'a> Bot<'a> {
                     let near = (s.player.x - o.x).hypot(s.player.y - o.y) < 4.0;
                     // Swimming: rise or sink to it as well.
                     let (rise, sink) = if s.player.flying { (o.z > s.player.z + 4.0, o.z < s.player.z - 4.0) } else { (false, false) };
+                    // (Up on a ledge too high to step onto, as in a niche: jump to it.)
+                    let ledge = !s.player.flying && s.player.on_ground && o.z - s.player.z > 24.0;
                     self.game.session_mut().expect("session").player.angle = angle;
                     let mut step_input = if near { Input::default() } else { input.clone() };
-                    step_input.set(Action::Jump, rise);
+                    step_input.set(Action::Jump, rise || ledge);
                     step_input.set(Action::Crouch, sink);
                     self.tick(&step_input);
                 }
