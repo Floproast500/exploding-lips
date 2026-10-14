@@ -715,8 +715,11 @@ impl<'a> Bot<'a> {
             }
         };
         // A move that starts on a pad's contact starts with its launch (that tick's bounce).
+        let on_pad = pads.get(world.solid_floor(p.region).1).copied().flatten().is_some();
         pad(&mut p, jump);
-        for t in 0..72 {
+        // (A strong pad keeps us up for seconds: LIPS05's shaft of 600 pads.)
+        let ticks = if on_pad { 360 } else { 72 };
+        for t in 0..ticks {
             let before = (p.x - to.0).hypot(p.y - to.1);
             // Run while far, walk the last stretch; arrived once the spot is within one step.
             let mut i = Input::default();
