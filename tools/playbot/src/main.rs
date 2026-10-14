@@ -1294,8 +1294,10 @@ impl<'a> Bot<'a> {
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
                 // (A planned jump is pressed until it happens: a step down a stair just before it leaves
                 // us in the air for a tick or two.)
-                // (No unplanned hop right before a planned jump: it would start that jump in the air.)
-                input.set(Action::Jump, (step.jump && !launched && best == progress) || (!deadly && !next_jump && (stalled == 30 || stalled == 60)));
+                // (No unplanned hop right before a planned jump: it would start that jump in the air;
+                // nor where the spot is not above us: a hop up onto a ledge beside the way leaves
+                // the plan.)
+                input.set(Action::Jump, (step.jump && !launched && best == progress) || (!deadly && !next_jump && step.z.is_none_or(|z| z > p.z + 8.0) && (stalled == 30 || stalled == 60)));
                 // Over a jump pad on a hop: hold Jump, so the landing that relaunches us adds it
                 // (the pad fires on the tick of contact).
                 {
