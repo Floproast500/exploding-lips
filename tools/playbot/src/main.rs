@@ -1873,12 +1873,15 @@ impl<'a> Bot<'a> {
                 let w = &s.level.world;
                 let floor = w.solid_floor(s.player.region).1;
                 let names = s.level.region_names();
-                let tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) == Some(floor)).map(|o| o.tag).collect();
+                let ours: Vec<&godd_game::objects::Obj> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) == Some(floor)).collect();
+                let mut tags: HashSet<i32> = ours.iter().filter(|o| o.tag > 0).map(|o| o.tag).collect();
+                // (And a trigger-by-name of such a mover: LIPS13's 1744 fires 45, whose DWN01
+                // takes the lift LIFT07 we just rode up back down.)
+                tags.extend(s.objects.list.iter().filter(|o| o.effect == 80 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| ours.iter().any(|m| m.name.eq_ignore_ascii_case(n)))).map(|o| o.tag));
                 s.effects.switches().iter().filter(|sw| tags.iter().any(|t| sw.tags.contains(t))).map(|sw| Target::Wall(sw.wall)).collect()
             };
             let (new_last, new_first): (Vec<Goal>, Vec<Goal>) = new.iter().partition(|g| under_us.contains(&g.target));
             let found = found.or_else(|| if new_first.is_empty() { None } else { self.plan(&new_first) });
-            let found = found.or_else(|| if new_last.is_empty() { None } else { self.plan(&new_last) });
             // Only old switches left: open the next shut door on the way to the nearest thing
             // not yet reached.
             let found = found.or_else(|| {
@@ -1931,6 +1934,9 @@ impl<'a> Bot<'a> {
                 // something else (a door) is in the way.
                 r.filter(|r| r.1.len() >= 10)
             });
+            // A switch that moves the floor we stand on only once nothing else is in reach, not
+            // even by a long route (it would take us back where we came from).
+            let found = found.or_else(|| if new_last.is_empty() { None } else { self.plan(&new_last) });
             // Among old switches, the one pressed longest ago first (the nearest ones would
             // just cycle, e.g. an elevator's buttons).
             let found = found.or_else(|| {
