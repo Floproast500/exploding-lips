@@ -810,7 +810,9 @@ impl<'a> Bot<'a> {
             i.set(Action::Run, before > 48.0 && (!jump || before > 100.0));
             i.set(Action::Jump, jump && t == 0);
             // Stay down while there is no room to stand.
-            let low = world.regions.get(p.region).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
+            // (Or heading into a gap too low to stand in: crouch before it, not in it.)
+            let low_at = |r: Option<usize>| r.and_then(|r| world.regions.get(r)).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
+            let low = low_at(Some(p.region)) || low_at(world.region_at_z(to.0, to.1, Some(p.z + 1.0)));
             i.set(Action::Crouch, crouch || low);
             p.angle = facing((p.x, p.y), to);
             let (x0, y0) = (p.x, p.y);
@@ -1282,7 +1284,10 @@ impl<'a> Bot<'a> {
                 let low = {
                     let s = self.session();
                     let physics = s.physics_override.unwrap_or_default();
-                    s.level.world.regions.get(p.region).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance)
+                    let w = &s.level.world;
+                    let low_at = |r: Option<usize>| r.and_then(|r| w.regions.get(r)).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
+                    // (Or heading into a gap too low to stand in: crouch before it.)
+                    low_at(Some(p.region)) || low_at(w.region_at_z(step.to.0, step.to.1, Some(p.z + 1.0)))
                 };
                 input.set(Action::Crouch, step.crouch || low);
                 // The planned jump, or a hop when stuck against a ledge.
