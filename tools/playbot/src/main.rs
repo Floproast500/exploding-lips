@@ -846,7 +846,9 @@ impl<'a> Bot<'a> {
                     let pit_jump = far && target.is_some_and(|f| f <= p.z + physics.step_height && f >= p.z - 160.0) && floor_at(mid.0, mid.1).is_some_and(|f| f < p.z - 160.0);
                     // From a jump pad: bounced high, onto ground well above, further off too.
                     let on_pad = pads.get(world.solid_floor(p.region).1).copied().flatten().is_some();
-                    let pad_hop = on_pad && target.is_some_and(|f| f > p.z - 160.0);
+                    // (Not too far: where a bounce touches down drifts, so launch from the pad's
+                    // edge nearest the goal, as a player would.)
+                    let pad_hop = on_pad && dx.abs().max(dy.abs()) <= 10.0 && target.is_some_and(|f| f > p.z - 160.0);
                     if far && !pit_jump && !pad_hop {
                         continue;
                     }
@@ -959,8 +961,11 @@ impl<'a> Bot<'a> {
                     }
                 }
             }
-            if self.ticks < 600 && std::env::var("PLAYBOT_TRACE0").is_ok() {
-                println!("       trace t{} r{} ({:.0},{:.0},{:.0}) r16 floor {}", self.ticks, s.player.region, s.player.x, s.player.y, s.player.z, s.level.world.regions.get(16).map_or(0.0, |r| r.floor));
+            // PLAYBOT_TRACE=from-to: every tick in that range (PLAYBOT_TRACE0: the first 600).
+            let range = std::env::var("PLAYBOT_TRACE").ok().and_then(|v| v.split_once('-').and_then(|(a, b)| Some((a.parse::<u64>().ok()?, b.parse::<u64>().ok()?))))
+                .or_else(|| std::env::var("PLAYBOT_TRACE0").is_ok().then_some((0, 600)));
+            if range.is_some_and(|(a, b)| (a..b).contains(&(self.ticks as u64))) {
+                println!("       trace t{} r{} ({:.0},{:.0},{:.0}) vz {:.0} ground {} jump {} fwd {}", self.ticks, s.player.region, s.player.x, s.player.y, s.player.z, s.player.vz, s.player.on_ground, input.held(Action::Jump), input.held(Action::Forward));
             }
         }
         if let (Some(a), Some(b)) = (before, self.game.session().map(|s| s.player))
@@ -1037,7 +1042,14 @@ impl<'a> Bot<'a> {
                 // (A region goal counts only from inside: a thin trigger strip lies within the
                 // "close enough" of its centre.)
                 let need_inside = k == last && inside.is_some();
-                if (d < close || (!next_jump && stalled > 30 && d < 10.0)) && level && !need_inside {
+                // Before a hop off a jump pad: arrive as the bounce comes down onto the pad (the
+                // hop's Jump then catches the very next contact, here).
+                let pad_launch = next_jump && {
+                    let s = self.session();
+                    let floor = s.level.world.solid_floor(p.region);
+                    s.effects.bounce_speed(floor.1).is_some_and(|v| v > 0.0) && !(p.vz <= 0.0 && p.z - floor.0 < 24.0)
+                };
+                if (d < close || (stalled > 30 && d < if next_jump { 8.0 } else { 10.0 })) && level && !need_inside && !pad_launch {
                     break;
                 }
                 // Held just short of a thin strip a shut door pushes us out of: back off and take
@@ -1075,6 +1087,8 @@ impl<'a> Bot<'a> {
                 if progress < best - 0.5 {
                     best = progress;
                     stalled = 0;
+                } else if !p.on_ground && p.vz > 0.0 {
+                    // Still rising (pressed against a wall a jump goes over): not stuck yet.
                 } else {
                     stalled += 1;
                     if stalled > 90 {
@@ -1111,13 +1125,18 @@ impl<'a> Bot<'a> {
                 let deadly = self.session().effects.triggers().iter().any(|t| t.0 == p.region && self.death_tags().contains(&t.1[2]));
                 // Planned jumps land somewhere safe; unplanned hops not where landing kills.
                 input.set(Action::Jump, (step.jump && stalled == 0 && best == progress) || (!deadly && (stalled == 30 || stalled == 60)));
-                // Over a jump pad with a jump planned now or next: hold Jump, so the landing
-                // that relaunches us adds it (the pad fires on the tick of contact).
+                // Over a jump pad on a hop: hold Jump, so the landing that relaunches us adds it
+                // (the pad fires on the tick of contact).
                 {
                     let s = self.session();
                     let pad_here = s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0);
-                    if pad_here && (step.jump || next_jump) {
+                    if pad_here && step.jump {
                         input.set(Action::Jump, true);
+                        // Not off the pad's edge before it has launched us.
+                        if !p.on_ground && p.vz <= 0.0 {
+                            input.set(Action::Forward, false);
+                            input.set(Action::Run, false);
+                        }
                     }
                 }
                 // Flying (swimming): hold Jump to rise, Crouch to sink to the planned height;
