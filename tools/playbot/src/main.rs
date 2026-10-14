@@ -1692,7 +1692,19 @@ impl<'a> Bot<'a> {
             // (A lock switch pressed before we had its key is new again once we carry it.)
             let locks = self.key_locks();
             let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
-            let found = found.or_else(|| if new.is_empty() { None } else { self.plan(&new) });
+            // (A switch that moves the floor we stand on, the down button of the lift we just
+            // rode up, only once nothing else is reachable.)
+            let under_us: HashSet<Target> = {
+                let s = self.session();
+                let w = &s.level.world;
+                let floor = w.solid_floor(s.player.region).1;
+                let names = s.level.region_names();
+                let tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) == Some(floor)).map(|o| o.tag).collect();
+                s.effects.switches().iter().filter(|sw| tags.iter().any(|t| sw.tags.contains(t))).map(|sw| Target::Wall(sw.wall)).collect()
+            };
+            let (new_last, new_first): (Vec<Goal>, Vec<Goal>) = new.iter().partition(|g| under_us.contains(&g.target));
+            let found = found.or_else(|| if new_first.is_empty() { None } else { self.plan(&new_first) });
+            let found = found.or_else(|| if new_last.is_empty() { None } else { self.plan(&new_last) });
             // Only old switches left: open the next shut door on the way to the nearest thing
             // not yet reached.
             let found = found.or_else(|| {
