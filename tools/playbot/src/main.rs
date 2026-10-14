@@ -346,7 +346,9 @@ impl<'a> Bot<'a> {
             let far = w.regions[door].walls.iter().filter_map(|&x| {
                 let wall = &w.walls[x];
                 let o = if wall.front == door { wall.back? } else { wall.front };
-                if o == door {
+                // (Not a line back into where we stand: LIPS01's door r8 has a stray line, 302,
+                // far off on our side, which would be "the farthest".)
+                if o == door || o == p.region {
                     return None;
                 }
                 let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
