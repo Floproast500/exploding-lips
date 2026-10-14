@@ -175,6 +175,7 @@ impl<'a> Bot<'a> {
         // (From the start, places that could not be reached from where we were may be.)
         self.unreachable.clear();
         self.failed_plans.clear();
+        self.route_fails.clear();
         self.game.session_mut().expect("session").fire_tag(tag as u32);
         let p = self.session().player;
         (p.x - before.0).hypot(p.y - before.1) > 64.0
@@ -1562,7 +1563,12 @@ impl<'a> Bot<'a> {
             // Too far for the grid search (a big maze): head for a region part-way along a
             // region-level route to the nearest unreached thing, then plan again from there.
             let found = found.or_else(|| {
-                let wp = self.route_waypoint(&goals);
+                let mut wp = self.route_waypoint(&goals);
+                // (Every route set aside: give them another go, from here.)
+                if wp.is_none() && !self.route_fails.is_empty() {
+                    self.route_fails.clear();
+                    wp = self.route_waypoint(&goals);
+                }
                 if self.verbose {
                     println!("     waypoint {:?} (reached {} regions)", wp.map(|g| g.0.at), self.reached.len());
                 }
