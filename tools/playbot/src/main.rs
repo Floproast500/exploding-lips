@@ -84,6 +84,8 @@ struct Step {
     jump: bool,
     /// Crouch the whole way (crawlspaces).
     crouch: bool,
+    /// The region the plan expected to be in there (None: any).
+    region: Option<usize>,
 }
 
 struct Bot<'a> {
@@ -941,7 +943,7 @@ impl<'a> Bot<'a> {
                     let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
                     // (Swimming: up or down to the thing's own height.)
                     let z = came.get(&k).is_some_and(|e| e.0.flying).then_some(goal.at[2]);
-                    steps.push(Step { to: (goal.at[0], goal.at[1]), z, crouch, jump: false });
+                    steps.push(Step { to: (goal.at[0], goal.at[1]), z, crouch, jump: false, region: None });
                 }
                 return Some((goal, steps));
             }
@@ -1051,7 +1053,7 @@ impl<'a> Bot<'a> {
                 });
                 let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 } + if brink { 24.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
-                    came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch }))));
+                    came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch, region: Some(q.region) }))));
                     open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
                 }
             }
@@ -1075,7 +1077,7 @@ impl<'a> Bot<'a> {
                     let qk = key(&q);
                     let c = cost + 1.5;
                     if came.get(&qk).is_none_or(|e| c < e.1) {
-                        came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump: up, crouch: !up }))));
+                        came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump: up, crouch: !up, region: Some(q.region) }))));
                         open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
                     }
                 }
@@ -1165,7 +1167,9 @@ impl<'a> Bot<'a> {
             // Intermediate spots only need passing near; the goal itself a little closer; and
             // right before a change of level (a drop or a jump planned from this very spot)
             // close enough to start it from where the planner did.
-            let next_level_change = steps.get(k + 1).is_some_and(|n| n.jump || matches!((step.z, n.z), (Some(a), Some(b)) if (a - b).abs() > 24.0));
+            // (Or into another region: membership follows the lines actually crossed, so a
+            // corner cut short leaves us in another region than the plan, an open outline's.)
+            let next_level_change = steps.get(k + 1).is_some_and(|n| n.jump || matches!((step.z, n.z), (Some(a), Some(b)) if (a - b).abs() > 24.0) || matches!((step.region, n.region), (Some(a), Some(b)) if a != b));
             let close = if k == last { close_last } else if next_level_change { 5.5 } else { 16.0 };
             let mut best = f32::MAX;
             let mut stalled = 0;
@@ -1950,7 +1954,7 @@ impl<'a> Bot<'a> {
                 {
                     let back = steps.len().checked_sub(2).map_or(start, |k| steps[k].to);
                     let out = self.door_side_exit(r, leave).unwrap_or(back);
-                    let _ = self.walk(&[Step { to: out, z: None, jump: false, crouch: false }]);
+                    let _ = self.walk(&[Step { to: out, z: None, jump: false, crouch: false, region: None }]);
                 }
                 if matches!(goal.target, Target::Wall(_) | Target::Lift(_)) {
                     let after = self.area();
