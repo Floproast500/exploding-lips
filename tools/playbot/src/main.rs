@@ -271,6 +271,50 @@ impl<'a> Bot<'a> {
         })
     }
 
+    /// After pressing switch wall `wi`: if it opens a door that closes on a timer, wait until
+    /// it is open enough to pass, then walk to a spot just beyond it (the side away from us).
+    fn through_timed_door(&mut self, wi: usize) {
+        let (door, beyond) = {
+            let s = self.session();
+            let w = &s.level.world;
+            let Some(sw) = s.effects.switches().into_iter().find(|x| x.wall == wi) else { return };
+            let waits: Vec<usize> = s.effects.door_waits().iter().map(|d| d.0).collect();
+            let Some(&(door, _)) = s.effects.doors().iter().find(|(d, t)| sw.tags.contains(t) && waits.contains(d)) else { return };
+            let p = s.player;
+            // The door's portal lines; the far one is the farthest from us.
+            let far = w.regions[door].walls.iter().filter_map(|&x| {
+                let wall = &w.walls[x];
+                let o = if wall.front == door { wall.back? } else { wall.front };
+                if o == door {
+                    return None;
+                }
+                let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
+                let len = (bx - ax).hypot(by - ay).max(1e-3);
+                let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
+                [1.0f32, -1.0].into_iter().map(|side| (mid.0 - (by - ay) / len * 48.0 * side, mid.1 + (bx - ax) / len * 48.0 * side)).find(|q| w.point_in_region(q.0, q.1, o)).map(|q| (q, o))
+            }).max_by(|a, b| (a.0.0 - p.x).hypot(a.0.1 - p.y).total_cmp(&(b.0.0 - p.x).hypot(b.0.1 - p.y)));
+            let Some((q, o)) = far else { return };
+            if o == p.region {
+                return;
+            }
+            (door, [q.0, q.1, w.regions[o].floor])
+        };
+        let physics = self.session().physics_override.unwrap_or_default();
+        let idle = Input::default();
+        for _ in 0..(TICK_RATE as usize * 3) {
+            let r = &self.session().level.world.regions[door];
+            if r.ceiling - r.floor >= physics.height + physics.head_clearance + 1.0 || self.level_done() {
+                break;
+            }
+            self.tick(&idle);
+        }
+        let goal = Goal { target: Target::Region(WAYPOINT), at: beyond, face: None, shoot: false };
+        if let Some((_, steps)) = self.plan(&[goal]) {
+            self.note(format!("     through the door r{door} before it shuts ({} steps)", steps.len()));
+            let _ = self.walk(&steps);
+        }
+    }
+
     /// A spot just out of region `r` into a neighbour that borders a door opened by `tag`.
     fn door_side_exit(&self, r: usize, tag: i32) -> Option<(f32, f32)> {
         let s = self.session();
@@ -1264,7 +1308,8 @@ impl<'a> Bot<'a> {
             if self.session().player.flying && self.session().effects.triggers().iter().any(|(t, tags)| *t == r && tags[3] > 0) {
                 let mut up = Input::default();
                 up.set(Action::Jump, true);
-                for _ in 0..(TICK_RATE as usize * 4) {
+                // (Up to 1000 above us: swimming rises about 150 a second.)
+                for _ in 0..(TICK_RATE as usize * 12) {
                     if self.teleported || self.level_done() || !self.session().player.flying {
                         break;
                     }
@@ -1803,6 +1848,12 @@ impl<'a> Bot<'a> {
             if reached {
                 let before = self.area();
                 self.interact(&goal);
+                // A switch that opens a door which shuts itself again (RTDOOR with a wait): go
+                // through at once, before it does (planning a long way round first, it is shut
+                // by the time we get there).
+                if let Target::Wall(wi) = goal.target {
+                    self.through_timed_door(wi);
+                }
                 // A switch may have set a door moving: plan once it is open (or shut), not
                 // while it is still a closed doorway (up to 4 s).
                 if matches!(goal.target, Target::Wall(_) | Target::Object(_)) {
