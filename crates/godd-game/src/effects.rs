@@ -384,7 +384,9 @@ impl Effects {
     /// after walls take over other walls' switches.
     pub fn find_door_faces(&mut self, world: &World) {
         self.door_faces.clear();
-        let doors = self.doors();
+        // (Sliding doors only: a rotating door is full height open or shut, so it would always
+        // count as open and its faces would never turn it, LIPS14's r21.)
+        let doors: Vec<(usize, i32)> = self.regions.iter().filter(|r| matches!(r.kind, RegionKind::Door { .. })).map(|r| (r.region, r.tag)).collect();
         for sw in self.switches() {
             let wall = &world.walls[sw.wall];
             if let Some(&(door, _)) = doors.iter().find(|&&(r, t)| sw.tags.contains(&t) && (wall.front == r || wall.back == Some(r))) {

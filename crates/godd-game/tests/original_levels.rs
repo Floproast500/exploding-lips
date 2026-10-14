@@ -1516,3 +1516,29 @@ fn lips01_niche_pickup_reached() {
     hold(&mut game, &vfs, &[Action::Forward], 40, 0.0);
     assert!(game.session().unwrap().objects.inventory.contains(&257), "#257 picked up");
 }
+
+/// LIPS14's rotating door r21 (the only way between the two halves of r15) turns when its face
+/// is walked into, with fixes on too: the g_fixes rule that an open door's own face does not
+/// shut it is for sliding doors only (a rotating door is always full height, so it counted as
+/// open and its faces never turned it).
+#[test]
+fn lips14_rotating_door_turns_from_its_face() {
+    use godd_game::Action;
+    for fixes in [true, false] {
+        let Some((vfs, mut game)) = start("LIPS14") else { return };
+        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+        run(&mut game, &vfs, 0.3);
+        let before = {
+            let s = game.session_mut().unwrap();
+            (s.player.x, s.player.y, s.player.z, s.player.region) = (16704.0, 18640.0, 32.0, 15);
+            s.previous = s.player;
+            let w = &s.level.world;
+            w.vertices[w.walls[101].b]
+        };
+        hold(&mut game, &vfs, &[Action::Forward], 70, std::f32::consts::FRAC_PI_2);
+        run(&mut game, &vfs, 6.0);
+        let w = &game.session().unwrap().level.world;
+        let after = w.vertices[w.walls[101].b];
+        assert!((after.0 - before.0).hypot(after.1 - before.1) > 32.0, "fixes {fixes}: door r21 turned ({before:?} -> {after:?})");
+    }
+}
