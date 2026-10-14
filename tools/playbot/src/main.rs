@@ -572,6 +572,9 @@ impl<'a> Bot<'a> {
             }
             let walk_into = match o.effect {
                 OPICKUP => true,
+                // A lock placed in the world (ODROP fires on contact too): walk into it with
+                // its key.
+                131 => o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|item| s.objects.inventory.iter().any(|&k| s.objects.list[k].name.eq_ignore_ascii_case(item))),
                 OTELE => o.name.is_empty() && o.aux.is_some(),
                 // (Tag switches out of reach overhead are shot: projectiles hit them.)
                 OTAGSW => o.region.is_some_and(|r| o.z - w.regions[r].floor < 72.0),
@@ -607,8 +610,11 @@ impl<'a> Bot<'a> {
             }
             let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
             let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            // (A trigger only on the ceiling, a water surface: up there.)
+            let ceiling_only = tags[3] > 0 && tags[..3].iter().all(|t| *t <= 0);
+            let z = if ceiling_only { w.regions[r].ceiling - 64.0 } else { w.regions[r].floor };
             if w.region_at(c.0, c.1) == Some(r) {
-                goals.push(Goal { target: Target::Region(r), at: [c.0, c.1, w.regions[r].floor], face: None, shoot: false });
+                goals.push(Goal { target: Target::Region(r), at: [c.0, c.1, z], face: None, shoot: false });
             }
         }
         for (r, _) in s.effects.lifts() {
@@ -1198,7 +1204,18 @@ impl<'a> Bot<'a> {
 
     /// Use the goal once there: walk into the wall, or shoot the bot.
     fn interact(&mut self, goal: &Goal) {
-        if let Target::Region(_) = goal.target {
+        if let Target::Region(r) = goal.target {
+            // Swimming up into a ceiling trigger (a water surface): rise until it fires.
+            if self.session().player.flying && self.session().effects.triggers().iter().any(|(t, tags)| *t == r && tags[3] > 0) {
+                let mut up = Input::default();
+                up.set(Action::Jump, true);
+                for _ in 0..(TICK_RATE as usize * 4) {
+                    if self.teleported || self.level_done() || !self.session().player.flying {
+                        break;
+                    }
+                    self.tick(&up);
+                }
+            }
             // A trigger region may start something under us (a floor that is an elevator):
             // stand still while the floor here moves.
             let idle = Input::default();
