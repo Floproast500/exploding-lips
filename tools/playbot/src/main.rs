@@ -290,7 +290,8 @@ impl<'a> Bot<'a> {
                 let ((ax, ay), (bx, by)) = (w.vertices[wall.a], w.vertices[wall.b]);
                 let len = (bx - ax).hypot(by - ay).max(1e-3);
                 let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
-                [1.0f32, -1.0].into_iter().map(|side| (mid.0 - (by - ay) / len * 48.0 * side, mid.1 + (bx - ax) / len * 48.0 * side)).find(|q| w.point_in_region(q.0, q.1, o)).map(|q| (q, o))
+                // (48 past the line, or less into a thin strip beyond the door.)
+                [48.0f32, 24.0, 8.0].into_iter().flat_map(|dist| [1.0f32, -1.0].map(|side| (mid.0 - (by - ay) / len * dist * side, mid.1 + (bx - ax) / len * dist * side))).find(|q| w.point_in_region(q.0, q.1, o)).map(|q| (q, o))
             }).max_by(|a, b| (a.0.0 - p.x).hypot(a.0.1 - p.y).total_cmp(&(b.0.0 - p.x).hypot(b.0.1 - p.y)));
             let Some((q, o)) = far else { return };
             if o == p.region {
@@ -308,9 +309,12 @@ impl<'a> Bot<'a> {
             self.tick(&idle);
         }
         let goal = Goal { target: Target::Region(WAYPOINT), at: beyond, face: None, shoot: false };
-        if let Some((_, steps)) = self.plan(&[goal]) {
-            self.note(format!("     through the door r{door} before it shuts ({} steps)", steps.len()));
-            let _ = self.walk(&steps);
+        match self.plan(&[goal]) {
+            Some((_, steps)) => {
+                self.note(format!("     through the door r{door} before it shuts ({} steps)", steps.len()));
+                let _ = self.walk(&steps);
+            }
+            None => self.note(format!("     no way through the door r{door} to ({:.0}, {:.0})", beyond[0], beyond[1])),
         }
     }
 
