@@ -18,30 +18,6 @@ const OPEN_WALLS: &[(&str, usize, usize, usize)] = &[
     ("LIPS02", 1542, 25, 24),
 ];
 
-/// Door faces that become the door's switch: (level, face wall, switch wall whose effect it
-/// takes with fixes on, wall whose effect it has without).
-const SWITCH_FACES: &[(&str, usize, usize, usize)] = &[
-    // LIPS01: doors r8 (tag 104) and r39 (tag 28) are on the only way to the pickup that
-    // starts the exit chain. Their faces on the way in only knock (tag 7, a "locked" sound);
-    // the switches meant to open them, walls 302 and 606, are stray lines off the doors that
-    // are only touched from inside r49's and r51's open outlines, where no walking route goes
-    // (the original confirms: walking into these faces does nothing, and wall 302 opens the
-    // door only when the player is poked into r49 beside it). The faces open their doors, as
-    // the far face of r39 (wall 230) does.
-    ("LIPS01", 112, 302, 192),
-    ("LIPS01", 134, 302, 192),
-    ("LIPS01", 231, 230, 192),
-];
-
-/// Give (`on`) or take back the door faces' switches of `level` (see `SWITCH_FACES`).
-pub fn apply_effects(level: &str, effects: &mut crate::effects::Effects, on: bool) {
-    for &(name, face, fixed, classic) in SWITCH_FACES {
-        if name.eq_ignore_ascii_case(level) {
-            effects.copy_wall_effect(face, if on { fixed } else { classic });
-        }
-    }
-}
-
 /// Apply (`on`) or undo the fixes for `level`. Returns how many walls changed.
 pub fn apply(level: &str, world: &mut World, on: bool) -> usize {
     let mut changed = 0;

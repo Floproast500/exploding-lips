@@ -1892,6 +1892,9 @@ impl<'a> Bot<'a> {
                     *self.failures.entry(goal.target).or_default() += 1;
                 } else {
                     self.used.insert(goal.target);
+                    // (Recent: among old goals the ones used longest ago come first, and a
+                    // teleporter pair would otherwise bounce us between its ends forever.)
+                    self.last_used.insert(goal.target, self.ticks);
                 }
                 self.edges.clear();
                 self.note("     teleported on the way".into());
@@ -2034,6 +2037,20 @@ fn main() -> AnyResult {
             {
                 (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
                 s.previous = s.player;
+            }
+        }
+        // PLAYBOT_FIRE="21,30;21": fire those tags first, letting things settle (doors, lifts)
+        // after each group.
+        if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
+            for group in v.split(';') {
+                for t in group.split(',').filter_map(|x| x.parse().ok()) {
+                    if let Some(s) = bot.game.session_mut() {
+                        s.fire_tag(t);
+                    }
+                }
+                for _ in 0..(TICK_RATE as usize * 8) {
+                    bot.tick(&Input::default());
+                }
             }
         }
         let started = std::time::Instant::now();

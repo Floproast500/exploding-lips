@@ -429,8 +429,6 @@ impl Session {
         self.process_effect_requests();
         if self.fixes != self.fixes_applied {
             crate::fixes::apply(&self.name, &mut self.level.world, self.fixes);
-            crate::fixes::apply_effects(&self.name, &mut self.effects, self.fixes);
-            self.effects.find_door_faces(&self.level.world);
             self.fixes_applied = self.fixes;
         }
         if self.fixes {
@@ -946,6 +944,7 @@ impl Session {
         w.masked = w.back.is_some() && src.middle.is_some();
         w.light = src.light;
         self.effects.copy_wall_effect(t, s);
+        self.effects.find_door_faces(&self.level.world);
     }
 
     /// Put TV pictures on (or take them off) their walls according to each view's state.

@@ -1468,31 +1468,33 @@ fn lips02_bots_behind_walls_are_not_heard_with_fixes() {
     }
 }
 
-/// g_fixes: LIPS01's doors r8 and r39 open from their faces on the way in (walls 112 and 231,
-/// which only knock in the original: the switches meant for them are stray lines nobody can
-/// reach, so the exit chain could not be started). Walking into each face opens its door;
-/// classic keeps them shut.
+/// LIPS01's doors r8 and r39 are locked from the way in: their faces (walls 112 and 231) only
+/// knock until DUCK3 is picked up, whose tag 108 makes OWTOWs copy the door switches (DOR1OPEN,
+/// DOORYES) onto them. Walking into each face does nothing before that and opens its door after.
 #[test]
-fn lips01_door_faces_open_with_fixes() {
+fn lips01_door_faces_unlock_with_the_duck() {
     use godd_game::Action;
     // (start x, y, region, facing, door)
-    let cases = [(14784.0f32, 16080.0f32, 49usize, std::f32::consts::FRAC_PI_2, "r8"), (15472.0, 15808.0, 51, std::f32::consts::PI, "r39")];
-    for fixes in [true, false] {
+    let cases = [(14784.0f32, 16080.0f32, 49usize, std::f32::consts::FRAC_PI_2, 8usize), (15472.0, 15808.0, 51, std::f32::consts::PI, 39)];
+    for duck in [false, true] {
         for &(x, y, region, angle, door) in &cases {
             let Some((vfs, mut game)) = start("LIPS01") else { return };
-            assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
             run(&mut game, &vfs, 0.3);
             {
                 let s = game.session_mut().unwrap();
+                if duck {
+                    s.fire_tag(108);
+                }
                 let z = s.level.world.regions[region].floor;
                 (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, z, region);
                 s.previous = s.player;
             }
+            run(&mut game, &vfs, 0.1);
             hold(&mut game, &vfs, &[Action::Forward], 40, angle);
             run(&mut game, &vfs, 1.0);
             let s = game.session().unwrap();
-            let d = &s.level.world.regions[if door == "r8" { 8 } else { 39 }];
-            assert_eq!(d.ceiling > d.floor + 48.0, fixes, "fixes {fixes}, door {door}: floor {} ceiling {}", d.floor, d.ceiling);
+            let d = &s.level.world.regions[door];
+            assert_eq!(d.ceiling > d.floor + 48.0, duck, "duck {duck}, door r{door}: floor {} ceiling {}", d.floor, d.ceiling);
         }
     }
 }
