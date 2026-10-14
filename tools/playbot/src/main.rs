@@ -651,7 +651,10 @@ impl<'a> Bot<'a> {
         // usable again.
         let mover_tags: HashSet<i32> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.tag > 0).map(|o| o.tag).collect();
         let moves = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| mover_tags.contains(x)));
-        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        // And trigger regions that teleport (not back to a start): a way on, again and again.
+        let tele_tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
+        let teleports = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| tele_tags.contains(x)));
+        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         goals
     }
 
@@ -1518,7 +1521,13 @@ impl<'a> Bot<'a> {
             // (Things, not switches: a door's other face is right behind it and would shut it.)
             let fresh: Vec<Goal> = goals.iter().filter(|g| !matches!(g.target, Target::Wall(_)) && w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).is_some_and(|r| self.opened.contains(&r))).copied().collect();
             let movers = self.mover_regions();
-            let teleporter = |g: &Goal| matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE) && self.used.contains(&g.target));
+            let tele_regions: HashSet<usize> = {
+                let s = self.session();
+                let tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
+                s.effects.triggers().iter().filter(|(_, t)| t.iter().any(|x| tags.contains(x))).map(|(r, _)| *r).collect()
+            };
+            // (A used teleporter, object or trigger region, only when nothing new is left.)
+            let teleporter = |g: &Goal| self.used.contains(&g.target) && (matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r)));
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)) && !teleporter(g));
             let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
             if found.is_none() && !firsts.is_empty() {
