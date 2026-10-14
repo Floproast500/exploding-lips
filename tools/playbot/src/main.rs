@@ -278,7 +278,8 @@ impl<'a> Bot<'a> {
         let target = goals
             .iter()
             .filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target))
-            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX).map(|r| (route_len(r), r)))
+            // (Not one the waypoint search has set aside: no real way there.)
+            .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (route_len(r), r)))
             .min();
         if self.verbose {
             println!("     route target: {:?}", target);
