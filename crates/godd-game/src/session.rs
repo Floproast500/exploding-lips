@@ -139,8 +139,7 @@ impl Session {
             level.world.walls.len(),
             level.world.sprites.len()
         );
-        let mut effects = Effects::new(&level);
-        effects.stay_open = crate::fixes::doors_staying_open(name, &effects.doors());
+        let effects = Effects::new(&level);
         let level_ini = read_text(vfs, &format!("{name}.INI"));
         let objects = Objects::new(&level, &level_ini);
         let ini = godd_formats::ini::Ini::parse(&level_ini);
@@ -430,6 +429,8 @@ impl Session {
         self.process_effect_requests();
         if self.fixes != self.fixes_applied {
             crate::fixes::apply(&self.name, &mut self.level.world, self.fixes);
+            crate::fixes::apply_effects(&self.name, &mut self.effects, self.fixes);
+            self.effects.find_door_faces(&self.level.world);
             self.fixes_applied = self.fixes;
         }
         if self.fixes {

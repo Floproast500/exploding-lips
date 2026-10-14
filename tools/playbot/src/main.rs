@@ -602,7 +602,9 @@ impl<'a> Bot<'a> {
         let doors = s.effects.doors();
         let names = s.level.region_names();
         let useful = |tags: &std::ops::RangeInclusive<i32>| -> Option<bool> {
-            let door: Vec<usize> = doors.iter().filter(|(_, t)| tags.contains(t)).map(|&(r, _)| r).collect();
+            // (A rotating door is full height open or shut: its switches count as new ones,
+            // used once, below.)
+            let door: Vec<usize> = doors.iter().filter(|(r, t)| tags.contains(t) && s.effects.region_kind(*r) != Some("rotate")).map(|&(r, _)| r).collect();
             let movers: Vec<bool> = s
                 .objects
                 .list
@@ -929,6 +931,8 @@ impl<'a> Bot<'a> {
             .enumerate()
             .filter(|(i, o)| matches!(o.effect, OTAGSW | OBUMPSW) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
             .map(|(_, o)| (o.x, o.y, o.z, o.radius + 16.0 + 2.0))
+            // (Not one we stand in: just used, walking off it is the way on.)
+            .filter(|&(x, y, z, r)| !((start.x - x).abs() < r && (start.y - y).abs() < r && (start.z - z).abs() < 64.0))
             .collect();
         // Spot → (player there, path cost, where it was reached from).
         type Visit = (Player, f32, Option<(Cell, Step)>);
@@ -1092,6 +1096,9 @@ impl<'a> Bot<'a> {
             }
         }
         self.reached = came.keys().map(|c| c.3).collect();
+        if std::env::var("PLAYBOT_PLANDBG").is_ok() {
+            println!("     search failed: {} cells, {} expanded, from ({:.0},{:.0},{:.0}) r{} ground {} crouch {} flying {}", came.len(), expanded, start.x, start.y, start.z, start.region, start.on_ground, start.crouching, start.flying);
+        }
         None
     }
 
@@ -2019,6 +2026,16 @@ fn main() -> AnyResult {
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
         let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        // PLAYBOT_START="x,y,z,region": start there (debugging a spot deep in a level).
+        if let Ok(v) = std::env::var("PLAYBOT_START") {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+            if n.len() == 4
+                && let Some(s) = bot.game.session_mut()
+            {
+                (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
+                s.previous = s.player;
+            }
+        }
         let started = std::time::Instant::now();
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;

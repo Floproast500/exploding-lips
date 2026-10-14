@@ -1468,19 +1468,31 @@ fn lips02_bots_behind_walls_are_not_heard_with_fixes() {
     }
 }
 
-/// g_fixes: LIPS01's door r8 (tag 104) stays open once opened. Its switch (wall 302) is a stray
-/// line only touched from inside r49's open outline, and its pickup opener (#104) is on the
-/// ground floor far below, so with its 5 s close the exit chain could not be started; classic
-/// keeps the original close.
+/// g_fixes: LIPS01's doors r8 and r39 open from their faces on the way in (walls 112 and 231,
+/// which only knock in the original: the switches meant for them are stray lines nobody can
+/// reach, so the exit chain could not be started). Walking into each face opens its door;
+/// classic keeps them shut.
 #[test]
-fn lips01_door_r8_stays_open_with_fixes() {
+fn lips01_door_faces_open_with_fixes() {
+    use godd_game::Action;
+    // (start x, y, region, facing, door)
+    let cases = [(14784.0f32, 16080.0f32, 49usize, std::f32::consts::FRAC_PI_2, "r8"), (15472.0, 15808.0, 51, std::f32::consts::PI, "r39")];
     for fixes in [true, false] {
-        let Some((vfs, mut game)) = start("LIPS01") else { return };
-        assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
-        run(&mut game, &vfs, 0.3);
-        game.session_mut().unwrap().fire_tag(104);
-        run(&mut game, &vfs, 12.0);
-        let r = &game.session().unwrap().level.world.regions[8];
-        assert_eq!(r.ceiling > r.floor + 60.0, fixes, "fixes {fixes}: door r8 floor {} ceiling {}", r.floor, r.ceiling);
+        for &(x, y, region, angle, door) in &cases {
+            let Some((vfs, mut game)) = start("LIPS01") else { return };
+            assert!(game.exec_config(&format!("set g_fixes {}", fixes as u8)).is_empty());
+            run(&mut game, &vfs, 0.3);
+            {
+                let s = game.session_mut().unwrap();
+                let z = s.level.world.regions[region].floor;
+                (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, z, region);
+                s.previous = s.player;
+            }
+            hold(&mut game, &vfs, &[Action::Forward], 40, angle);
+            run(&mut game, &vfs, 1.0);
+            let s = game.session().unwrap();
+            let d = &s.level.world.regions[if door == "r8" { 8 } else { 39 }];
+            assert_eq!(d.ceiling > d.floor + 48.0, fixes, "fixes {fixes}, door {door}: floor {} ceiling {}", d.floor, d.ceiling);
+        }
     }
 }

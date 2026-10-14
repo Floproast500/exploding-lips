@@ -181,8 +181,6 @@ pub struct Effects {
     frame_accum: f32,
     /// Original-game fixes on (cvar `g_fixes`).
     pub fixes: bool,
-    /// Doors that stay open once opened while fixes are on (`crate::fixes`).
-    pub stay_open: Vec<usize>,
     /// Switch wall → the door region it is a face of.
     door_faces: std::collections::HashMap<usize, usize>,
     /// Door regions open (or opening) at the last tick.
@@ -378,15 +376,21 @@ impl Effects {
             fx.regions.push(RegionEffect { region: ri, tag: r.le_u16(0x86) as i16 as i32, kind, slots });
         }
         fx.ramps = build_ramps(level);
-        // Switch walls that are faces of the door they open (g_fixes: not shut by a touch).
-        let doors = fx.doors();
-        for sw in fx.switches() {
-            let wall = &level.world.walls[sw.wall];
+        fx.find_door_faces(&level.world);
+        fx
+    }
+
+    /// Switch walls that are faces of the door they open (g_fixes: not shut by a touch). Again
+    /// after walls take over other walls' switches.
+    pub fn find_door_faces(&mut self, world: &World) {
+        self.door_faces.clear();
+        let doors = self.doors();
+        for sw in self.switches() {
+            let wall = &world.walls[sw.wall];
             if let Some(&(door, _)) = doors.iter().find(|&&(r, t)| sw.tags.contains(&t) && (wall.front == r || wall.back == Some(r))) {
-                fx.door_faces.insert(sw.wall, door);
+                self.door_faces.insert(sw.wall, door);
             }
         }
-        fx
     }
 
     /// RSLANT: (minimum z, maximum z) for an object standing at (x, y) in `region`.
@@ -571,7 +575,6 @@ impl Effects {
             step_slots(&mut w.slots, world, sequences, dt);
         }
         let mut sounds = Vec::new();
-        let keep_open: Vec<usize> = if self.fixes { self.stay_open.clone() } else { Vec::new() };
         for r in &mut self.regions {
             step_slots(&mut r.slots, world, sequences, dt);
             let region = &mut world.regions[r.region];
@@ -598,7 +601,7 @@ impl Effects {
                         region.ceiling = *open;
                         *speed = -speed.abs();
                         *moving = false;
-                        *close_at = if keep_open.contains(&r.region) { None } else { wait.map(|w| now + w) };
+                        *close_at = wait.map(|w| now + w);
                         sounds.push(aux.as_ref().and_then(|a| a.sound(2)));
                     } else if region.ceiling <= region.floor + h {
                         if h == 0.0 {
