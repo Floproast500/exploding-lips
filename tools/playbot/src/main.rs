@@ -1827,12 +1827,24 @@ impl<'a> Bot<'a> {
             let teleporter = |g: &Goal| self.used.contains(&g.target) && (matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r)));
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)) && !teleporter(g));
             let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
+            let under_us: HashSet<Target> = {
+                let s = self.session();
+                let w = &s.level.world;
+                let floor = w.solid_floor(s.player.region).1;
+                let names = s.level.region_names();
+                let ours: Vec<&godd_game::objects::Obj> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) == Some(floor)).collect();
+                let mut tags: HashSet<i32> = ours.iter().filter(|o| o.tag > 0).map(|o| o.tag).collect();
+                // (And a trigger-by-name of such a mover: LIPS13's 1744 fires 45, whose DWN01
+                // takes the lift LIFT07 we just rode up back down.)
+                tags.extend(s.objects.list.iter().filter(|o| o.effect == 80 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| ours.iter().any(|m| m.name.eq_ignore_ascii_case(n)))).map(|o| o.tag));
+                s.effects.switches().iter().filter(|sw| tags.iter().any(|t| sw.tags.contains(t))).map(|sw| Target::Wall(sw.wall)).collect()
+            };
             // (A new switch right here before places further off: LIPS01's 1166, the face of the
             // door to #257, was 14 steps away when the bot left for a region 95 off, down where
             // it never found the way back up.)
             if found.is_none() {
                 let p = self.session().player;
-                let near: Vec<Goal> = switches.iter().filter(|g| matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target) && (g.at[0] - p.x).hypot(g.at[1] - p.y) < 256.0 && (g.at[2] - p.z).abs() < 64.0).copied().collect();
+                let near: Vec<Goal> = switches.iter().filter(|g| matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target) && !under_us.contains(&g.target) && (g.at[0] - p.x).hypot(g.at[1] - p.y) < 256.0 && (g.at[2] - p.z).abs() < 64.0).copied().collect();
                 if !near.is_empty() {
                     found = self.plan(&near).filter(|f| f.1.len() <= 24);
                 }
@@ -1868,18 +1880,6 @@ impl<'a> Bot<'a> {
             let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
             // (A switch that moves the floor we stand on, the down button of the lift we just
             // rode up, only once nothing else is reachable.)
-            let under_us: HashSet<Target> = {
-                let s = self.session();
-                let w = &s.level.world;
-                let floor = w.solid_floor(s.player.region).1;
-                let names = s.level.region_names();
-                let ours: Vec<&godd_game::objects::Obj> = s.objects.list.iter().filter(|o| matches!(o.effect, 41 | 49) && o.aux.as_ref().and_then(|a| a.slot(9)).and_then(|n| names.iter().position(|rn| rn.eq_ignore_ascii_case(n))) == Some(floor)).collect();
-                let mut tags: HashSet<i32> = ours.iter().filter(|o| o.tag > 0).map(|o| o.tag).collect();
-                // (And a trigger-by-name of such a mover: LIPS13's 1744 fires 45, whose DWN01
-                // takes the lift LIFT07 we just rode up back down.)
-                tags.extend(s.objects.list.iter().filter(|o| o.effect == 80 && o.tag > 0 && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| ours.iter().any(|m| m.name.eq_ignore_ascii_case(n)))).map(|o| o.tag));
-                s.effects.switches().iter().filter(|sw| tags.iter().any(|t| sw.tags.contains(t))).map(|sw| Target::Wall(sw.wall)).collect()
-            };
             let (new_last, new_first): (Vec<Goal>, Vec<Goal>) = new.iter().partition(|g| under_us.contains(&g.target));
             let found = found.or_else(|| if new_first.is_empty() { None } else { self.plan(&new_first) });
             // Only old switches left: open the next shut door on the way to the nearest thing
