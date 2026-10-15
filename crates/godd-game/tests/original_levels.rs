@@ -1569,3 +1569,27 @@ fn osetjump_sets_the_level_jump() {
     }
     assert!(game.session().unwrap().objects.inventory.contains(&12), "#12 picked up by jumping");
 }
+
+/// The route guide follows the player: entering the region of the next step, then pressing the
+/// wall switch of the one after, moves it on (LIPS04's way: the lift region r16, the exit 1342).
+#[test]
+fn route_guide_follows_progress() {
+    use godd_game::route::{Route, RouteStep, RouteTarget};
+    let Some((vfs, mut game)) = start("LIPS04") else { return };
+    let route = Route {
+        steps: vec![
+            RouteStep { target: RouteTarget::Region(16), pos: [16000.0, 16256.0, -488.0], trail: vec![] },
+            RouteStep { target: RouteTarget::Wall(1342), pos: [9664.0, 15400.0, 0.0], trail: vec![] },
+        ],
+    };
+    game.routes.insert("LIPS04".into(), route);
+    run(&mut game, &vfs, 0.3);
+    assert_eq!(game.route_next(), Some(0));
+    // (As walking in would: the region's enter event.)
+    game.session_mut().unwrap().effects.enter_log.push(16);
+    run(&mut game, &vfs, 0.1);
+    assert_eq!(game.route_next(), Some(1), "entered r16");
+    game.session_mut().unwrap().effects.touch_log.push(1342);
+    run(&mut game, &vfs, 0.1);
+    assert_eq!(game.route_next(), None, "pressed the exit: route done");
+}

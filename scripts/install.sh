@@ -25,6 +25,8 @@ cargo build --release -p lips-desktop -p packbuilder $features
 
 mkdir -p "$prefix" "$bin" "$apps"
 cp target/release/biglips target/release/packbuilder "$prefix/"
+# The route guide's recorded routes (one per level, made with playbot --record).
+if [ -d routes ]; then mkdir -p "$prefix/routes" && cp routes/*.route "$prefix/routes/" 2>/dev/null || true; fi
 ln -sf "$prefix/biglips" "$bin/biglips"
 cat > "$apps/biglips.desktop" <<EOF
 [Desktop Entry]

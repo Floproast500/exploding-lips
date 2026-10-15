@@ -185,6 +185,10 @@ pub struct Effects {
     door_faces: std::collections::HashMap<usize, usize>,
     /// Door regions open (or opening) at the last tick.
     open_doors: std::collections::HashSet<usize>,
+    /// Switch walls that fired, and regions the player entered, since last drained (the route
+    /// guide follows them, `crate::route`).
+    pub touch_log: Vec<usize>,
+    pub enter_log: Vec<usize>,
 }
 
 /// A switch wall: touching it fires `tags` (while `usable`).
@@ -523,6 +527,7 @@ impl Effects {
         }
         *state ^= 1;
         *lockout = SWITCH_LOCKOUT;
+        self.touch_log.push(wall);
         let (first, last) = (*tag, *tag_end);
         for t in first..=last.max(first) {
             self.tag(t);
@@ -530,6 +535,9 @@ impl Effects {
     }
 
     fn region_event(&mut self, region: usize, event: u32) {
+        if event == 0x1000 {
+            self.enter_log.push(region);
+        }
         let Some(i) = self.by_region.get(region).copied().flatten() else { return };
         let fire = |aux: &Aux| match event {
             0x400 => aux.p90(),

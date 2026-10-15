@@ -132,6 +132,10 @@ struct Bot<'a> {
     used_tags: HashMap<usize, Option<std::ops::RangeInclusive<i32>>>,
     /// Times each teleporter goal sent us off since something new was used.
     tele_uses: HashMap<Target, u32>,
+    /// The route recorded so far (`--record`): steps that changed something, and the trail
+    /// walked since the last one.
+    route: godd_game::route::Route,
+    trail: Vec<[f32; 3]>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
@@ -511,7 +515,24 @@ impl<'a> Bot<'a> {
             }
         }
         let openers = self.door_openers();
+        // Walk-in teleporters (trigger regions firing an OTELE that is no death): a way from
+        // their region to where they send us (LIPS00's r468 into the water room r303).
+        let names = s.level.region_names();
+        let tele: Vec<(usize, usize)> = {
+            let dest_of = |o: &godd_game::objects::Obj| -> Option<usize> {
+                let name = o.aux.as_ref()?.slot(9)?;
+                s.objects.list.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.region).or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(name)))
+            };
+            let teles: Vec<(i32, usize)> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).filter_map(|o| Some((o.tag, dest_of(o)?))).collect();
+            triggers.iter().flat_map(|(r, tags)| teles.iter().filter(|(t, _)| tags[0] == *t || tags[1] == *t).map(move |&(_, d)| (*r, d))).collect()
+        };
         while let Some(r) = queue.pop_front() {
+            for &(_, d) in tele.iter().filter(|(from, _)| *from == r) {
+                if d < prev.len() && prev[d] == usize::MAX {
+                    prev[d] = r;
+                    queue.push_back(d);
+                }
+            }
             for &wi in &w.regions[r].walls {
                 let x = &w.walls[wi];
                 // (Lines flagged solid block, as they are now: wall copies change them; door
@@ -691,6 +712,19 @@ impl<'a> Bot<'a> {
             let s = self.session();
             s.effects.doors().iter().filter(|(r, _)| s.effects.region_kind(*r) == Some("rotate")).map(|&(r, _)| (r, Self::rot_points(&s.level.world, r))).collect()
         })
+    }
+
+    /// Add a route step for `target` at `at`, taking the trail walked since the last step.
+    fn record_step(&mut self, target: Target, at: [f32; 3]) {
+        use godd_game::route::{RouteStep, RouteTarget};
+        let target = match target {
+            Target::Wall(w) => RouteTarget::Wall(w),
+            Target::Object(o) => RouteTarget::Object(o),
+            Target::Region(r) | Target::Lift(r) if r != WAYPOINT => RouteTarget::Region(r),
+            _ => return,
+        };
+        let trail = godd_game::route::untangle(&std::mem::take(&mut self.trail), 40.0);
+        self.route.steps.push(RouteStep { target, pos: at, trail });
     }
 
     /// Everything still worth walking to.
@@ -1336,6 +1370,11 @@ impl<'a> Bot<'a> {
         self.ticks += 1;
         if let Some(s) = self.game.session() {
             self.visited.insert(s.player.region);
+            // (The route's trail: a point every 48 units walked.)
+            let p = &s.player;
+            if !s.in_bsp && self.trail.last().is_none_or(|q| (q[0] - p.x).hypot(q[1] - p.y) >= 48.0) {
+                self.trail.push([p.x, p.y, p.z]);
+            }
             // The camera must stay inside the level: the eye under its region's ceiling and
             // over its floor, and the spot inside the region (else the view sees out).
             if std::env::var("PLAYBOT_CAMCHECK").is_ok() && !s.in_bsp {
@@ -2211,6 +2250,10 @@ impl<'a> Bot<'a> {
                     }
                 }
                 self.edges.clear();
+                // (A teleporter: a step of the route.)
+                if !still_there {
+                    self.record_step(goal.target, goal.at);
+                }
                 self.note("     teleported on the way".into());
                 if self.verbose {
                     let s = self.session();
@@ -2251,6 +2294,7 @@ impl<'a> Bot<'a> {
             }
             if reached {
                 let before = self.area();
+                let changed_before = (self.world_key(), self.session().objects.inventory.len());
                 self.interact(&goal);
                 // A switch that set the floor under us moving (an elevator's own button): ride it
                 // to the end before planning on (up to 15 s). Likewise a trigger region that is
@@ -2330,6 +2374,12 @@ impl<'a> Bot<'a> {
                 }
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
+                // The route: a step that changed something (a door, a lift, what we carry, the
+                // level), with the trail walked to it.
+                let changed = self.level_done() || (self.world_key(), self.session().objects.inventory.len()) != changed_before || matches!(goal.target, Target::Object(_));
+                if changed {
+                    self.record_step(goal.target, goal.at);
+                }
                 // (A rotating door's other switches are spent with it: pressing its far face
                 // right after would swing it shut again, LIPS14's r21.)
                 if let Target::Wall(wi) = goal.target {
@@ -2377,12 +2427,14 @@ impl<'a> Bot<'a> {
 fn main() -> AnyResult {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(dir) = args.first() else {
-        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal]");
+        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal] [--record DIR]");
         std::process::exit(2);
     };
     let verbose = args.iter().any(|a| a == "--verbose");
     let minutes: f64 = args.iter().position(|a| a == "--minutes").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(30.0);
     let god = !args.iter().any(|a| a == "--mortal");
+    // --record DIR: write each completed level's route to DIR/LEVEL.route (the route guide).
+    let record: Option<std::path::PathBuf> = args.iter().position(|a| a == "--record").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     let mut levels: Vec<String> = args[1..].iter().filter(|a| a.starts_with("LIPS")).cloned().collect();
     if levels.is_empty() {
         levels = (0..18).map(|i| format!("LIPS{i:02}")).collect();
@@ -2391,7 +2443,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
         // settle (doors, lifts) after each group.
         if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
@@ -2420,7 +2472,16 @@ fn main() -> AnyResult {
         let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
         let game_time = bot.ticks as f32 / TICK_RATE;
         match result {
-            Ok(next) => println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32()),
+            Ok(next) => {
+                println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32());
+                if let Some(dir) = &record {
+                    let path = dir.join(format!("{level}.route"));
+                    match std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, bot.route.to_text())) {
+                        Ok(()) => println!("{level}: route of {} steps written to {}", bot.route.steps.len(), path.display()),
+                        Err(e) => eprintln!("{level}: cannot write {}: {e}", path.display()),
+                    }
+                }
+            }
             Err(why) => {
                 failures += 1;
                 println!("{level}: BLOCKED after {game_time:.0} s ({} things used): {why}", bot.used.len());

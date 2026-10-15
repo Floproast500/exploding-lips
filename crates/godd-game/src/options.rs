@@ -53,6 +53,7 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.bool("hud_fps", "Show FPS", Hud, false);
     c.bool("hud_hd", "HD HUD and menus (GPU)", Hud, true);
     c.bool("hud_guides", "Guides (glowing exits)", Hud, true);
+    c.bool("hud_route", "Route guide (next step)", Hud, true);
     c.bool("hud_smooth", "Smooth HD text", Hud, true);
     c.bool("am_textured", "Map: textured floors", Hud, true);
     c.bool("am_rotate", "Map: rotate with view", Hud, true);

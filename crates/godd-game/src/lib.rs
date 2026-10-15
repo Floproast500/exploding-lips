@@ -12,6 +12,7 @@ pub use engine_core::clock;
 pub mod effects;
 pub mod fixes;
 pub mod guides;
+pub mod route;
 pub use engine_core::frame;
 pub mod hud;
 mod input;
@@ -131,6 +132,11 @@ pub struct Game {
     /// F2 automap overlay.
     show_map: bool,
     automap: automap::Automap,
+    /// Recorded routes by level name (upper case), for the route guide (`hud_route`); the front
+    /// end loads them from `routes/` folders.
+    pub routes: std::collections::HashMap<String, route::Route>,
+    /// The level the route progress is for, and how far along it the player is.
+    route_progress: (String, route::RouteProgress),
 }
 
 /// One frame for a GPU renderer (see [`Game::gpu_frame`]).
@@ -195,6 +201,8 @@ impl Game {
             gpu_ms: None,
             bsp_shown: false,
             uptime_ticks: 0,
+            routes: std::collections::HashMap::new(),
+            route_progress: (String::new(), route::RouteProgress::default()),
             save: options
                 .save
                 .as_deref()
@@ -680,6 +688,19 @@ impl Game {
             }
             State::Playing(session) => {
                 session.tick(input, &self.physics);
+                // The route guide follows what was used this tick (the logs are drained either way).
+                let walls = std::mem::take(&mut session.effects.touch_log);
+                let entered = std::mem::take(&mut session.effects.enter_log);
+                let bumped = std::mem::take(&mut session.objects.bump_log);
+                if self.route_progress.0 != session.name {
+                    self.route_progress = (session.name.clone(), route::RouteProgress::default());
+                }
+                if let Some(route) = self.routes.get(&session.name.to_ascii_uppercase()) {
+                    let progress = &mut self.route_progress.1;
+                    progress.advance(route, &walls, &bumped, &entered);
+                    // (Picked up already, as after loading a save.)
+                    progress.skip_done(route, |o| session.objects.inventory.contains(&o));
+                }
                 // Rumble: a light kick per shot, a heavy one when hurt, a thud for nearby blasts.
                 let (life, armor) = (session.script.states[script::LIFE], session.script.states[script::ARMOR]);
                 let flash = session.objects.muzzle_flash;
@@ -731,6 +752,13 @@ impl Game {
                 }
             }
         }
+    }
+
+    /// The route guide's next step for the running level (None: no route, or done).
+    pub fn route_next(&self) -> Option<usize> {
+        let s = self.session()?;
+        let route = self.routes.get(&s.name.to_ascii_uppercase())?;
+        (self.route_progress.0 == s.name && self.route_progress.1.next < route.steps.len()).then_some(self.route_progress.1.next)
     }
 
     /// Render into `frame`. `alpha` (0..1) interpolates between the last two ticks.
@@ -858,7 +886,22 @@ impl Game {
         let c = &self.cvars;
         if modern.is_some_and(|m| m.dynamic_lights) {
             frame.lights = scene_lights(session, &self.physics);
-            if c.get_bool("hud_guides") {
+            let route = self.routes.get(&session.name.to_ascii_uppercase()).filter(|_| c.get_bool("hud_route") && self.route_progress.0 == session.name);
+            if let Some(step) = route.and_then(|r| self.route_progress.1.current(r)) {
+                // The route guide: a beacon at the next thing to do and a trail of lights to it.
+                let p = &session.player;
+                let t = self.uptime_ticks as f32 / TICK_RATE as f32;
+                let pulse = 1.0 + 0.35 * (t * std::f32::consts::TAU * 0.8).sin();
+                let green = guides::GuideKind::Exit.light();
+                frame.lights.push(engine_scene::scene::SceneLight { pos: [step.pos[0], step.pos[1], step.pos[2] + 24.0], radius: 160.0, color: green.map(|v| v * 1.3 * pulse) });
+                let room = 64usize.saturating_sub(frame.lights.len()).min(12);
+                let route = route.expect("route");
+                for (k, spot) in self.route_progress.1.trail_ahead(route, [p.x, p.y, p.z], 96.0, room).into_iter().enumerate() {
+                    // (A wave running along the trail towards the beacon.)
+                    let wave = 0.6 + 0.4 * ((t * 3.0 - k as f32 * 0.6).sin() * 0.5 + 0.5);
+                    frame.lights.push(engine_scene::scene::SceneLight { pos: [spot[0], spot[1], spot[2] + 16.0], radius: 56.0, color: green.map(|v| v * 0.55 * wave) });
+                }
+            } else if c.get_bool("hud_guides") {
                 // Pulsing markers on the way forward, nearest first, after the combat lights.
                 let p = &session.player;
                 let t = self.uptime_ticks as f32 / TICK_RATE as f32;
@@ -969,7 +1012,17 @@ impl Game {
                     zoom: self.cvars.get_float("am_zoom") as f32,
                     floor_row: 7,
                     colors: self.ui_colors,
-                    guides: if self.cvars.get_bool("hud_guides") {
+                    guides: if let Some(route) = self.routes.get(&session.name.to_ascii_uppercase()).filter(|_| self.cvars.get_bool("hud_route") && self.route_progress.0 == session.name)
+                        && let Some(step) = self.route_progress.1.current(route)
+                    {
+                        // The route guide: the trail to the next step and the step itself.
+                        let pal = self.palette();
+                        let green = text::nearest_color(pal, guides::GuideKind::Exit.rgb());
+                        let world = &session.level.world;
+                        let mut marks: Vec<(f32, f32, Option<usize>, u8)> = step.trail.iter().step_by(2).map(|q| (q[0], q[1], world.region_at(q[0], q[1]), green)).collect();
+                        marks.push((step.pos[0], step.pos[1], world.region_at(step.pos[0], step.pos[1]), green));
+                        marks
+                    } else if self.cvars.get_bool("hud_guides") {
                         let pal = self.palette();
                         guides::find(session).iter().map(|g| (g.pos[0], g.pos[1], g.region, text::nearest_color(pal, g.kind.rgb()))).collect()
                     } else {

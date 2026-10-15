@@ -560,6 +560,7 @@ fn main() {
     let (packs, mods) = find_packs_and_mods();
     game.options_menu.packs = packs;
     game.options_menu.mods = mods;
+    game.routes = load_routes();
     let audio = if opts.mute { None } else { audio::Audio::new(soundfont.as_deref()) };
     if let Some(text) = config::dir().and_then(|d| std::fs::read_to_string(d.join("quick.sav")).ok()) {
         game.set_quicksave(text);
@@ -633,6 +634,30 @@ fn main() {
         }
     }
     event_loop.run_app(&mut app).expect("event loop");
+}
+
+/// Recorded routes for the route guide: LEVEL.route files in routes/ beside the executable, in
+/// ./routes and in the config directory's routes/ (made with `playbot --record`; later ones
+/// replace earlier), by level name.
+fn load_routes() -> std::collections::HashMap<String, godd_game::route::Route> {
+    let mut routes = std::collections::HashMap::new();
+    // (Beside the executable too: the installer puts the shipped routes there.)
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(PathBuf::from));
+    for root in [exe_dir, Some(PathBuf::from(".")), config::dir()].into_iter().flatten() {
+        let Ok(dir) = std::fs::read_dir(root.join("routes")) else { continue };
+        for path in dir.filter_map(Result::ok).map(|e| e.path()) {
+            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("route"))
+                && let (Some(stem), Ok(text)) = (path.file_stem(), std::fs::read_to_string(&path))
+                && let Some(route) = godd_game::route::Route::parse(&text)
+            {
+                routes.insert(stem.to_string_lossy().to_ascii_uppercase(), route);
+            }
+        }
+    }
+    if !routes.is_empty() {
+        log::info!("route guide: routes for {} levels", routes.len());
+    }
+    routes
 }
 
 /// Texture packs (folders with pack.txt) and mod folders in ./packs, ./mods and the config

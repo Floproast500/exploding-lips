@@ -427,6 +427,8 @@ pub struct PlayerView {
 
 pub struct Objects {
     pub list: Vec<Obj>,
+    /// Objects bumped (touched, picked up, shot) since last drained (the route guide).
+    pub bump_log: Vec<usize>,
     /// Original-game bug fixes on (cvar `g_fixes`, set by the session).
     pub fixes: bool,
     scripts: HashMap<String, mover::Script>,
@@ -495,6 +497,7 @@ impl Objects {
             texs_by_name,
             tools: Tools::default(),
             inventory: Vec::new(),
+            bump_log: Vec::new(),
             requests: Vec::new(),
             frame_accum: 0.0,
             frame: 0,
@@ -1443,6 +1446,7 @@ impl Objects {
     }
 
     fn bump(&mut self, i: usize, by_projectile: bool, now: f64) {
+        self.bump_log.push(i);
         let o = &mut self.list[i];
         if let Some(mover) = &mut o.mover {
             if o.cooldown > 0.0 {
