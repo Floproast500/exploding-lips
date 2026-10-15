@@ -976,7 +976,12 @@ impl<'a> Bot<'a> {
             // Stay down while there is no room to stand.
             // (Or heading into a gap too low to stand in: crouch before it, not in it.)
             let low_at = |r: Option<usize>| r.and_then(|r| world.regions.get(r)).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
-            let low = low_at(Some(p.region)) || low_at(world.region_at_z(to.0, to.1, Some(p.z + 1.0)));
+            // (Or a low duct on the way there, between two rooms that are not: LIPS11's 32-high
+            // r140, the target spot being on its far side.)
+            let low = low_at(Some(p.region)) || (0..=8).any(|k| {
+                let t = k as f32 / 8.0;
+                low_at(world.region_at_z(p.x + (to.0 - p.x) * t, p.y + (to.1 - p.y) * t, Some(p.z + 1.0)))
+            });
             i.set(Action::Crouch, crouch || low);
             p.angle = facing((p.x, p.y), to);
             let (x0, y0) = (p.x, p.y);
@@ -1583,7 +1588,10 @@ impl<'a> Bot<'a> {
                     let w = &s.level.world;
                     let low_at = |r: Option<usize>| r.and_then(|r| w.regions.get(r)).is_some_and(|r| r.ceiling - r.floor < physics.height + physics.head_clearance);
                     // (Or heading into a gap too low to stand in: crouch before it.)
-                    low_at(Some(p.region)) || low_at(w.region_at_z(step.to.0, step.to.1, Some(p.z + 1.0)))
+                    low_at(Some(p.region)) || (0..=8).any(|k| {
+                        let t = k as f32 / 8.0;
+                        low_at(w.region_at_z(p.x + (step.to.0 - p.x) * t, p.y + (step.to.1 - p.y) * t, Some(p.z + 1.0)))
+                    })
                 };
                 input.set(Action::Crouch, step.crouch || low);
                 // The planned jump, or a hop when stuck against a ledge.
