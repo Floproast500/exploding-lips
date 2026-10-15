@@ -419,10 +419,22 @@ impl<'a> Bot<'a> {
                 .map(|o| o.tag)
                 .chain(s.effects.switches().iter().flat_map(|sw| sw.tags.clone()))
                 .collect();
+            let to_birth = |o: &godd_game::objects::Obj| o.effect == OTELE && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"));
+            // (And a timer that fires such a teleporter by name: LIPS00's burger BURG fires 47,
+            // whose timer sends BURGDEAD's player home three seconds later.)
+            let timed: Vec<i32> = s
+                .objects
+                .list
+                .iter()
+                .filter(|o| matches!(o.effect, 80 | 81) && o.tag > 0)
+                .filter(|o| o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| s.objects.list.iter().any(|t| t.name.eq_ignore_ascii_case(n) && to_birth(t))))
+                .map(|o| o.tag)
+                .collect();
             BASE_DEATH_TAGS
                 .iter()
                 .copied()
-                .chain(s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !switched.contains(&o.tag) && o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|t| t.to_ascii_uppercase().starts_with("RBIRTH"))).map(|o| o.tag))
+                .chain(s.objects.list.iter().filter(|o| o.tag > 0 && !switched.contains(&o.tag) && to_birth(o)).map(|o| o.tag))
+                .chain(timed)
                 .collect()
         })
     }
@@ -941,7 +953,8 @@ impl<'a> Bot<'a> {
                 continue;
             }
             let walk_into = match o.effect {
-                OPICKUP => true,
+                // (Not one whose tag sends the player home: a poisoned burger.)
+                OPICKUP => !o.aux.as_ref().is_some_and(|a| self.death_tags().contains(&a.ints[0])),
                 // A lock placed in the world (ODROP fires on contact too): walk into it with
                 // its key.
                 131 => o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|item| s.objects.inventory.iter().any(|&k| s.objects.list[k].name.eq_ignore_ascii_case(item))),
@@ -1236,7 +1249,7 @@ impl<'a> Bot<'a> {
             .list
             .iter()
             .enumerate()
-            .filter(|(i, o)| !self.no_avoid && matches!(o.effect, OTAGSW | OBUMPSW) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
+            .filter(|(i, o)| !self.no_avoid && (matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| self.death_tags().contains(&a.ints[0]))) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
             .map(|(_, o)| (o.x, o.y, o.z, o.radius + 16.0 + 2.0))
             // (Not one we stand in: just used, walking off it is the way on.)
             .filter(|&(x, y, z, r)| !((start.x - x).abs() < r && (start.y - y).abs() < r && (start.z - z).abs() < 64.0))
