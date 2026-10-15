@@ -45,6 +45,8 @@ pub enum EffectRequest {
     Sound(String, Option<usize>),
     /// RROTATE turned `region` by `angle` radians about `pivot`: objects on its floor follow.
     Rotated { region: usize, pivot: (f32, f32), angle: f32 },
+    /// Event 0x80 to the object (or else wall/region) of this name: a switch's aux slot 9.
+    Activate(String),
 }
 
 /// The few aux-record fields world effects use.
@@ -53,6 +55,8 @@ struct Aux {
     params: [i32; 5],
     /// Sample names for sound slots 0–4 (start, loop, stop, …).
     sounds: [Option<String>; 5],
+    /// Name slot 9 (+0x7a): what a switch sends event 0x80 to.
+    target: Option<String>,
 }
 
 impl Aux {
@@ -64,7 +68,8 @@ impl Aux {
             let name = c_string(&sounds_section.get(sound)?[0x0c..0x18]);
             (!name.is_empty()).then_some(name)
         });
-        Some(Self { params: std::array::from_fn(|k| record.le_i32(0x88 + 4 * k)), sounds })
+        let target = Some(c_string(&record[0x7a..0x86])).filter(|n| !n.is_empty());
+        Some(Self { params: std::array::from_fn(|k| record.le_i32(0x88 + 4 * k)), sounds, target })
     }
     fn p88(&self) -> i32 {
         self.params[0]
@@ -110,7 +115,7 @@ enum SlotTarget {
 
 #[derive(Debug, Clone)]
 enum WallKind {
-    Switch { tag: i32, tag_end: i32, uses: Option<i32>, state: u8, lockout: f32 },
+    Switch { tag: i32, tag_end: i32, uses: Option<i32>, state: u8, lockout: f32, target: Option<String> },
     Animated,
     Scroll { speed: f32, negative: bool },
 }
@@ -307,6 +312,7 @@ impl Effects {
                         uses: (flags & WALL_LIMITED_USES != 0).then(|| w.le_i32(0xac)),
                         state: w.le_i32(0xbc) as u8 & 1,
                         lockout: 0.0,
+                        target: aux.as_ref().and_then(|a| a.target.clone()),
                     }
                 }
                 index::WANIM => WallKind::Animated,
@@ -515,7 +521,7 @@ impl Effects {
         if self.fixes && self.door_faces.get(&wall).is_some_and(|d| self.open_doors.contains(d)) {
             return;
         }
-        let WallKind::Switch { tag, tag_end, uses, state, lockout } = &mut self.walls[i].kind else { return };
+        let WallKind::Switch { tag, tag_end, uses, state, lockout, target } = &mut self.walls[i].kind else { return };
         if *lockout > 0.0 {
             return;
         }
@@ -528,6 +534,11 @@ impl Effects {
         *state ^= 1;
         *lockout = SWITCH_LOCKOUT;
         self.touch_log.push(wall);
+        // The object (or wall/region) named in aux slot 9 gets event 0x80 before the tags
+        // (LIPS12's wall 0 names its TV camera).
+        if let Some(name) = target.clone() {
+            self.requests.push(EffectRequest::Activate(name));
+        }
         let (first, last) = (*tag, *tag_end);
         for t in first..=last.max(first) {
             self.tag(t);

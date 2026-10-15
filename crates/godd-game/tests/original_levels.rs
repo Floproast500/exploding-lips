@@ -1684,3 +1684,4 @@ fn lips00_street_past_the_canteen_post() {
     };
     assert!(windows[83].iter().any(inside), "r83 behind the post: {:?}", windows[83]);
 }
+

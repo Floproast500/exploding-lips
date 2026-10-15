@@ -673,6 +673,11 @@ impl Objects {
         }
     }
 
+    /// Event 0x80 by name from a wall switch (its aux slot 9).
+    pub fn activate_named(&mut self, name: &str, now: f64) {
+        self.trigger_named(name, now);
+    }
+
     /// Event 0x80 by name (switches, timers): objects first, then walls/regions.
     fn trigger_named(&mut self, name: &str, now: f64) {
         let targets = self.find(name);

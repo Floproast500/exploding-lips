@@ -119,6 +119,25 @@ other 50+ levels then mostly exercise already-built systems.
 - **Scale:** a 40-hour RPG. The vertical slice keeps progress testable, and each later act is
   a checkpoint.
 
+## Lessons from finishing Exploding Lips
+
+- **Renderer parity sweeps catch what spot checks miss.** Comparing the GPU renderer with the
+  reference at hundreds of sampled views per level (`lipstool ... at:X,Y,Z,ANGLE`) found
+  visibility holes that a handful of golden views never showed. S1 gets the same sweep against
+  screenshots of the original from navpoints.
+- **Visibility limits need a fallback, not a drop.** Window caps that silently discarded views
+  left black holes in open areas. Summoner's `.vis` data and portal culling must over-include
+  rather than lose geometry when a budget is hit.
+- **A bot that plays every level is the completability test.** The playbot found real game bugs
+  (an unapplied jump setting, a rotating door's faces, pickups out of reach) and records the
+  route guide. S3 onward needs a party bot on the `.pfg` graph from the start, not at the end.
+- **Scripted input for observation.** `biglips --input-script` plays timed input and takes
+  screenshots, so reported glitches can be walked into and watched. The Summoner runner gets
+  this from day one.
+- **Player reports come from quicksaves.** Reproducing from the player's own save was the
+  fastest path to every reported bug; the Summoner save format should restore full view state
+  (pitch, crouch) for this.
+
 ## Engine work that carries over
 
 Skinned meshes, 3D collision, the widget UI, particles, cutscenes and the table parser are

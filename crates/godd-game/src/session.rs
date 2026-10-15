@@ -1034,6 +1034,11 @@ impl Session {
                         None => AudioEvent::sound(name),
                     }),
                     EffectRequest::Rotated { region, pivot, angle } => self.carry_rotation(region, pivot, angle),
+                    EffectRequest::Activate(name) => {
+                        let now = self.ticks as f64 / TICK_RATE;
+                        self.objects.activate_named(&name, now);
+                        self.process_object_requests();
+                    }
                 }
             }
             self.process_script_events();

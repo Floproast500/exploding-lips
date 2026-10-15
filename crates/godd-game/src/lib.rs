@@ -390,12 +390,14 @@ impl Game {
         let p = &s.player;
         let states: Vec<String> = s.script.states.iter().map(i32::to_string).collect();
         let inventory: Vec<String> = s.objects.inventory.iter().map(|&i| s.objects.list[i].name.clone()).collect();
-        Some(format!("{} {} {} {} {} {} | {}", s.name, p.x, p.y, p.z, p.angle, states.join(" "), inventory.join(" ")))
+        // View state last (`| view LOOK CROUCHING`), so older saves without it still load.
+        Some(format!("{} {} {} {} {} {} | {} | view {} {}", s.name, p.x, p.y, p.z, p.angle, states.join(" "), inventory.join(" "), p.look, p.crouching as u8))
     }
 
     /// Restart the snapshot's level, then put back position, states and inventory.
     fn restore(&mut self, vfs: &Vfs, text: &str) -> bool {
-        let (head, inventory) = text.split_once('|').unwrap_or((text, ""));
+        let (head, rest) = text.split_once('|').unwrap_or((text, ""));
+        let (inventory, view) = rest.split_once('|').unwrap_or((rest, ""));
         let parts: Vec<&str> = head.split_whitespace().collect();
         if parts.len() < 5 + script::STATE_COUNT {
             return false;
@@ -411,6 +413,12 @@ impl Game {
         s.restore_position(f(1), f(2), f(3), f(4));
         let items: Vec<String> = inventory.split_whitespace().map(str::to_string).collect();
         s.restore_inventory(&items);
+        let view: Vec<&str> = view.split_whitespace().collect();
+        if let ["view", look, crouching, ..] = view[..] {
+            s.player.look = look.parse().unwrap_or(0.0);
+            s.player.crouching |= crouching == "1";
+            s.previous = s.player;
+        }
         true
     }
 
