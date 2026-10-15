@@ -262,7 +262,11 @@ impl<'a> Bot<'a> {
                 h = (h ^ v.to_bits() as u64).wrapping_mul(0x0100_0000_01b3);
             }
         }
-        h
+        // (How we move is part of it: a swimmer reaches what a walker could not, LIPS00's
+        // OCTRED in the pool hall, set aside as unreachable from outside.)
+        let p = self.session().player;
+        let height = self.session().physics_override.map_or(48.0, |o| o.height);
+        (h ^ (p.flying as u64) ^ ((height.to_bits() as u64) << 1)).wrapping_mul(0x0100_0000_01b3)
     }
 
     /// Fire the level's death teleport (an OTELE on a death tag), unless already standing where it
@@ -2184,6 +2188,7 @@ impl<'a> Bot<'a> {
             if key != self.world_key {
                 self.world_key = key;
                 self.unreachable.clear();
+                self.failures.clear();
                 self.failed_plans.clear();
                 self.failed_region_plans.clear();
             }
