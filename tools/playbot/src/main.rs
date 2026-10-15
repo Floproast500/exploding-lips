@@ -207,6 +207,9 @@ struct Bot<'a> {
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
     failed_plans: HashSet<FailedPlan>,
+    /// Goal sets a complete search (every reachable cell) found no way to from a region: none
+    /// from anywhere in that region either, until the world changes.
+    failed_region_plans: HashSet<(usize, Vec<Target>)>,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
     cam_reported: HashSet<(i32, i32, usize)>,
     /// The last level's boss (object, look): killing it ends the game.
@@ -271,6 +274,7 @@ impl<'a> Bot<'a> {
         // (From the start, places that could not be reached from where we were may be.)
         self.unreachable.clear();
         self.failed_plans.clear();
+        self.failed_region_plans.clear();
         self.route_fails.clear();
         self.game.session_mut().expect("session").fire_tag(tag as u32);
         let p = self.session().player;
@@ -1118,7 +1122,7 @@ impl<'a> Bot<'a> {
         let mut targets: Vec<Target> = goals.iter().map(|g| g.target).collect();
         targets.sort_by_key(|t| format!("{t:?}"));
         let memo = (((p.x / STEP).round() as i32, (p.y / STEP).round() as i32, (p.z / 24.0).round() as i32, p.region), targets);
-        if self.failed_plans.contains(&memo) {
+        if self.failed_plans.contains(&memo) || self.failed_region_plans.contains(&(p.region, memo.1.clone())) {
             return None;
         }
         let started = std::time::Instant::now();
@@ -1132,6 +1136,9 @@ impl<'a> Bot<'a> {
             self.no_avoid = false;
         }
         if r.is_none() {
+            if self.last_expanded <= MAX_NODES {
+                self.failed_region_plans.insert((p.region, memo.1.clone()));
+            }
             self.failed_plans.insert(memo);
         }
         let took = started.elapsed().as_secs_f32();
@@ -2112,6 +2119,7 @@ impl<'a> Bot<'a> {
                 self.world_key = key;
                 self.unreachable.clear();
                 self.failed_plans.clear();
+                self.failed_region_plans.clear();
             }
             let goals = self.goals();
             if goals.is_empty() {
@@ -2148,19 +2156,19 @@ impl<'a> Bot<'a> {
                 goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 2048.0 && matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect()
             };
             let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
-            // What led other bots somewhere new, then now and then something at random (each
-            // bot's seed makes it try a different order); what never helped anyone goes last.
-            if found.is_none() {
-                let promising: Vec<Goal> = self.shared.as_ref().map_or_else(Vec::new, |sh| goals.iter().filter(|g| sh.promising(g.target) && !self.used.contains(&g.target)).copied().collect());
-                if !promising.is_empty() {
-                    found = self.plan(&promising);
-                }
-            }
+            // Now and then something at random (each bot's seed makes it try a different order),
+            // else what led other bots somewhere new; what never helped anyone goes last.
             if found.is_none() && self.shared.is_some() && self.random().is_multiple_of(4) {
                 let open: Vec<Goal> = goals.iter().filter(|g| !self.used.contains(&g.target) && !self.shared.as_ref().is_some_and(|sh| sh.useless(g.target))).copied().collect();
                 if !open.is_empty() {
                     let pick = open[(self.random() as usize) % open.len()];
                     found = self.plan(&[pick]).filter(|f| f.1.len() <= 400);
+                }
+            }
+            if found.is_none() {
+                let promising: Vec<Goal> = self.shared.as_ref().map_or_else(Vec::new, |sh| goals.iter().filter(|g| sh.promising(g.target) && !self.used.contains(&g.target)).copied().collect());
+                if !promising.is_empty() {
+                    found = self.plan(&promising);
                 }
             }
             if found.is_none() && !fresh.is_empty() {
@@ -2337,6 +2345,7 @@ impl<'a> Bot<'a> {
                     self.bad_moves.clear();
                     self.edges.clear();
                     self.failed_plans.clear();
+                    self.failed_region_plans.clear();
                     self.unreachable.clear();
                     self.route_fails.clear();
                 }
@@ -2655,7 +2664,7 @@ fn main() -> AnyResult {
         let mut episode: u64 = 0;
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
             // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
             // settle (doors, lifts) after each group.
             if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
