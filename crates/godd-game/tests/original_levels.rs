@@ -1782,3 +1782,32 @@ fn bot_hit_groans_come_from_the_bot() {
         assert!((p[0] - bx).hypot(p[1] - by) < 200.0, "{name} from {p:?}, the bot near ({bx}, {by})");
     }
 }
+
+/// LIPS00's pool: landing in r468 makes the player a swimmer in hall r303 (tag 77); swimming up
+/// into the ceiling of r305 fires tag 78, out to SWIMMER2 on foot. Holding Jump keeps a swimmer's
+/// speed up, so the ceiling hit must be seen when the head arrives, not when the rise stops.
+#[test]
+fn lips00_swimmer_leaves_through_the_ceiling() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    game.session_mut().unwrap().fire_tag(77);
+    run(&mut game, &vfs, 0.1);
+    {
+        let s = game.session_mut().unwrap();
+        assert!(s.player.flying, "swimming in the hall");
+        let region = s.level.world.region_at_z(13888.0, 15936.0, Some(500.0)).unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (13888.0, 15936.0, 500.0, region);
+        s.previous = s.player;
+    }
+    let mut up = Input::default();
+    up.set(Action::Jump, true);
+    for _ in 0..(10.0 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &up);
+        if !game.session().unwrap().player.flying {
+            break;
+        }
+    }
+    let p = game.session().unwrap().player;
+    assert!(!p.flying && (p.x - 17760.0).abs() < 64.0 && (p.y - 14016.0).abs() < 64.0, "out at SWIMMER2 on foot: ({}, {}) flying {}", p.x, p.y, p.flying);
+}

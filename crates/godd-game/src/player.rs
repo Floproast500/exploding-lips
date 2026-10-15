@@ -163,6 +163,7 @@ impl Player {
         let region_before = self.region;
         let airborne_before = !self.on_ground;
         let vz_before = self.vz;
+        let z_before = self.z;
         self.tick(world, input, params);
         let mut at = region_before;
         for &r in &self.crossed[..self.crossed_n as usize] {
@@ -184,6 +185,16 @@ impl Player {
         if vz_before > 0.0 && self.vz <= 0.0 && !self.on_ground {
             let (ceiling, owner) = world.solid_ceiling(self.region);
             if self.z + params.height + params.head_clearance >= ceiling - 0.5 {
+                events.push(PlayerEvent::HitCeiling(owner));
+            }
+        }
+        // A swimmer (flying) rising into the ceiling: its speed stays up while Jump is held, so
+        // the test above never sees it stop; the head arriving there is the hit (LIPS00's pool
+        // hall r305 lets the swimmer out through its ceiling, tag 78).
+        if self.flying && self.vz > 0.0 {
+            let (ceiling, owner) = world.solid_ceiling(self.region);
+            let top = ceiling - params.height - params.head_clearance;
+            if self.z >= top - 0.5 && z_before < top - 0.5 {
                 events.push(PlayerEvent::HitCeiling(owner));
             }
         }

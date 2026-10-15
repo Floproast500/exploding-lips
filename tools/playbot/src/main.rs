@@ -1027,7 +1027,9 @@ impl<'a> Bot<'a> {
             let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
             // (A trigger only on the ceiling, a water surface: up there.)
             let ceiling_only = tags[3] > 0 && tags[..3].iter().all(|t| *t <= 0);
-            let z = if ceiling_only { w.regions[r].ceiling - 64.0 } else { w.regions[r].floor };
+            // (Where the head reaches it: the body's own height under the ceiling.)
+            let reach = s.physics_override.map_or(48.0, |p| p.height) + 8.0;
+            let z = if ceiling_only { w.regions[r].ceiling - reach } else { w.regions[r].floor };
             if w.region_at(c.0, c.1) == Some(r) {
                 goals.push(Goal { target: Target::Region(r), at: [c.0, c.1, z], face: None, shoot: false });
             }
