@@ -197,9 +197,40 @@ pub fn polygon_area(p: &[[f32; 2]]) -> f32 {
     }).sum::<f32>() / 2.0
 }
 
+/// Convex hull of a point set, counter-clockwise (monotone chain).
+pub fn convex_hull(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut pts = points.to_vec();
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let mut hull: Vec<[f32; 2]> = Vec::with_capacity(pts.len() * 2);
+    for pass in [&pts[..], &pts.iter().rev().copied().collect::<Vec<_>>()[..]] {
+        let floor = hull.len();
+        for &p in pass {
+            while hull.len() >= floor + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hull_of_two_squares() {
+        let pts = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [2.0, 0.5], [0.5, 0.5]];
+        let h = convex_hull(&pts);
+        assert_eq!(h.len(), 5, "the inner point is dropped: {h:?}");
+        assert!((polygon_area(&h) - 1.5).abs() < 1e-6);
+    }
 
     #[test]
     fn convex_clipping() {

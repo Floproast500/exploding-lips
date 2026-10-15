@@ -1608,3 +1608,54 @@ fn placed_in_a_vent_the_player_crouches() {
     let eye = s.player.eye_z(&s.physics_override.unwrap_or_default());
     assert!(eye < s.level.world.regions[425].ceiling, "the eye under the ceiling: {eye}");
 }
+
+/// LIPS00's coffin (r26) is seen from the room behind it through many small openings, more
+/// than the window cap: its ceiling showed a black coffin-shaped hole. Every part of that
+/// ceiling in view must fall in one of its windows.
+#[test]
+fn lips00_coffin_ceiling_inside_its_windows() {
+    let Some(dir) = original_dir() else { return };
+    let xrb = std::fs::read(dir.join("LIPS00.XRB")).unwrap();
+    let xpg = std::fs::read(dir.join("LIPS00.XPG")).unwrap();
+    let level = Level::load(&xrb, &xpg).unwrap();
+    let w = &level.world;
+    let (x, y, z, angle) = (17408.0f32, 16800.0f32, 48.0f32, 6.1359224 + std::f32::consts::PI);
+    let region = w.region_at_z(x, y, Some(1.0)).unwrap();
+    let tan_v = (48.9f32.to_radians() / 2.0).tan();
+    let tan_h = tan_v * 3440.0 / 1440.0;
+    let pitch = 0.8f32; // looking up at it (a tangent, as the camera's)
+    let cam = godd_game::render::Camera { x, y, z, angle, pitch, region };
+    let windows = godd_game::scene::visible_regions(w, &cam, (tan_h, tan_v), true);
+    let coffin = &w.regions[26];
+    let (sin, cos) = angle.sin_cos();
+    let (psin, pcos) = pitch.atan().sin_cos();
+    let project = |px: f32, py: f32, pz: f32| {
+        let (rx, ry) = (px - x, py - y);
+        let (f, up) = (rx * cos + ry * sin, pz - z);
+        let (f, up) = (f * pcos + up * psin, up * pcos - f * psin);
+        [(rx * sin - ry * cos) / f / tan_h, up / f / tan_v]
+    };
+    let inside = |win: &Vec<[f32; 2]>, p: [f32; 2]| {
+        (0..win.len()).all(|i| {
+            let (a, b) = (win[i], win[(i + 1) % win.len()]);
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= -1e-4
+        })
+    };
+    let ((x0, y0), (x1, y1)) = coffin.bounds;
+    let mut checked = 0;
+    for i in 1..20 {
+        for j in 1..20 {
+            let (px, py) = (x0 + (x1 - x0) * i as f32 / 20.0, y0 + (y1 - y0) * j as f32 / 20.0);
+            if w.region_at_z(px, py, Some(coffin.ceiling - 1.0)) != Some(26) {
+                continue;
+            }
+            let p = project(px, py, coffin.ceiling);
+            if p[0].abs() > 1.0 || p[1].abs() > 1.0 {
+                continue;
+            }
+            checked += 1;
+            assert!(windows[26].iter().any(|win| inside(win, p)), "coffin ceiling at ({px}, {py}) -> {p:?} outside its {} windows", windows[26].len());
+        }
+    }
+    assert!(checked > 20, "the coffin ceiling is in view ({checked} points)");
+}

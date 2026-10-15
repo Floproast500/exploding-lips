@@ -72,10 +72,10 @@ const NO_IMAGE: u32 = u32::MAX;
 /// that overlap in plan but are not reached never show, and a neighbour's floor or ceiling is
 /// limited to the opening it is seen through. `tan_half` = tangents of the half fields of view.
 pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f32, f32), freelook: bool) -> Vec<Vec<Vec<[f32; 2]>>> {
-    use engine_scene::scene::{clip_convex, polygon_area};
+    use engine_scene::scene::{clip_convex, convex_hull, polygon_area};
     const NEAR: f32 = 1.0;
     const MAX_DEPTH: usize = 128;
-    const MAX_WINDOWS: usize = 8;
+    const MAX_WINDOWS: usize = 16;
     let mut windows: Vec<Vec<Vec<[f32; 2]>>> = vec![Vec::new(); world.regions.len()];
     if world.regions.is_empty() {
         return windows;
@@ -136,7 +136,15 @@ pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f
         }
     }
     while let Some((r, window, depth)) = stack.pop() {
-        if depth > MAX_DEPTH || windows[r].len() >= MAX_WINDOWS || windows[r].iter().any(|w| contains(w, &window)) {
+        if depth > MAX_DEPTH || windows[r].iter().any(|w| contains(w, &window)) {
+            continue;
+        }
+        // Past the cap a window joins the last one's hull rather than being lost (LIPS00's coffin,
+        // seen through the many edges of the room around it, lost its ceiling: a black hole).
+        // Merged windows are not walked on from, which keeps the walk as cheap as before.
+        if windows[r].len() >= MAX_WINDOWS {
+            let last = windows[r].last_mut().expect("capped");
+            *last = convex_hull(&[&last[..], &window[..]].concat());
             continue;
         }
         let reg = &world.regions[r];

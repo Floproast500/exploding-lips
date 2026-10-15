@@ -39,7 +39,23 @@ const MAX_CLIP_EDGES: usize = 15;
 /// normalized and loosened by `slack` (NDC units) so neighbouring windows share their edges.
 fn clip_block(poly: Option<&Vec<[f32; 2]>>, slack: f32) -> [u8; CLIP_BLOCK as usize] {
     let mut block = [0u8; CLIP_BLOCK as usize];
-    let Some(poly) = poly.filter(|p| p.len() >= 3 && p.len() <= MAX_CLIP_EDGES) else { return block };
+    let Some(poly) = poly else { return block };
+    // Corners closer than the slack are one corner: an edge that short (clipping leaves zero
+    // and near-zero ones) has no reliable direction, and its equation would cut a wedge out
+    // of the window at some view angles. With fewer than 3 left, the scissor alone clips.
+    let mut pts: Vec<[f32; 2]> = Vec::with_capacity(poly.len());
+    for &p in poly {
+        if pts.last().is_none_or(|q| (p[0] - q[0]).hypot(p[1] - q[1]) >= slack) {
+            pts.push(p);
+        }
+    }
+    while pts.len() > 1 && (pts[0][0] - pts[pts.len() - 1][0]).hypot(pts[0][1] - pts[pts.len() - 1][1]) < slack {
+        pts.pop();
+    }
+    if pts.len() < 3 || pts.len() > MAX_CLIP_EDGES {
+        return block;
+    }
+    let poly = &pts;
     let mut words = [0f32; 64];
     for i in 0..poly.len() {
         let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
@@ -923,6 +939,21 @@ pub fn render_offscreen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clip window with a near-duplicate corner (portal clipping leaves them) still holds
+    /// its middle: the tiny edge between the two must not become a clip edge of its own.
+    #[test]
+    fn clip_window_ignores_near_duplicate_corners() {
+        let poly = vec![[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [0.5 + 1e-7, 0.5 - 1e-7], [-0.5, 0.5]];
+        let block = clip_block(Some(&poly), 1.0 / 1440.0);
+        let words: &[f32] = bytemuck::cast_slice(&block);
+        let count = u32::from_le_bytes(block[..4].try_into().unwrap()) as usize;
+        assert_eq!(count, 4);
+        for i in 0..count {
+            let e = &words[4 + i * 4..4 + i * 4 + 3];
+            assert!(e[2] > 0.0, "the window's middle is inside edge {i}: {e:?}");
+        }
+    }
 
     /// Shadows: a light above a small square occluder leaves the floor straight below it
     /// dark while the floor beside it stays lit; with shadows off both are lit.
