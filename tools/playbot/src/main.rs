@@ -523,8 +523,20 @@ impl<'a> Bot<'a> {
                 let name = o.aux.as_ref()?.slot(9)?;
                 s.objects.list.iter().find(|d| d.name.eq_ignore_ascii_case(name)).and_then(|d| d.region).or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(name)))
             };
-            let teles: Vec<(i32, usize)> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).filter_map(|o| Some((o.tag, dest_of(o)?))).collect();
-            triggers.iter().flat_map(|(r, tags)| teles.iter().filter(|(t, _)| tags[0] == *t || tags[1] == *t).map(move |&(_, d)| (*r, d))).collect()
+            let mut edges: Vec<(usize, usize)> = Vec::new();
+            let switches = s.effects.switches();
+            for o in s.objects.list.iter().filter(|o| o.effect == OTELE && !self.death_tags().contains(&o.tag)) {
+                let Some(d) = dest_of(o) else { continue };
+                // (A teleporter object one walks into, LIPS00's in r468.)
+                if o.name.is_empty() && o.aux.is_some() && let Some(r) = o.region {
+                    edges.push((r, d));
+                }
+                if o.tag > 0 {
+                    edges.extend(triggers.iter().filter(|(_, t)| t[0] == o.tag || t[1] == o.tag || t[2] == o.tag).map(|(r, _)| (*r, d)));
+                    edges.extend(switches.iter().filter(|sw| sw.tags.contains(&o.tag)).map(|sw| (w.walls[sw.wall].front, d)));
+                }
+            }
+            edges
         };
         while let Some(r) = queue.pop_front() {
             for &(_, d) in tele.iter().filter(|(from, _)| *from == r) {
@@ -937,7 +949,9 @@ impl<'a> Bot<'a> {
         // And trigger regions that teleport (not back to a start): a way on, again and again.
         let tele_tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
         let teleports = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| tele_tags.contains(x)));
-        goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        // (The boss stays a goal until killed: one round of shooting may not do it.)
+        let boss = self.boss.map(|(b, _)| Target::Object(b));
+        goals.retain(|g| (Some(g.target) == boss || matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         // (A teleporter taken twice since anything new was used: no way on there, LIPS01's
         // REST01/PARK01 pair.)
         goals.retain(|g| self.tele_uses.get(&g.target).is_none_or(|&n| n < 2));
@@ -1066,7 +1080,8 @@ impl<'a> Bot<'a> {
                     if g.shoot {
                         // In range, not right underneath (aim is limited to about 60 degrees).
                         let dz = g.at[2] - p.z;
-                        d < 320.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0
+                        // (And a clear line to it: LIPS17's boss shot at for minutes through a wall.)
+                        d < 320.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0 && godd_game::objects::line_of_sight(world, [p.x, p.y, p.z + physics.height], [g.at[0], g.at[1], g.at[2] + 16.0])
                     } else {
                         // (A lock set in a doorway is touched from the wall's distance.)
                         let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) { 40.0 } else { STEP * 0.75 };
@@ -1326,7 +1341,12 @@ impl<'a> Bot<'a> {
                 if brink && jump {
                     continue;
                 }
-                let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 } + if brink { 200.0 } else { 0.0 };
+                // (The edge of any big drop costs a little too: falling off a staircase over a
+                // pit, LIPS07's spiral above r91, loses the way up even when it does not kill.)
+                let ledge_edge = !brink && [(14.0f32, 0.0f32), (-14.0, 0.0), (0.0, 14.0), (0.0, -14.0)].iter().any(|&(ox, oy)| {
+                    world.region_at_z(q.x + ox, q.y + oy, Some(q.z + 1.0)).is_some_and(|r| r != q.region && q.z - world.regions[r].floor > 64.0)
+                });
+                let c = cost + dx.hypot(dy) + if corner { 8.0 } else { 0.0 } + if brink { 200.0 } else if ledge_edge { 60.0 } else { 0.0 };
                 if came.get(&qk).is_none_or(|e| c < e.1) {
                     came.insert(qk, (q, c, Some((k, Step { to: (q.x, q.y), z: Some(q.z), jump, crouch, region: Some(q.region) }))));
                     open.push((Reverse(((c + 1.5 * heuristic(&q)) * 1000.0) as i64), qk));
@@ -1771,7 +1791,8 @@ impl<'a> Bot<'a> {
                 }
                 let s = self.session();
                 let Some(o) = s.objects.list.get(i) else { break };
-                if o.destroyed || o.hidden || (o.name.starts_with("KEYBOT") && o.mover.is_none()) || o.counter != counter {
+                // (The boss takes several hits: keep shooting it, not stop at the first.)
+                if o.destroyed || o.hidden || (o.name.starts_with("KEYBOT") && o.mover.is_none()) || (!boss && o.counter != counter) {
                     break;
                 }
                 let angle = facing((s.player.x, s.player.y), (o.x, o.y));
