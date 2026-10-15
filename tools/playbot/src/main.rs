@@ -1199,7 +1199,11 @@ impl<'a> Bot<'a> {
                     Some(r) => r,
                     None => {
                         // (A crouched jump gets into a low duct up a ledge.)
-                        let kinds: &[(bool, bool)] = if long { &[(true, false), (true, true)] } else { &[(false, false), (true, false), (false, true), (true, true)] };
+                        // (On a jump pad its bounce carries us: no Jump on top of it first, or
+                        // the launch adds up to one far too high, LIPS03's 250 jump on its pad
+                        // ledges r274/r275.)
+                        let on_pad = pads.get(world.solid_floor(p.region).1).copied().flatten().is_some();
+                        let kinds: &[(bool, bool)] = if long && !on_pad { &[(true, false), (true, true)] } else { &[(false, false), (true, false), (false, true), (true, true)] };
                         let mut r = kinds.iter().copied().find_map(|(jump, crouch)| Self::try_move(world, &physics, &pads, p, to, jump, crouch).map(|q| (q, (jump, crouch))));
                         // Over a gap where landing kills: half a cell short or long too (a
                         // rim between two grid lines, LIPS05's r23), never a landing in it.
