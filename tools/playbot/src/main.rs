@@ -375,6 +375,27 @@ impl<'a> Bot<'a> {
             .min();
         if self.verbose {
             println!("     route target: {:?}", target);
+            if target.is_none() && std::env::var("PLAYBOT_BOXED").is_ok() {
+                let open: Vec<String> = goals.iter().filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target)).map(|g| {
+                    let r = w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0));
+                    format!("{:?}@r{:?}{}", g.target, r, if r.is_some_and(|r| prev[r] != usize::MAX) { "+" } else { "" })
+                }).collect();
+                println!("     unreached goals: {open:?}");
+                let mut bfs: Vec<usize> = (0..prev.len()).filter(|&r| prev[r] != usize::MAX).collect();
+                bfs.sort_unstable();
+                println!("     route search reaches {bfs:?}");
+                for &r in &bfs {
+                    for &wi in &w.regions[r].walls {
+                        let x = &w.walls[wi];
+                        let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
+                        let o = if x.front == r { b } else { x.front };
+                        if prev[o] == usize::MAX {
+                            let (f, t) = (&w.regions[r], &w.regions[o]);
+                            println!("       edge r{r} [{}..{}] -> r{o} [{}..{}] wall {wi} blocking {} door {:?} openers {:?}", f.floor, f.ceiling, t.floor, t.ceiling, x.blocking, doors.get(&o), openers.get(&o));
+                        }
+                    }
+                }
+            }
         }
         let Some((_, mut r)) = target else { return (Vec::new(), None) };
         let goal_region = r;
@@ -403,7 +424,16 @@ impl<'a> Bot<'a> {
             .map(|sw| Target::Wall(sw.wall))
             .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && tags.contains(&o.tag)).map(|(i, _)| Target::Object(i)))
             .collect();
-        (switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect(), Some(goal_region))
+        let mut pick: Vec<Goal> = switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect();
+        // (Or a trigger region that opens it on entry, used before and so no longer a goal:
+        // LIPS00's strip r169 opens door r47 for a while, the only way back east.)
+        for (r, t) in s.effects.triggers() {
+            if tags.contains(&t[0]) && prev[r] != usize::MAX && !pick.iter().any(|g| g.target == Target::Region(r)) {
+                let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
+                pick.push(Goal { target: Target::Region(r), at: [(x0 + x1) / 2.0, (y0 + y1) / 2.0, w.regions[r].floor], face: None, shoot: false });
+            }
+        }
+        (pick, Some(goal_region))
     }
 
     fn death_tags(&self) -> &HashSet<i32> {
