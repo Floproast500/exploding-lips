@@ -960,16 +960,18 @@ impl<'a> Bot<'a> {
                 131 => o.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|item| s.objects.inventory.iter().any(|&k| s.objects.list[k].name.eq_ignore_ascii_case(item))),
                 OTELE => o.name.is_empty() && o.aux.is_some(),
                 // (Tag switches out of reach overhead are shot: projectiles hit them.)
-                OTAGSW => o.region.is_some_and(|r| o.z - w.regions[r].floor < 72.0),
+                OTAGSW => !self.death_tags().contains(&o.tag) && o.region.is_some_and(|r| o.z - w.regions[r].floor < 72.0),
                 OBUMPSW => true,
                 // Plain walking bots fire their tag when bumped (or shot, if out of reach).
-                OWALK => o.mover.is_none() && o.tag > 0 && o.region.is_some_and(|r| o.z - w.regions[r].floor < 40.0),
+                // (Not one whose tag sends the player home: LIPS00's walker #13 fires 105, a
+                // teleporter to the birth point.)
+                OWALK => o.mover.is_none() && o.tag > 0 && !self.death_tags().contains(&o.tag) && o.region.is_some_and(|r| o.z - w.regions[r].floor < 40.0),
                 _ => false,
             };
             if walk_into {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: false });
-            } else if o.effect == OTAGSW
-                || (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0) || self.boss.is_some_and(|(b, _)| b == i) {
+            } else if (o.effect == OTAGSW && !self.death_tags().contains(&o.tag))
+                || (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0 && !self.death_tags().contains(&o.tag)) || self.boss.is_some_and(|(b, _)| b == i) {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
             }
         }
@@ -1249,7 +1251,7 @@ impl<'a> Bot<'a> {
             .list
             .iter()
             .enumerate()
-            .filter(|(i, o)| !self.no_avoid && (matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| self.death_tags().contains(&a.ints[0]))) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
+            .filter(|(i, o)| !self.no_avoid && (matches!(o.effect, OTAGSW | OBUMPSW) || o.effect == OPICKUP && o.aux.as_ref().is_some_and(|a| self.death_tags().contains(&a.ints[0])) || o.effect == OWALK && o.mover.is_none() && self.death_tags().contains(&o.tag)) && !o.hidden && !o.destroyed && o.region.is_some() && !goal_objects.contains(i))
             .map(|(_, o)| (o.x, o.y, o.z, o.radius + 16.0 + 2.0))
             // (Not one we stand in: just used, walking off it is the way on.)
             .filter(|&(x, y, z, r)| !((start.x - x).abs() < r && (start.y - y).abs() < r && (start.z - z).abs() < 64.0))
