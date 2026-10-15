@@ -130,6 +130,8 @@ struct Bot<'a> {
     route_tries: HashMap<usize, u32>,
     /// The switch tags each pressed wall had when pressed.
     used_tags: HashMap<usize, Option<std::ops::RangeInclusive<i32>>>,
+    /// Times each teleporter goal sent us off since something new was used.
+    tele_uses: HashMap<Target, u32>,
     /// Route targets (regions) whose waypoint could not be planned to; skipped until progress.
     route_fails: HashSet<usize>,
     /// Searches that found nothing: (start cell, goals); cleared when the world changes.
@@ -902,6 +904,9 @@ impl<'a> Bot<'a> {
         let tele_tags: HashSet<i32> = s.objects.list.iter().filter(|o| o.effect == OTELE && o.tag > 0 && !self.death_tags().contains(&o.tag)).map(|o| o.tag).collect();
         let teleports = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| tele_tags.contains(x)));
         goals.retain(|g| (matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        // (A teleporter taken twice since anything new was used: no way on there, LIPS01's
+        // REST01/PARK01 pair.)
+        goals.retain(|g| self.tele_uses.get(&g.target).is_none_or(|&n| n < 2));
         goals
     }
 
@@ -2158,6 +2163,9 @@ impl<'a> Bot<'a> {
                     // (Recent: among old goals the ones used longest ago come first, and a
                     // teleporter pair would otherwise bounce us between its ends forever.)
                     self.last_used.insert(goal.target, self.ticks);
+                    if matches!(goal.target, Target::Region(_)) || matches!(goal.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) {
+                        *self.tele_uses.entry(goal.target).or_default() += 1;
+                    }
                 }
                 self.edges.clear();
                 self.note("     teleported on the way".into());
@@ -2275,6 +2283,7 @@ impl<'a> Bot<'a> {
                     // over and over is no progress, LIPS03's 28 and 414.)
                     self.route_fails.clear();
                     self.route_tries.clear();
+                    self.tele_uses.clear();
                 }
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
@@ -2339,7 +2348,7 @@ fn main() -> AnyResult {
     let mut failures = 0;
     for level in &levels {
         let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
+        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
         // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
         // settle (doors, lifts) after each group.
         if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
