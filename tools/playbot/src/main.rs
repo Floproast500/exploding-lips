@@ -1053,6 +1053,22 @@ impl<'a> Bot<'a> {
         // Switch objects fire (and toggle doors back) on touch: walk around the ones that are
         // not the goal.
         let goal_objects: HashSet<usize> = goals.iter().filter_map(|g| if let Target::Object(i) = g.target { Some(i) } else { None }).collect();
+        // Ledges: regions under 64 across beside one where landing kills, from more than a step
+        // above (LIPS03's 32-wide r400 and r274/r275 along its pits): spots on them go to their
+        // middle, as the grid lines run along their edges.
+        let ledges: HashSet<usize> = deadly_land
+            .iter()
+            .flat_map(|&d| world.regions[d].walls.iter().filter_map(move |&x| {
+                let wall = &world.walls[x];
+                let o = if wall.front == d { wall.back? } else { wall.front };
+                (o != d).then_some((o, d))
+            }))
+            .filter(|&(o, d)| {
+                let ((x0, y0), (x1, y1)) = world.regions[o].bounds;
+                (x1 - x0).min(y1 - y0) < 64.0 && world.regions[o].floor - world.regions[d].floor > physics.step_height && !deadly_land.contains(&o)
+            })
+            .map(|(o, _)| o)
+            .collect();
         let death_walls: Vec<((f32, f32), (f32, f32))> = s
             .effects
             .switches()
@@ -1136,7 +1152,15 @@ impl<'a> Bot<'a> {
                 if dx != 0.0 && dy != 0.0 && dx.abs() == 1.0 && dy.abs() == 1.0 && !(straight_ok.contains(&(dx as i32, 0)) && straight_ok.contains(&(0, dy as i32))) {
                     continue;
                 }
-                let to = (((p.x / STEP).round() + dx) * STEP, ((p.y / STEP).round() + dy) * STEP);
+                let mut to = (((p.x / STEP).round() + dx) * STEP, ((p.y / STEP).round() + dy) * STEP);
+                // (Onto a ledge: its middle across.)
+                for probe in [(to.0, to.1), (to.0 + 1.0, to.1 + 1.0), (to.0 - 1.0, to.1 - 1.0)] {
+                    if let Some(r) = world.region_at(probe.0, probe.1).filter(|r| ledges.contains(r)) {
+                        let ((x0, y0), (x1, y1)) = world.regions[r].bounds;
+                        if x1 - x0 < y1 - y0 { to.0 = (x0 + x1) / 2.0 } else { to.1 = (y0 + y1) / 2.0 }
+                        break;
+                    }
+                }
                 let long = dx.abs() > 1.0 || dy.abs() > 1.0;
                 let mut over_death = false;
                 if long {
