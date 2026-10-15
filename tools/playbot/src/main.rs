@@ -2148,6 +2148,9 @@ impl<'a> Bot<'a> {
             // pair is always nearest and would bounce us to and fro while the lift switch 829,
             // the way up to door r8, waits further off.)
             let (old_tele, old): (Vec<Goal>, Vec<Goal>) = old.iter().partition(|g| tele_targets.contains(&g.target));
+            // (Nor an old switch that moves the floor we stand on: the button that takes the
+            // lift we just rode down back up, LIPS00's 389 in ELEV02.)
+            let (old_under, old): (Vec<Goal>, Vec<Goal>) = old.iter().partition(|g| under_us.contains(&g.target));
             let found = found.or_else(|| {
                 let mut old = old.clone();
                 old.sort_by_key(|g| self.last_used.get(&g.target).copied().unwrap_or(0));
@@ -2166,6 +2169,7 @@ impl<'a> Bot<'a> {
                 if k < old.len() { self.plan(&old[k..]) } else { None }
             });
             let found = found.or_else(|| if old_tele.is_empty() { None } else { self.plan(&old_tele) });
+            let found = found.or_else(|| if old_under.is_empty() { None } else { self.plan(&old_under) });
             let Some((goal, steps)) = found else {
                 // Nothing reachable now: wait for moving parts (a few times), then give up.
                 let idle = Input::default();
