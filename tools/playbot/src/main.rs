@@ -1084,7 +1084,16 @@ impl<'a> Bot<'a> {
                         d < 320.0 && d > 32.0 && dz.abs() < d * 1.7 + 32.0 && godd_game::objects::line_of_sight(world, [p.x, p.y, p.z + physics.height], [g.at[0], g.at[1], g.at[2] + 16.0])
                     } else {
                         // (A lock set in a doorway is touched from the wall's distance.)
-                        let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) { 40.0 } else { STEP * 0.75 };
+                        // (A pickup too, from a little further: the walk's last step goes on to it,
+                        // and one in a niche too shallow to step into is touched from its mouth,
+                        // LIPS17's SILVRKEY in r170.)
+                        let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) {
+                            40.0
+                        } else if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) {
+                            36.0
+                        } else {
+                            STEP * 0.75
+                        };
                         // (A pickup hanging up to a jump above us counts: the approach jumps for it.)
                         // (On a jump pad, up to the bounce: LIPS05's TURNKEY1 hangs 384 over its
                         // 600 pad, a bounce of about 768.)
@@ -1284,6 +1293,13 @@ impl<'a> Bot<'a> {
                         r
                     }
                 };
+                // PLAYBOT_EDGEBOX="x0,y0,x1,y1": every move tried from a spot inside that box.
+                if let Ok(b) = std::env::var("PLAYBOT_EDGEBOX") {
+                    let v: Vec<f32> = b.split(',').filter_map(|x| x.parse().ok()).collect();
+                    if v.len() == 4 && p.x >= v[0] && p.x <= v[2] && p.y >= v[1] && p.y <= v[3] && !long {
+                        println!("     move ({:.0},{:.0},{:.0}) r{} -> ({:.0},{:.0}): {:?}", p.x, p.y, p.z, p.region, to.0, to.1, result.map(|(q, _)| (q.x as i32, q.y as i32, q.z as i32, q.region)));
+                    }
+                }
                 if std::env::var("PLAYBOT_EDGEDBG").is_ok() && long && dx.abs().max(dy.abs()) >= 3.0 {
                     println!("     edge ({:.0},{:.0},{:.0}) r{} -> ({:.0},{:.0}): {:?}", p.x, p.y, p.z, p.region, to.0, to.1, result.map(|(q, _)| (q.x as i32, q.y as i32, q.z as i32, q.region)));
                 }
