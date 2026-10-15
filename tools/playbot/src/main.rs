@@ -88,6 +88,73 @@ struct Step {
     region: Option<usize>,
 }
 
+/// What several bots on the same level learn together (`--share FILE`): an append-only text
+/// file every bot writes to and reads back. `use LEVEL TARGET N` credits a use with the N
+/// regions the bot came to know before its next use; `death LEVEL TARGET` marks a use that
+/// ended in a death; `solved LEVEL` stops the others.
+struct Shared {
+    path: std::path::PathBuf,
+    level: String,
+    read: usize,
+    /// Per target: (uses, regions gained, deaths), over every bot.
+    stats: HashMap<String, (u32, i64, u32)>,
+    solved: bool,
+}
+
+impl Shared {
+    fn new(path: std::path::PathBuf, level: &str) -> Self {
+        let mut s = Shared { path, level: level.to_string(), read: 0, stats: HashMap::new(), solved: false };
+        s.refresh();
+        s
+    }
+
+    fn refresh(&mut self) {
+        let Ok(text) = std::fs::read_to_string(&self.path) else { return };
+        if text.len() <= self.read {
+            return;
+        }
+        // (Only whole lines: another bot may be half way through writing one.)
+        let end = text[self.read..].rfind('\n').map_or(self.read, |i| self.read + i + 1);
+        for line in text[self.read..end].lines() {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            match w.as_slice() {
+                ["use", level, target, n] if *level == self.level => {
+                    let e = self.stats.entry(target.to_string()).or_default();
+                    e.0 += 1;
+                    e.1 += n.parse::<i64>().unwrap_or(0);
+                }
+                ["death", level, target] if *level == self.level => self.stats.entry(target.to_string()).or_default().2 += 1,
+                ["solved", level] if *level == self.level => self.solved = true,
+                _ => {}
+            }
+        }
+        self.read = end;
+    }
+
+    fn write(&self, line: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            let _ = f.write_all(format!("{line}\n").as_bytes());
+        }
+    }
+
+    fn get(&self, t: Target) -> (u32, i64, u32) {
+        self.stats.get(&format!("{t:?}")).copied().unwrap_or_default()
+    }
+
+    /// Used over and over by the bots without ever leading anywhere new.
+    fn useless(&self, t: Target) -> bool {
+        let (uses, gained, deaths) = self.get(t);
+        (uses >= 6 && gained <= 0) || deaths >= 2
+    }
+
+    /// Led somewhere new for some bot.
+    fn promising(&self, t: Target) -> bool {
+        let (_, gained, deaths) = self.get(t);
+        gained > 0 && deaths == 0
+    }
+}
+
 struct Bot<'a> {
     vfs: &'a Vfs,
     game: Game,
@@ -158,6 +225,18 @@ struct Bot<'a> {
     /// Enemy shots do not send the player back (progression, not combat, is under test).
     god: bool,
     log: Vec<String>,
+    /// Shared learning with other bots on the level (`--share`), and this episode's seed.
+    shared: Option<Shared>,
+    rng: u64,
+    /// The last target used and how many regions were known then (credited at the next use).
+    credit: Option<(Target, usize)>,
+    /// Every region visited or found reachable: the progress measure.
+    known: HashSet<usize>,
+    /// (known regions, tick) when that count last grew.
+    last_progress: (usize, u64),
+    deaths_seen: i32,
+    /// Give up the episode after this many ticks without progress (`--episode-minutes`).
+    episode_ticks: Option<u64>,
 }
 
 fn facing(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -1185,6 +1264,7 @@ impl<'a> Bot<'a> {
             expanded += 1;
             if expanded > MAX_NODES {
                 self.reached = came.keys().map(|c| c.3).collect();
+                self.known.extend(self.reached.iter().copied());
                 return None;
             }
             const MOVES: [(f32, f32); 40] = [
@@ -1395,9 +1475,55 @@ impl<'a> Bot<'a> {
             }
         }
         self.reached = came.keys().map(|c| c.3).collect();
+        self.known.extend(self.reached.iter().copied());
         self.last_expanded = expanded;
         if std::env::var("PLAYBOT_PLANDBG").is_ok() {
             println!("     search failed: {} cells, {} expanded, from ({:.0},{:.0},{:.0}) r{} ground {} crouch {} flying {}", came.len(), expanded, start.x, start.y, start.z, start.region, start.on_ground, start.crouching, start.flying);
+        }
+        None
+    }
+
+    /// xorshift: this episode's choices (a different seed per bot and episode).
+    fn random(&mut self) -> u64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        self.rng
+    }
+
+    /// Credit the previous use with the regions gained since, and start crediting `target`.
+    fn credit_use(&mut self, target: Target) {
+        let known = self.known.len();
+        if let (Some((t, before)), Some(sh)) = (self.credit.take(), &self.shared) {
+            sh.write(&format!("use {} {t:?} {}", self.level, known as i64 - before as i64));
+        }
+        self.credit = Some((target, known));
+    }
+
+    /// Between goals: read what the other bots learned, note deaths, and end the episode when
+    /// another bot solved the level or this one has made no progress for too long.
+    fn learn(&mut self) -> Option<String> {
+        let known = self.known.len();
+        if known > self.last_progress.0 {
+            self.last_progress = (known, self.ticks);
+        }
+        let deaths = self.session().script.states[godd_game::script::DEATHS];
+        if deaths > self.deaths_seen {
+            self.deaths_seen = deaths;
+            if let (Some((t, _)), Some(sh)) = (self.credit, &self.shared) {
+                sh.write(&format!("death {} {t:?}", self.level));
+            }
+        }
+        if let Some(sh) = &mut self.shared {
+            sh.refresh();
+            if sh.solved {
+                return Some("solved by another bot".into());
+            }
+        }
+        if let Some(limit) = self.episode_ticks
+            && self.ticks - self.last_progress.1 > limit
+        {
+            return Some(format!("no progress for {} s", limit as f32 / TICK_RATE));
         }
         None
     }
@@ -1411,6 +1537,7 @@ impl<'a> Bot<'a> {
         self.ticks += 1;
         if let Some(s) = self.game.session() {
             self.visited.insert(s.player.region);
+            self.known.insert(s.player.region);
             // (The route's trail: a point every 48 units walked.)
             let p = &s.player;
             if !s.in_bsp && self.trail.last().is_none_or(|q| (q[0] - p.x).hypot(q[1] - p.y) >= 48.0) {
@@ -1977,6 +2104,9 @@ impl<'a> Bot<'a> {
                 self.cross_bsp()?;
                 continue;
             }
+            if let Some(why) = self.learn() {
+                return Err(why);
+            }
             let key = self.world_key();
             if key != self.world_key {
                 self.world_key = key;
@@ -2018,6 +2148,21 @@ impl<'a> Bot<'a> {
                 goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 2048.0 && matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect()
             };
             let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
+            // What led other bots somewhere new, then now and then something at random (each
+            // bot's seed makes it try a different order); what never helped anyone goes last.
+            if found.is_none() {
+                let promising: Vec<Goal> = self.shared.as_ref().map_or_else(Vec::new, |sh| goals.iter().filter(|g| sh.promising(g.target) && !self.used.contains(&g.target)).copied().collect());
+                if !promising.is_empty() {
+                    found = self.plan(&promising);
+                }
+            }
+            if found.is_none() && self.shared.is_some() && self.random().is_multiple_of(4) {
+                let open: Vec<Goal> = goals.iter().filter(|g| !self.used.contains(&g.target) && !self.shared.as_ref().is_some_and(|sh| sh.useless(g.target))).copied().collect();
+                if !open.is_empty() {
+                    let pick = open[(self.random() as usize) % open.len()];
+                    found = self.plan(&[pick]).filter(|f| f.1.len() <= 400);
+                }
+            }
             if found.is_none() && !fresh.is_empty() {
                 found = self.plan(&fresh);
             }
@@ -2082,7 +2227,13 @@ impl<'a> Bot<'a> {
                 }
                 self.used.remove(&t);
             }
-            let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
+            let (new, mut old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
+            if let Some(sh) = &self.shared {
+                let keep: Vec<Goal> = old.iter().filter(|g| !sh.useless(g.target)).copied().collect();
+                if !keep.is_empty() {
+                    old = keep;
+                }
+            }
             // (A switch that moves the floor we stand on, the down button of the lift we just
             // rode up, only once nothing else is reachable.)
             let (new_last, new_first): (Vec<Goal>, Vec<Goal>) = new.iter().partition(|g| under_us.contains(&g.target));
@@ -2290,6 +2441,7 @@ impl<'a> Bot<'a> {
                 if still_there {
                     *self.failures.entry(goal.target).or_default() += 1;
                 } else {
+                    self.credit_use(goal.target);
                     self.used.insert(goal.target);
                     // (Recent: among old goals the ones used longest ago come first, and a
                     // teleporter pair would otherwise bounce us between its ends forever.)
@@ -2421,6 +2573,7 @@ impl<'a> Bot<'a> {
                     self.route_tries.clear();
                     self.tele_uses.clear();
                 }
+                self.credit_use(goal.target);
                 self.used.insert(goal.target);
                 self.last_used.insert(goal.target, self.ticks);
                 // The route: a step that changed something (a door, a lift, what we carry, the
@@ -2484,57 +2637,85 @@ fn main() -> AnyResult {
     let god = !args.iter().any(|a| a == "--mortal");
     // --record DIR: write each completed level's route to DIR/LEVEL.route (the route guide).
     let record: Option<std::path::PathBuf> = args.iter().position(|a| a == "--record").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
-    let mut levels: Vec<String> = args[1..].iter().filter(|a| a.starts_with("LIPS")).cloned().collect();
+    // --share FILE: learn together with other bots on the same level (see `Shared`);
+    // --seed N: this bot's choices; --episode-minutes M: restart the level (keeping what was
+    // learned) after M game minutes without progress, until --minutes of play in all.
+    let share: Option<std::path::PathBuf> = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+    let seed: u64 = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1);
+    let episode_minutes: Option<f64> = args.iter().position(|a| a == "--episode-minutes").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
+    let mut levels: Vec<String> = args[1..].iter().filter(|a| a.starts_with("LIPS") && !a.ends_with(".share")).cloned().collect();
     if levels.is_empty() {
         levels = (0..18).map(|i| format!("LIPS{i:02}")).collect();
     }
     let vfs = Vfs::from_dir(Path::new(dir))?;
     let mut failures = 0;
     for level in &levels {
-        let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-        let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new() };
-        // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
-        // settle (doors, lifts) after each group.
-        if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
-            for group in v.split(';') {
-                for t in group.split(',').filter_map(|x| x.parse().ok()) {
-                    if let Some(s) = bot.game.session_mut() {
-                        s.fire_tag(t);
+        let mut shared = share.as_ref().map(|p| Shared::new(p.clone(), level));
+        let mut played: u64 = 0;
+        let mut episode: u64 = 0;
+        loop {
+            let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
+            // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
+            // settle (doors, lifts) after each group.
+            if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
+                for group in v.split(';') {
+                    for t in group.split(',').filter_map(|x| x.parse().ok()) {
+                        if let Some(s) = bot.game.session_mut() {
+                            s.fire_tag(t);
+                        }
                     }
-                }
-                for _ in 0..(TICK_RATE as usize * 8) {
-                    bot.tick(&Input::default());
-                }
-            }
-        }
-        // PLAYBOT_START="x,y,z,region": start there (debugging a spot deep in a level).
-        if let Ok(v) = std::env::var("PLAYBOT_START") {
-            let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
-            if n.len() == 4
-                && let Some(s) = bot.game.session_mut()
-            {
-                (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
-                s.previous = s.player;
-            }
-        }
-        let started = std::time::Instant::now();
-        let result = bot.play((minutes * 60.0 * TICK_RATE as f64) as u64);
-        let game_time = bot.ticks as f32 / TICK_RATE;
-        match result {
-            Ok(next) => {
-                println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32());
-                if let Some(dir) = &record {
-                    let path = dir.join(format!("{level}.route"));
-                    match std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, bot.route.to_text())) {
-                        Ok(()) => println!("{level}: route of {} steps written to {}", bot.route.steps.len(), path.display()),
-                        Err(e) => eprintln!("{level}: cannot write {}: {e}", path.display()),
+                    for _ in 0..(TICK_RATE as usize * 8) {
+                        bot.tick(&Input::default());
                     }
                 }
             }
-            Err(why) => {
-                failures += 1;
-                println!("{level}: BLOCKED after {game_time:.0} s ({} things used): {why}", bot.used.len());
+            // PLAYBOT_START="x,y,z,region": start there (debugging a spot deep in a level).
+            if let Ok(v) = std::env::var("PLAYBOT_START") {
+                let n: Vec<f32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+                if n.len() == 4
+                    && let Some(s) = bot.game.session_mut()
+                {
+                    (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
+                    s.previous = s.player;
+                }
             }
+            let started = std::time::Instant::now();
+            let budget = ((minutes * 60.0 * TICK_RATE as f64) as u64).saturating_sub(played);
+            let result = bot.play(budget);
+            played += bot.ticks;
+            let game_time = bot.ticks as f32 / TICK_RATE;
+            shared = bot.shared.take();
+            match result {
+                Ok(next) => {
+                    println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32());
+                    if let Some(sh) = &shared {
+                        sh.write(&format!("solved {level}"));
+                    }
+                    if let Some(dir) = &record {
+                        let path = dir.join(format!("{level}.route"));
+                        match std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, bot.route.to_text())) {
+                            Ok(()) => println!("{level}: route of {} steps written to {}", bot.route.steps.len(), path.display()),
+                            Err(e) => eprintln!("{level}: cannot write {}: {e}", path.display()),
+                        }
+                    }
+                }
+                Err(why) => {
+                    let again = episode_minutes.is_some() && !shared.as_ref().is_some_and(|s| s.solved) && played < (minutes * 60.0 * TICK_RATE as f64) as u64;
+                    if again {
+                        episode += 1;
+                        println!("{level}: episode {episode} ends after {game_time:.0} s ({} things used): {why}; restarting", bot.used.len());
+                        continue;
+                    }
+                    if shared.as_ref().is_some_and(|s| s.solved) {
+                        println!("{level}: solved by another bot (this one: {game_time:.0} s, {} things used)", bot.used.len());
+                    } else {
+                        failures += 1;
+                        println!("{level}: BLOCKED after {game_time:.0} s ({} things used): {why}", bot.used.len());
+                    }
+                }
+            }
+            break;
         }
     }
     if failures > 0 {
