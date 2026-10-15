@@ -2160,6 +2160,18 @@ impl<'a> Bot<'a> {
             if let Some(why) = self.learn() {
                 return Err(why);
             }
+            // No new region for a minute and a half (shut in, a timed door's faces fresh again
+            // each time it shuts: LIPS00's west rooms after the parlour pickup, left only by
+            // dying): back to the start as a player would, keeping what was done.
+            if self.ticks - self.last_progress.1 > (90.0 * TICK_RATE) as u64 && self.idle_respawns < 5 && self.respawn() {
+                let p = self.session().player;
+                self.note(format!("     no progress for 90 s: back to the start at ({:.0}, {:.0})", p.x, p.y));
+                self.idle_respawns += 1;
+                self.last_progress.1 = self.ticks;
+                self.repeats = 0;
+                self.edges.clear();
+                continue;
+            }
             let key = self.world_key();
             if key != self.world_key {
                 self.world_key = key;
