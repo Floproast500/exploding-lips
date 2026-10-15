@@ -142,10 +142,11 @@ impl Shared {
         self.stats.get(&format!("{t:?}")).copied().unwrap_or_default()
     }
 
-    /// Used over and over by the bots without ever leading anywhere new.
+    /// Used over and over by the bots without ever leading anywhere new (a hint for random
+    /// picks only: gains can come several steps later).
     fn useless(&self, t: Target) -> bool {
         let (uses, gained, deaths) = self.get(t);
-        (uses >= 6 && gained <= 0) || deaths >= 2
+        (uses >= 20 && gained <= 0) || deaths >= 2
     }
 
     /// Led somewhere new for some bot.
@@ -2156,8 +2157,8 @@ impl<'a> Bot<'a> {
                 goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 2048.0 && matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect()
             };
             let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
-            // Now and then something at random (each bot's seed makes it try a different order),
-            // else what led other bots somewhere new; what never helped anyone goes last.
+            // Now and then something at random (each bot's seed makes it try a different order;
+            // not what never helped anyone), else what led other bots somewhere new.
             if found.is_none() && self.shared.is_some() && self.random().is_multiple_of(4) {
                 let open: Vec<Goal> = goals.iter().filter(|g| !self.used.contains(&g.target) && !self.shared.as_ref().is_some_and(|sh| sh.useless(g.target))).copied().collect();
                 if !open.is_empty() {
@@ -2235,13 +2236,9 @@ impl<'a> Bot<'a> {
                 }
                 self.used.remove(&t);
             }
-            let (new, mut old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
-            if let Some(sh) = &self.shared {
-                let keep: Vec<Goal> = old.iter().filter(|g| !sh.useless(g.target)).copied().collect();
-                if !keep.is_empty() {
-                    old = keep;
-                }
-            }
+            // (Shared "useless" marks do not prune these: on a puzzle level a switch's gain often
+            // shows only several steps later, LIPS00's 829 starting the diamond chain.)
+            let (new, old): (Vec<Goal>, Vec<Goal>) = switches.iter().partition(|g| !self.used.contains(&g.target) || locks.contains(&g.target));
             // (A switch that moves the floor we stand on, the down button of the lift we just
             // rode up, only once nothing else is reachable.)
             let (new_last, new_first): (Vec<Goal>, Vec<Goal>) = new.iter().partition(|g| under_us.contains(&g.target));
