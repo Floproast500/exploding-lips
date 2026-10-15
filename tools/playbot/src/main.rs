@@ -1036,7 +1036,9 @@ impl<'a> Bot<'a> {
                         // 600 pad, a bounce of about 768.)
                         let above = match pads.get(world.solid_floor(p.region).1).copied().flatten() {
                             Some(v) => 48.0 * ((v + physics.jump_speed) / physics.jump_speed).powi(2),
-                            None => 96.0,
+                            // (A jump's peak, 48 at the usual 200, plus our height: LIPS03 jumps
+                            // at 250 for its pickup #12, 112 up.)
+                            None => 48.0 * (physics.jump_speed / 200.0).powi(2) + physics.height,
                         };
                         let pickup_above = matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) && g.at[2] > p.z && g.at[2] - p.z < above;
                         d < reach && (matches!(g.target, Target::Lift(r) if p.region == r) || (p.z - g.at[2]).abs() < 72.0 || pickup_above)
@@ -1505,7 +1507,7 @@ impl<'a> Bot<'a> {
                         s.effects.bounce_speed(s.level.world.solid_floor(p.region).1).is_some_and(|v| v > 0.0)
                     };
                     air_ticks += 1;
-                    if !bouncing || air_ticks % 3 == 0 {
+                    if !bouncing || air_ticks.is_multiple_of(3) {
                         stalled += 1;
                     }
                     if stalled > 90 {

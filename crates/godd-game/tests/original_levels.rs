@@ -1542,3 +1542,30 @@ fn lips14_rotating_door_turns_from_its_face() {
         assert!((after.0 - before.0).hypot(after.1 - before.1) > 32.0, "fixes {fixes}: door r21 turned ({before:?} -> {after:?})");
     }
 }
+
+/// OSETJUMP in a level's INI sets the jump (physics.md 5): LIPS03 jumps at 250, others at 200.
+/// LIPS03's pickup #12 (it opens door r397 on the way to the GOLD that lowers the exit bars)
+/// hangs 112 over the floor of r9: a 250 jump reaches it, a 200 one does not.
+#[test]
+fn osetjump_sets_the_level_jump() {
+    for (level, speed) in [("LIPS03", 250.0f32), ("LIPS00", 200.0)] {
+        let Some((vfs, mut game)) = start(level) else { return };
+        run(&mut game, &vfs, 0.3);
+        let s = game.session().unwrap();
+        assert_eq!(s.physics_override.unwrap_or_default().jump_speed, speed, "{level}");
+    }
+    // Jumping under #12 picks it up.
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS03") else { return };
+    run(&mut game, &vfs, 0.3);
+    {
+        let s = game.session_mut().unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region) = (16096.0, 15240.0, 0.0, 9);
+        s.previous = s.player;
+    }
+    for _ in 0..3 {
+        hold(&mut game, &vfs, &[Action::Jump], 2, 0.0);
+        run(&mut game, &vfs, 1.0);
+    }
+    assert!(game.session().unwrap().objects.inventory.contains(&12), "#12 picked up by jumping");
+}

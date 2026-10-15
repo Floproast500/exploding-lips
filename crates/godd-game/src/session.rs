@@ -220,6 +220,18 @@ impl Session {
         let default = session.default_background.clone();
         session.play_background(default);
         session.process_script_events();
+        // OSETJUMP (physics.md 5): the level's jump launch speed and jump-fall gravity, 200 and
+        // 200 everywhere except LIPS03 (250), whose pickup #12 hangs out of reach of a 200 jump.
+        if let Some((ints, _)) = &session.script.jump {
+            let mut p = session.physics_override.unwrap_or_default();
+            if ints[1] > 0 {
+                p.jump_speed = ints[1] as f32;
+            }
+            if ints[3] > 0 {
+                p.jump_fall_gravity = ints[3] as f32;
+            }
+            session.physics_override = Some(p);
+        }
         session.apply_tv_textures();
         let available = session.script.available_tools;
         if available != 0 {
