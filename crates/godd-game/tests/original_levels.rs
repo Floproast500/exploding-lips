@@ -1735,3 +1735,42 @@ fn quickload_rebuilds_the_level_exactly() {
         panic!("player now {:?} saved {:?}; states {:?} vs {:?}; regions differ {rd:?}; objects {} vs {}, differ {:?}; inventory {:?} vs {:?}", p(&(now.0, now.1, now.2, now.3)), p(&(saved.0, saved.1, saved.2, saved.3)), now.4, saved.4, now.6.len(), saved.6.len(), &od[..od.len().min(20)], now.7, saved.7);
     }
 }
+
+/// A death bot hit by the player's shot groans (its ON HP fires 761, whose ONTAG plays one of
+/// tags 250–258's sounds): from the bot, not as a flat sound, which made a hit on a vampire bat
+/// sound like the player being hurt.
+#[test]
+fn bot_hit_groans_come_from_the_bot() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.1);
+    let bot = 643; // DETHBOT2 in r22
+    let (bx, by) = {
+        let s = game.session_mut().unwrap();
+        let o = &s.objects.list[bot];
+        let (bx, by) = (o.x, o.y);
+        let region = s.level.world.region_at_z(bx - 160.0, by, Some(-127.0)).unwrap();
+        (s.player.x, s.player.y, s.player.z, s.player.region, s.player.angle) = (bx - 160.0, by, -128.0, region, 0.0);
+        s.previous = s.player;
+        (bx, by)
+    };
+    game.drain_audio();
+    let mut groans = Vec::new();
+    let mut fire = Input::default();
+    fire.set(Action::Use, true);
+    for _ in 0..(8.0 * godd_game::TICK_RATE) as usize {
+        game.tick(&vfs, &fire);
+        for e in game.drain_audio() {
+            if let godd_game::AudioEvent::Sound { name, pos, .. } = e
+                && (name.starts_with("AGONY") || name == "COUGHF3" || name == "SCREAM02")
+            {
+                groans.push((name, pos));
+            }
+        }
+    }
+    assert!(!groans.is_empty(), "the bot was hit and groaned");
+    for (name, pos) in &groans {
+        let p = pos.unwrap_or_else(|| panic!("{name} plays flat"));
+        assert!((p[0] - bx).hypot(p[1] - by) < 200.0, "{name} from {p:?}, the bot near ({bx}, {by})");
+    }
+}

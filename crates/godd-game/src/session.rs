@@ -53,6 +53,8 @@ pub struct Session {
     pub pending_level: Option<(String, Option<String>)>,
     /// Player view spin from a script (PTL/PTR): radians per tick, ticks left.
     spin: (f32, u32),
+    /// While a bot's tag runs its ONTAG: where the sounds it plays come from.
+    sound_source: Option<([f32; 3], Option<usize>)>,
     /// Status-message duration multiplier (accessibility "long messages").
     pub message_scale: f64,
     /// World tags fired by local interactions, to share with netplay peers.
@@ -169,6 +171,7 @@ impl Session {
             objects,
             pending_level: None,
             spin: (0.0, 0),
+            sound_source: None,
             message_scale: 1.0,
             outgoing_tags: Vec::new(),
             remote_players: std::collections::HashMap::new(),
@@ -570,6 +573,12 @@ impl Session {
     fn object_request(&mut self, r: ObjRequest) {
         match r {
             ObjRequest::Tag(t) => self.script.activate_tag(t),
+            ObjRequest::TagFrom { tag, pos, region } => {
+                self.sound_source = Some((pos, region));
+                self.script.activate_tag(tag);
+                self.process_script_events();
+                self.sound_source = None;
+            }
             ObjRequest::PlayerHit(_) if self.god => {}
             ObjRequest::PlayerHit(t) => self.script.activate_tag(t),
             ObjRequest::SharedTag(t) => {
@@ -1075,7 +1084,15 @@ impl Session {
                         let ticks_left = (TEXT_SECONDS * TICK_RATE) as u32;
                         self.overlay_text = Some(Message { color: crate::script::DEFAULT_MESSAGE_COLOR, text, ticks_left });
                     }
-                    ScriptEvent::Sound(name) => self.audio.push(AudioEvent::sound(name)),
+                    ScriptEvent::Sound(name) => {
+                        let source = self.sound_source;
+                        match source {
+                            // (Out of earshot under g_fixes, as the bot's own sounds.)
+                            Some((pos, region)) if !self.fixes || self.in_earshot(pos, region) => self.audio.push(AudioEvent::sound_at(name, pos)),
+                            Some(_) => {}
+                            None => self.audio.push(AudioEvent::sound(name)),
+                        }
+                    }
                     ScriptEvent::WorldTag(tag) => self.dispatch_world_tag(tag),
                     ScriptEvent::Quit => self.quit_requested = true,
                     ScriptEvent::InitMover { object, script } => self.objects.init_mover(&object, &script),

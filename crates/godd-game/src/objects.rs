@@ -334,6 +334,9 @@ pub enum ObjRequest {
     /// them with no line-of-sight test, movers.md, so these never stop).
     BotSound { name: String, pos: [f32; 3], region: Option<usize> },
     Tag(u32),
+    /// A tag a bot's script fired (XT): the sounds its ONTAG plays come from the bot (the
+    /// death bots' groans on a hit sounded like the player being hurt).
+    TagFrom { tag: u32, pos: [f32; 3], region: Option<usize> },
     /// A tag from a world switch (OTAGSW/OBUMPSW): fired locally and shared in netplay.
     SharedTag(u32),
     TagRange(u32, u32),
@@ -1537,7 +1540,10 @@ impl Objects {
                 // Lips scripts fire 661 when a bot touches the player (combat.md §4.3): the player
                 // is hit, like a shot's tag.
                 MoverRequest::Tag(BOT_TOUCH_TAG) => self.requests.push(ObjRequest::PlayerHit(BOT_TOUCH_TAG)),
-                MoverRequest::Tag(t) => self.requests.push(ObjRequest::Tag(t)),
+                MoverRequest::Tag(t) => {
+                    let o = &self.list[i];
+                    self.requests.push(ObjRequest::TagFrom { tag: t, pos: [o.x, o.y, o.z + o.height / 2.0], region: o.region });
+                }
                 MoverRequest::TagRange(a, b) => self.requests.push(ObjRequest::TagRange(a, b)),
                 MoverRequest::Message { color, text } => self.requests.push(ObjRequest::Message { color, text }),
                 MoverRequest::Sound(s) => self.bot_sound(i, Some(s), None),
