@@ -2202,7 +2202,10 @@ impl<'a> Bot<'a> {
                 s.effects.triggers().iter().filter(|(_, t)| t.iter().any(|x| tags.contains(x))).map(|(r, _)| *r).collect()
             };
             // (A used teleporter, object or trigger region, only when nothing new is left.)
-            let teleporter = |g: &Goal| self.used.contains(&g.target) && (matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r)));
+            // (And a teleporting trigger region even before its first use: things to collect
+            // where we are come first; LIPS00's swimmers left the pool hall by r305's ceiling
+            // before taking OCTRED and BRONZE.)
+            let teleporter = |g: &Goal| (self.used.contains(&g.target) && matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE))) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r));
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)) && !teleporter(g));
             let tele_targets: HashSet<Target> = goals.iter().filter(|g| teleporter(g)).map(|g| g.target).collect();
             // The level's exit switch (tag 500) first whenever it can be reached: what is left
