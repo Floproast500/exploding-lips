@@ -15,6 +15,8 @@
 //!                                                  (extra words: look, shear, modern, boom)
 //!   lipstool render-bsp <PAK|BSP> <MAP> <OUT.png> [WxH] [palette=FILE]
 //!                                                  a Quake-family map (Quake, Hexen II) from the start
+//!   lipstool sweep <GAME_DIR> <LEVEL> <x0,y0,x1,y1,step> <look,look..> [OUT_DIR] [WxH] [set:CVAR=VALUE]...
+//!                                                  GPU vs software over a grid of views: missing geometry
 //!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern] [pack=DIR] [set:CVAR=VALUE]... [frames=N]
 //!                                                  GPU frame time
 
@@ -47,6 +49,18 @@ fn main() -> AnyResult {
             println!("{map}: {} faces ({} world), {} textures", b.faces.len(), b.world_faces.len(), b.textures.len());
             let rgb = lipstool::render_module(&mut viewer, size)?;
             save_rgb(Path::new(out), size.0, size.1, &rgb)
+        }
+        ["sweep", dir, level, area, looks, rest @ ..] => {
+            let v: Vec<f32> = area.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            let area: [f32; 5] = v.try_into().map_err(|_| "area: x0,y0,x1,y1,step")?;
+            let looks: Vec<f32> = looks.split(',').map(str::parse).collect::<Result<_, _>>()?;
+            let out = rest.first().filter(|a| !a.contains('x') || a.contains('/')).filter(|a| !a.starts_with("set:")).map(Path::new);
+            if let Some(out) = out {
+                std::fs::create_dir_all(out)?;
+            }
+            let opts: Vec<&str> = rest.iter().copied().filter(|a| Some(Path::new(a)) != out).collect();
+            lipstool::sweep(Path::new(dir), level, &opts, area, &looks, out)?;
+            Ok(())
         }
         ["bench-gpu", dir, level, rest @ ..] => {
             let frames = rest.iter().find_map(|a| a.strip_prefix("frames=")?.parse().ok()).unwrap_or(200);

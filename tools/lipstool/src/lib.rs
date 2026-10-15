@@ -103,6 +103,10 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
     for (name, value) in rest.iter().filter_map(|a| a.strip_prefix("set:")?.split_once('=')) {
         game.cvars.set(name, value)?;
     }
+    // (The field of view is taken from the cvar on a tick; renders here do not tick.)
+    if rest.iter().any(|a| a.starts_with("set:r_fov=")) {
+        game.settings.vfov_degrees = game.cvars.get_float("r_fov") as f32;
+    }
     Ok((vfs, game, w, h))
 }
 
@@ -140,6 +144,67 @@ pub fn render_gpu_with(
     let coverage = ui.coverage.clone().unwrap_or_default();
     let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default())));
     Ok((w, h, rgba.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect()))
+}
+
+/// Sweep cameras over `area` (x0, y0, x1, y1, step) at 8 headings and each of `looks`, render
+/// each view through both renderers and report views where the GPU shows much more pure black
+/// than the software renderer (missing geometry). Saves the worst ones to `out` when given.
+pub fn sweep(dir: &Path, level: &str, rest: &[&str], area: [f32; 5], looks: &[f32], out: Option<&Path>) -> AnyResult<usize> {
+    let (_vfs, mut game, w, h) = view_game(dir, level, rest)?;
+    let (adapter, device, queue) = engine_gpu::headless_adapter().ok_or("no GPU adapter")?;
+    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    renderer.use_adapter(&device, &queue, &adapter);
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
+    game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
+    renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
+    renderer.set_images(&device, &queue, &game.world_images());
+    let mut frame = godd_game::Frame::new(w, h);
+    let rows = h * 3 / 4; // above the HUD
+    let black = |rgb: &[u8], stride: usize| (0..rows * w).filter(|&i| rgb[i * stride] < 3 && rgb[i * stride + 1] < 3 && rgb[i * stride + 2] < 3).count();
+    let [x0, y0, x1, y1, step] = area;
+    let (mut views, mut flagged) = (0usize, 0usize);
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            let spot = {
+                let world = &game.session().ok_or("no level")?.level.world;
+                world.region_at(x, y).filter(|&r| world.regions[r].ceiling - world.regions[r].floor >= 64.0).map(|r| (r, world.regions[r].floor))
+            };
+            if let Some((region, floor)) = spot {
+                for k in 0..8 {
+                    for &look in looks {
+                        let s = game.session_mut().ok_or("no level")?;
+                        (s.player.x, s.player.y, s.player.z, s.player.region) = (x, y, floor, region);
+                        (s.player.angle, s.player.look) = (k as f32 * std::f32::consts::FRAC_PI_4, look);
+                        s.previous = s.player;
+                        let Some(view) = game.gpu_frame(&mut ui, 1.0) else { continue };
+                        let coverage = ui.coverage.clone().unwrap_or_default();
+                        let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default())));
+                        game.render(&mut frame, 1.0);
+                        let mut sw = Vec::new();
+                        frame.to_rgba(game.palette(), &mut sw);
+                        let (gb, sb) = (black(&rgba, 4), black(&sw, 4));
+                        views += 1;
+                        if gb > sb + rows * w / 50 {
+                            flagged += 1;
+                            println!("{x:.0},{y:.0},{floor},{:.3} look {look}: black gpu {:.1}% sw {:.1}%", k as f32 * std::f32::consts::FRAC_PI_4, gb as f64 * 100.0 / (rows * w) as f64, sb as f64 * 100.0 / (rows * w) as f64);
+                            if let Some(out) = out.filter(|_| flagged <= 30) {
+                                let rgb = |v: &[u8]| v.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<u8>>();
+                                save_rgb(&out.join(format!("{flagged:02}_gpu.png")), w, h, &rgb(&rgba))?;
+                                save_rgb(&out.join(format!("{flagged:02}_sw.png")), w, h, &rgb(&sw))?;
+                            }
+                        }
+                    }
+                }
+            }
+            x += step;
+        }
+        y += step;
+    }
+    println!("{views} views, {flagged} flagged");
+    Ok(flagged)
 }
 
 /// Software render of the same view; returns RGB.

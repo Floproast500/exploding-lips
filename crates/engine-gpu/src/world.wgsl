@@ -126,7 +126,10 @@ fn vs_main(v: VsIn) -> VsOut {
     let right = dot(rel.xy, u.basis.zw);
     var out: VsOut;
     if ((v.layer_flags.y & SCREEN) != 0u) {
-        out.clip = vec4<f32>(v.pos.xy, 0.0, 1.0);
+        // A screen-space sky quad is the background: at the far end of the depth range, behind
+        // everything (the software renderer shows sky wherever a column has nothing else).
+        let far = select(0.0, 0.9999999, (v.layer_flags.y & SKY) != 0u);
+        out.clip = vec4<f32>(v.pos.xy, far, 1.0);
         out.uv = v.uv;
         out.depth = 0.0;
         out.rect = v.rect;

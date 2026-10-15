@@ -56,7 +56,7 @@ fn earcut_state() -> engine_scene::Earcut {
 
 use crate::render::Camera;
 use crate::world::Surface;
-use engine_scene::scene::{CLAMP, DISCARD_OUTSIDE_V, NO_DISTANCE, OBJECT, SKY, SceneFrame, SceneVertex, TRANSPARENT, VOID};
+use engine_scene::scene::{CLAMP, DISCARD_OUTSIDE_V, NO_DISTANCE, OBJECT, SCREEN, SKY, SceneFrame, SceneVertex, TRANSPARENT, VOID};
 use std::f32::consts::TAU;
 
 /// Sprites nearer than this (view depth) are skipped, like the software renderer's NEAR.
@@ -211,6 +211,14 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
     out.batches.clear();
     out.sky = world.sky.filter(|&i| i < world.images.len()).map(|i| i as u32);
     let image = |s: &Surface| world.images.get(s.image).map(|i| (s.image as u32, i.width as f32, i.height as f32));
+    // Sky behind everything: a view between portals that no region's geometry covers (looking
+    // up through a gap at a sky ceiling over regions not walked to) shows sky, as in the
+    // software renderer, not black.
+    if out.sky.is_some() {
+        let corner = |x: f32, y: f32| SceneVertex { pos: [x, y, 0.0], image: NO_IMAGE, flags: SKY | SCREEN, ..Default::default() };
+        out.quad([corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)]);
+        out.batch(0, None);
+    }
     let windows = visible_regions(world, cam, tan_half, freelook);
     for (r, region_windows) in windows.iter().enumerate() {
         if region_windows.is_empty() {
