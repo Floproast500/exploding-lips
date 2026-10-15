@@ -2286,6 +2286,13 @@ impl<'a> Bot<'a> {
                 }
                 if self.verbose {
                     println!("     waypoint {:?} (reached {} regions; fails {}, routes set aside {:?})", wp.map(|g| g.0.at), self.reached.len(), self.waypoint_fails, self.route_fails);
+                    // (Boxed in: once, where and what is reachable, to see what closes us off.)
+                    if wp.is_none() && std::env::var("PLAYBOT_BOXED").is_ok() {
+                        let p = self.session().player;
+                        let mut r: Vec<usize> = self.reached.iter().copied().collect();
+                        r.sort_unstable();
+                        println!("     boxed at ({:.0},{:.0},{:.0}) r{} h {}: reachable {r:?}", p.x, p.y, p.z, p.region, self.session().physics_override.map_or(48.0, |o| o.height));
+                    }
                 }
                 let (wp, target) = wp?;
                 // (Headed for the same place again and again with nothing new on the way: the
