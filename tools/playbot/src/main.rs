@@ -348,6 +348,11 @@ impl<'a> Bot<'a> {
         let mut via: Vec<Option<Target>> = vec![None; w.regions.len()];
         let mut queue = VecDeque::from([start]);
         while let Some(r) = queue.pop_front() {
+            // (Down through a stacked floor: LIPS00's way to its exit drops from r419 to r420.)
+            if let Some(b) = w.regions[r].below.filter(|&b| b < prev.len() && prev[b] == usize::MAX) {
+                prev[b] = r;
+                queue.push_back(b);
+            }
             for &(_, to, t) in tele.iter().filter(|e| e.0 == r) {
                 if to < prev.len() && prev[to] == usize::MAX {
                     prev[to] = r;
@@ -384,14 +389,29 @@ impl<'a> Bot<'a> {
             }
             n
         };
-        let target = goals
+        // The level's exit (a tag 500 switch) when there is any way there, doors on the way to
+        // be opened (LIPS00's: door r396 needs LASTKEY, which SILVER morphs in); else the
+        // nearest unreached thing.
+        let exit = s
+            .effects
+            .switches()
+            .iter()
+            .filter(|sw| sw.tags.contains(&500))
+            .flat_map(|sw| {
+                let x = &w.walls[sw.wall];
+                std::iter::once(x.front).chain(x.back)
+            })
+            .filter(|&r| r < prev.len() && prev[r] != usize::MAX && r != start)
+            .map(|r| (route_len(r), r))
+            .min();
+        let target = exit.or_else(|| goals
             .iter()
             .filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target))
             // (Not one the waypoint search has set aside: no real way there.)
             .filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).filter(|&r| prev[r] != usize::MAX && !self.route_fails.contains(&r)).map(|r| (route_len(r), r)))
-            .min();
+            .min());
         if self.verbose {
-            println!("     route target: {:?}", target);
+            println!("     route target: {:?}{}", target, if exit.is_some() { " (the exit)" } else { "" });
             if target.is_none() && std::env::var("PLAYBOT_BOXED").is_ok() {
                 let open: Vec<String> = goals.iter().filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target)).map(|g| {
                     let r = w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0));
