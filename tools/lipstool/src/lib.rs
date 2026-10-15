@@ -47,6 +47,15 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
             None => game.debug_move_player(turn.to_radians(), forward),
         },
     }
+    // "at:X,Y,Z,ANGLE": put the player there (ANGLE in radians, as a quicksave has it).
+    if let Some(at) = rest.iter().find_map(|a| a.strip_prefix("at:")) {
+        let v: Vec<f32> = at.split(',').map(str::parse).collect::<Result<_, _>>()?;
+        let [x, y, z, angle] = v[..] else { return Err("at:X,Y,Z,ANGLE".into()) };
+        let s = game.session_mut().ok_or("no level")?;
+        let region = s.level.world.region_at_z(x, y, Some(z + 1.0)).ok_or("no region there")?;
+        (s.player.x, s.player.y, s.player.z, s.player.region, s.player.angle) = (x, y, z, region, angle);
+        s.previous = s.player;
+    }
     game.settings.true_color = rest.get(3) == Some(&"truecolor");
     // Optional 5th argument: look up/down (original look units, ±512), and "shear" to turn
     // off true-3D look in the GPU renderer.

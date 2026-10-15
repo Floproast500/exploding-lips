@@ -114,7 +114,7 @@ pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f
         inner.iter().all(|&v| {
             (0..outer.len()).all(|i| {
                 let (p, q) = (outer[i], outer[(i + 1) % outer.len()]);
-                (q[0] - p[0]) * (v[1] - p[1]) - (q[1] - p[1]) * (v[0] - p[0]) >= -1e-5
+                (q[0] - p[0]) * (v[1] - p[1]) - (q[1] - p[1]) * (v[0] - p[0]) >= -1e-4
             })
         })
     };
@@ -141,11 +141,14 @@ pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f
         }
         // Past the cap a window joins the last one's hull rather than being lost (LIPS00's coffin,
         // seen through the many edges of the room around it, lost its ceiling: a black hole).
-        // Merged windows are not walked on from, which keeps the walk as cheap as before.
-        if windows[r].len() >= MAX_WINDOWS {
+        // The walk goes on with the whole hull: what lies beyond is seen through it too (the
+        // street behind LIPS00's canteen sign), and later views inside it stop at the check above.
+        let capped = windows[r].len() >= MAX_WINDOWS;
+        let mut window = window;
+        if capped {
             let last = windows[r].last_mut().expect("capped");
             *last = convex_hull(&[&last[..], &window[..]].concat());
-            continue;
+            window = last.clone();
         }
         let reg = &world.regions[r];
         for link in [reg.above, reg.below].into_iter().flatten() {
@@ -174,7 +177,26 @@ pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f
                 stack.push((other, through, depth + 1));
             }
         }
-        windows[r].push(window);
+        if capped {
+            continue;
+        }
+        // A window that joins one already here into a convex shape (strips of one opening
+        // split by the walls between) merges with it: fewer windows, the same area.
+        let area = polygon_area(&window);
+        let bounds = |p: &[[f32; 2]]| p.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, v| [b[0].min(v[0]), b[1].min(v[1]), b[2].max(v[0]), b[3].max(v[1])]);
+        let nb = bounds(&window);
+        let joined = windows[r].iter().enumerate().find_map(|(k, w)| {
+            let wb = bounds(w);
+            if wb[0] > nb[2] + 1e-4 || nb[0] > wb[2] + 1e-4 || wb[1] > nb[3] + 1e-4 || nb[1] > wb[3] + 1e-4 {
+                return None; // apart: no shared edge
+            }
+            let hull = convex_hull(&[&w[..], &window[..]].concat());
+            (polygon_area(&hull) <= (polygon_area(w) + area) * 1.0005 + 1e-6).then_some((k, hull))
+        });
+        match joined {
+            Some((k, hull)) => windows[r][k] = hull,
+            None => windows[r].push(window),
+        }
     }
     windows
 }

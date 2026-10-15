@@ -1659,3 +1659,28 @@ fn lips00_coffin_ceiling_inside_its_windows() {
     }
     assert!(checked > 20, "the coffin ceiling is in view ({checked} points)");
 }
+
+/// LIPS00's street seen past the canteen sign's post: the streets beyond are reached through
+/// regions already holding the most windows, and were not walked on from (a black slab under
+/// the sign). The far street (r83) must have a window there.
+#[test]
+fn lips00_street_past_the_canteen_post() {
+    let Some(dir) = original_dir() else { return };
+    let xrb = std::fs::read(dir.join("LIPS00.XRB")).unwrap();
+    let xpg = std::fs::read(dir.join("LIPS00.XPG")).unwrap();
+    let level = Level::load(&xrb, &xpg).unwrap();
+    let w = &level.world;
+    let (x, y) = (18183.863f32, 17053.113f32);
+    let region = w.region_at_z(x, y, Some(1.0)).unwrap();
+    let tan_v = (48.9f32.to_radians() / 2.0).tan();
+    let cam = godd_game::render::Camera { x, y, z: 48.0, angle: 0.785, pitch: 0.0, region };
+    let windows = godd_game::scene::visible_regions(w, &cam, (tan_v * 1400.0 / 590.0, tan_v), true);
+    let p = [0.37f32, 0.3];
+    let inside = |win: &Vec<[f32; 2]>| {
+        (0..win.len()).all(|i| {
+            let (a, b) = (win[i], win[(i + 1) % win.len()]);
+            (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]) >= 0.0
+        })
+    };
+    assert!(windows[83].iter().any(inside), "r83 behind the post: {:?}", windows[83]);
+}

@@ -27,7 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]... [--screenshot-after SECONDS FILE.png] [--quickload] | --pad-test [SECONDS] | --bsp <PAK|BSP> <MAP>";
+const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]... [--screenshot-after SECONDS FILE.png] [--quickload] [--input-script FILE] | --pad-test [SECONDS] | --bsp <PAK|BSP> <MAP>";
 
 /// Command-line options that are not cvars (cvar options are applied to the registry directly).
 struct Options {
@@ -45,9 +45,48 @@ struct Options {
     screenshot_after: Option<(f64, PathBuf)>,
     /// `--quickload`: start from the quicksave (a debugging aid: reproduce a player's spot).
     quickload: bool,
+    /// `--input-script FILE`: timed input for watching a walk (debugging aid). Lines are
+    /// `SECONDS +ACTION`, `SECONDS -ACTION`, `SECONDS look YAW PITCH` (radians) or
+    /// `SECONDS shot FILE.png` or `SECONDS tag N` (fire a script tag), in time order.
+    input_script: std::collections::VecDeque<(f64, ScriptOp)>,
     /// Cvars set on the command line: (name, value before, value set). They last for this run
     /// only; config.cfg keeps the earlier value unless the player changes it in game.
     overrides: Vec<(String, String, String)>,
+}
+
+#[derive(Debug, Clone)]
+enum ScriptOp {
+    Hold(godd_game::Action, bool),
+    Look(f32, f32),
+    Shot(PathBuf),
+    Tag(u32),
+}
+
+fn parse_input_script(text: &str) -> Result<std::collections::VecDeque<(f64, ScriptOp)>, String> {
+    let mut out = std::collections::VecDeque::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let bad = || format!("input script: bad line {line:?}");
+        let mut it = line.split_whitespace();
+        let secs: f64 = it.next().and_then(|v| v.parse().ok()).ok_or_else(bad)?;
+        let op = match it.next().ok_or_else(bad)? {
+            "look" => {
+                let mut f = || it.next().and_then(|v| v.parse::<f32>().ok()).ok_or_else(bad);
+                ScriptOp::Look(f()?, f()?)
+            }
+            "shot" => ScriptOp::Shot(PathBuf::from(it.next().ok_or_else(bad)?)),
+            "tag" => ScriptOp::Tag(it.next().and_then(|v| v.parse().ok()).ok_or_else(bad)?),
+            held => {
+                let (down, name) = match held.split_at(1) {
+                    ("+", n) => (true, n),
+                    ("-", n) => (false, n),
+                    _ => return Err(bad()),
+                };
+                ScriptOp::Hold(godd_game::Action::from_name(name).ok_or_else(bad)?, down)
+            }
+        };
+        out.push_back((secs, op));
+    }
+    Ok(out)
 }
 
 fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
@@ -62,6 +101,7 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
         mods: Vec::new(),
         screenshot_after: None,
         quickload: false,
+        input_script: Default::default(),
         overrides: Vec::new(),
         name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
     };
@@ -99,6 +139,10 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
             "--software" => opts.software = true,
             "--mute" => opts.mute = true,
             "--quickload" => opts.quickload = true,
+            "--input-script" => {
+                let path = next("a file")?;
+                opts.input_script = parse_input_script(&std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?)?;
+            }
             "--screenshot-after" => {
                 let secs = next("seconds")?.parse().map_err(|_| "--screenshot-after needs seconds")?;
                 opts.screenshot_after = Some((secs, PathBuf::from(next("a .png file")?)));
@@ -185,6 +229,36 @@ impl App {
             }
             p.request_screenshot(path.clone());
             self.auto_shot = true;
+        }
+        // Scripted input (--input-script): apply what is due; one screenshot per frame.
+        let since = (now - self.started).as_secs_f64();
+        while let Some((at, op)) = self.opts.input_script.front().cloned()
+            && at <= since
+        {
+            match op {
+                ScriptOp::Hold(action, down) => self.input.set(action, down),
+                ScriptOp::Tag(tag) => {
+                    if let Some(s) = self.game.session_mut() {
+                        s.fire_tag(tag);
+                    }
+                }
+                ScriptOp::Look(yaw, pitch) => {
+                    self.input.look_delta.0 += yaw;
+                    self.input.look_delta.1 += pitch;
+                }
+                ScriptOp::Shot(path) => {
+                    if let Some(s) = self.game.session() {
+                        let p = &s.player;
+                        log::info!("input script: {} at {} {} {} angle {} look {} region {}", path.display(), p.x, p.y, p.z, p.angle, p.look, p.region);
+                    }
+                    if let Some(p) = &mut self.presenter {
+                        p.request_screenshot(path);
+                    }
+                    self.opts.input_script.pop_front();
+                    break;
+                }
+            }
+            self.opts.input_script.pop_front();
         }
         let elapsed = (now - self.last).as_secs_f64();
         #[allow(unused_mut)]
