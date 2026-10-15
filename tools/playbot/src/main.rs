@@ -15,6 +15,8 @@ use godd_game::{Action, Game, Input, Options, Vfs};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+mod chains;
+
 type AnyResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Planner grid spacing (world units).
@@ -341,8 +343,18 @@ impl<'a> Bot<'a> {
         let start = s.player.region;
         let mut prev = vec![usize::MAX; w.regions.len()];
         prev[start] = start;
+        // Teleports link regions too; `via[r]`: what to use to get into r that way.
+        let tele = chains::teleports(s, self.death_tags());
+        let mut via: Vec<Option<Target>> = vec![None; w.regions.len()];
         let mut queue = VecDeque::from([start]);
         while let Some(r) = queue.pop_front() {
+            for &(_, to, t) in tele.iter().filter(|e| e.0 == r) {
+                if to < prev.len() && prev[to] == usize::MAX {
+                    prev[to] = r;
+                    via[to] = Some(t);
+                    queue.push_back(to);
+                }
+            }
             for &wi in &w.regions[r].walls {
                 let x = &w.walls[wi];
                 let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
@@ -404,13 +416,35 @@ impl<'a> Bot<'a> {
         }
         let Some((_, mut r)) = target else { return (Vec::new(), None) };
         let goal_region = r;
-        // Walk back to the first shut door on the route.
+        // Walk back to the first obstacle on the route: a shut door, or a teleport to take.
         let mut first = None;
+        let mut first_tele = None;
         while prev[r] != r {
             if doors.contains_key(&r) && shut(r) {
                 first = Some(r);
+                first_tele = None;
+            }
+            if let Some(t) = via[r] {
+                first_tele = Some(t);
+                first = None;
             }
             r = prev[r];
+        }
+        let goal_for = |t: Target| -> Option<Goal> {
+            switches.iter().chain(goals.iter()).find(|g| g.target == t).copied().or_else(|| match t {
+                Target::Region(r) => {
+                    let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
+                    Some(Goal { target: t, at: [(x0 + x1) / 2.0, (y0 + y1) / 2.0, w.regions[r].floor], face: None, shoot: false })
+                }
+                Target::Object(i) => s.objects.list.get(i).map(|o| Goal { target: t, at: [o.x, o.y, o.z], face: None, shoot: false }),
+                _ => None,
+            })
+        };
+        if let Some(t) = first_tele {
+            if self.verbose {
+                println!("     route teleport: {t:?}");
+            }
+            return (goal_for(t).into_iter().collect(), Some(goal_region));
         }
         let Some(door) = first else { return (Vec::new(), None) };
         let tag = doors[&door];
@@ -430,6 +464,21 @@ impl<'a> Bot<'a> {
             .chain(s.objects.list.iter().enumerate().filter(|(_, o)| matches!(o.effect, OTAGSW | OBUMPSW) && tags.contains(&o.tag)).map(|(i, _)| Target::Object(i)))
             .collect();
         let mut pick: Vec<Goal> = switches.iter().chain(goals.iter()).filter(|g| opens.contains(&g.target)).copied().collect();
+        // (And through chains in the level data: a pickup that fires the tag, one a switch
+        // still has to morph in, a lock's item: chains.rs.)
+        let mut chain: Vec<Target> = tags.iter().flat_map(|&t| chains::producers(s, t, self.death_tags())).collect();
+        chain.sort_by_key(|t| format!("{t:?}"));
+        chain.dedup();
+        if self.verbose && !chain.is_empty() {
+            println!("     door r{door} (tag {tag}) opens through {chain:?}");
+        }
+        for t in chain {
+            if !pick.iter().any(|g| g.target == t)
+                && let Some(g) = goal_for(t)
+            {
+                pick.push(g);
+            }
+        }
         // (Or a trigger region that opens it on entry, used before and so no longer a goal:
         // LIPS00's strip r169 opens door r47 for a while, the only way back east.)
         for (r, t) in s.effects.triggers() {
@@ -2158,6 +2207,14 @@ impl<'a> Bot<'a> {
     /// Play the level until it is left or nothing new is reachable; Ok(next level name).
     fn play(&mut self, max_ticks: u64) -> Result<String, String> {
         self.boss = self.find_boss();
+        // PLAYBOT_CHAIN="40,53": what the level data says fires those tags (chains.rs).
+        if let Ok(v) = std::env::var("PLAYBOT_CHAIN") {
+            for t in v.split(',').filter_map(|x| x.parse::<i32>().ok()) {
+                let mut p: Vec<Target> = chains::producers(self.session(), t, self.death_tags()).into_iter().collect();
+                p.sort_by_key(|t| format!("{t:?}"));
+                println!("     tag {t} fires from {p:?}");
+            }
+        }
         while self.ticks < max_ticks {
             if self.level_done() {
                 let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
