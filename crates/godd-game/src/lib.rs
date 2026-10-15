@@ -131,6 +131,9 @@ pub struct Game {
     /// The input since the current level was entered: quicksaves replay it to rebuild the level
     /// exactly (doors, triggers, pickups, enemies), not only position and states.
     recording: Option<Recording>,
+    /// Recordings of levels the player finished (level, replay text), for front ends to keep:
+    /// route guides can be made from a player's own run.
+    finished_replays: Vec<(String, String)>,
     quicksave_dirty: bool,
     /// F2 automap overlay.
     show_map: bool,
@@ -249,6 +252,49 @@ impl Recording {
     }
 }
 
+/// Collects a route guide while a recording replays (`Game::route_from_replay`).
+#[derive(Default)]
+struct RouteRecorder {
+    route: route::Route,
+    trail: Vec<[f32; 3]>,
+}
+
+impl RouteRecorder {
+    fn note(&mut self, s: &Session, walls: &[usize], bumped: &[usize], entered: &[usize]) {
+        use route::{RouteStep, RouteTarget};
+        let p = &s.player;
+        if !s.in_bsp && self.trail.last().is_none_or(|q| (q[0] - p.x).hypot(q[1] - p.y) >= 48.0) {
+            self.trail.push([p.x, p.y, p.z]);
+        }
+        let world = &s.level.world;
+        let triggers: Vec<usize> = s.effects.triggers().iter().map(|t| t.0).collect();
+        let mut steps: Vec<(RouteTarget, [f32; 3])> = Vec::new();
+        for &w in walls {
+            let wall = &world.walls[w];
+            let ((ax, ay), (bx, by)) = (world.vertices[wall.a], world.vertices[wall.b]);
+            steps.push((RouteTarget::Wall(w), [(ax + bx) / 2.0, (ay + by) / 2.0, p.z]));
+        }
+        for &i in bumped {
+            let Some(o) = s.objects.list.get(i) else { continue };
+            // (Things used, not bots met: pickups, teleporters, bump and tag switches.)
+            if o.mover.is_none() && matches!(o.effect, 130 | 15 | 20 | 22) {
+                steps.push((RouteTarget::Object(i), [o.x, o.y, o.z]));
+            }
+        }
+        for &r in entered.iter().filter(|r| triggers.contains(r)) {
+            let ((x0, y0), (x1, y1)) = world.regions[r].bounds;
+            steps.push((RouteTarget::Region(r), [(x0 + x1) / 2.0, (y0 + y1) / 2.0, world.regions[r].floor]));
+        }
+        for (target, pos) in steps {
+            if self.route.steps.last().is_some_and(|last| last.target == target) {
+                continue;
+            }
+            let trail = route::untangle(&std::mem::take(&mut self.trail), 40.0);
+            self.route.steps.push(RouteStep { target, pos, trail });
+        }
+    }
+}
+
 #[derive(Default)]
 struct FpsCounter {
     frames: u32,
@@ -317,6 +363,7 @@ impl Game {
             quicksave: None,
             quicksave_dirty: false,
             recording: None,
+            finished_replays: Vec::new(),
             show_map: false,
             automap: automap::Automap::default(),
         };
@@ -668,6 +715,20 @@ impl Game {
         }
     }
 
+    /// Recordings of levels finished since the last call: (level, replay text).
+    pub fn take_finished_replays(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.finished_replays)
+    }
+
+    /// A route guide from a recorded run (`take_finished_replays`, a quicksave): replay it and
+    /// keep the switches, pickups, teleporters and trigger regions it used, with the way walked
+    /// between them. None if the text holds no replay.
+    pub fn route_from_replay(&mut self, vfs: &Vfs, text: &str) -> Option<route::Route> {
+        let rec = Recording::parse(text)?;
+        let mut recorder = RouteRecorder::default();
+        self.replay_with(vfs, rec, Some(&mut recorder)).then_some(recorder.route)
+    }
+
     /// Netplay changed the world from outside: the current level can no longer be rebuilt by
     /// replaying local input (quicksaves fall back to the plain snapshot).
     pub fn mark_unreplayable(&mut self) {
@@ -677,6 +738,10 @@ impl Game {
     /// Rebuild a level by replaying its recording: enter it as it was entered, then run every
     /// recorded tick through the simulation (the route guide follows along).
     fn replay(&mut self, vfs: &Vfs, rec: Recording) -> bool {
+        self.replay_with(vfs, rec, None)
+    }
+
+    fn replay_with(&mut self, vfs: &Vfs, rec: Recording, mut recorder: Option<&mut RouteRecorder>) -> bool {
         if self.start_level_with(vfs, &rec.level, rec.entry, rec.carried.clone()).is_err() {
             return false;
         }
@@ -709,6 +774,9 @@ impl Game {
             let bumped = std::mem::take(&mut s.objects.bump_log);
             if let Some(route) = &route {
                 self.route_progress.1.advance(route, &walls, &bumped, &entered);
+            }
+            if let Some(r) = recorder.as_deref_mut() {
+                r.note(s, &walls, &bumped, &entered);
             }
             if n % 8 == 0 {
                 let cam = camera(s, &physics, 1.0, (0.0, 0.0));
@@ -952,10 +1020,16 @@ impl Game {
                     self.quit = true;
                 }
                 if let Some(goto) = session.pending_goto.take() {
+                    if let Some(rec) = self.recording.take() {
+                        self.finished_replays.push((rec.level.clone(), rec.to_text()));
+                    }
                     self.goto(vfs, goto);
                     return;
                 }
                 if let Some((level, start)) = session.pending_level.take() {
+                    if let Some(rec) = self.recording.take() {
+                        self.finished_replays.push((rec.level.clone(), rec.to_text()));
+                    }
                     match self.start_level(vfs, &level, Entry::Continue) {
                         Ok(()) => {
                             if let (Some(name), Some(s)) = (start, self.session_mut()) {

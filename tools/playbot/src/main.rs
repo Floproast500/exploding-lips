@@ -2635,7 +2635,7 @@ impl<'a> Bot<'a> {
 fn main() -> AnyResult {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(dir) = args.first() else {
-        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal] [--record DIR]");
+        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal] [--record DIR] [--share FILE --seed N --episode-minutes M] | <GAME_DIR> --from-replay FILE [--record DIR]");
         std::process::exit(2);
     };
     let verbose = args.iter().any(|a| a == "--verbose");
@@ -2654,6 +2654,25 @@ fn main() -> AnyResult {
         levels = (0..18).map(|i| format!("LIPS{i:02}")).collect();
     }
     let vfs = Vfs::from_dir(Path::new(dir))?;
+    // --from-replay FILE: no bot; replay a player's recorded run (a finished level's .rep, or a
+    // quicksave) and write its route guide to --record DIR (or print it).
+    if let Some(file) = args.iter().position(|a| a == "--from-replay").and_then(|i| args.get(i + 1)) {
+        let text = std::fs::read_to_string(file)?;
+        let level = text.lines().find_map(|l| l.strip_prefix("level ")).ok_or("not a replay")?.to_string();
+        let mut game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
+        let route = game.route_from_replay(&vfs, &text).ok_or("the replay did not play")?;
+        println!("{level}: {} steps from the replay", route.steps.len());
+        match &record {
+            Some(dir) => {
+                let path = dir.join(format!("{level}.route"));
+                std::fs::create_dir_all(dir)?;
+                std::fs::write(&path, route.to_text())?;
+                println!("{level}: route written to {}", path.display());
+            }
+            None => print!("{}", route.to_text()),
+        }
+        return Ok(());
+    }
     let mut failures = 0;
     for level in &levels {
         let mut shared = share.as_ref().map(|p| Shared::new(p.clone(), level));

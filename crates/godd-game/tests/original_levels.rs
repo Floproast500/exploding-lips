@@ -1721,7 +1721,15 @@ fn quickload_rebuilds_the_level_exactly() {
     save.set(Action::QuickSave, true);
     game.tick(&vfs, &save);
     let saved = fingerprint(&game);
-    assert!(game.take_quicksave().is_some_and(|t| t.contains("REPLAY 1")), "the quicksave holds a replay");
+    let text = game.take_quicksave().unwrap_or_default();
+    assert!(text.contains("REPLAY 1"), "the quicksave holds a replay");
+    // The same recording makes a route guide (a player's own run): it replays, and the way
+    // walked comes with its steps.
+    let mut other = start("LIPS00").unwrap().1;
+    let route = other.route_from_replay(&vfs, &text).expect("the recording replays");
+    let p = other.session().unwrap().player;
+    assert!((p.x, p.y) == (f32::from_bits(saved.0), f32::from_bits(saved.1)), "the route replay ends where the run did");
+    assert!(route.steps.iter().all(|st| st.trail.len() < 200), "trails are untangled");
     play(&mut game, 3);
     assert_ne!(fingerprint(&game), saved, "the world moved on after saving");
     let mut load = Input::default();

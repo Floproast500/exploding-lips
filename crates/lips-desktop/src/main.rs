@@ -297,6 +297,19 @@ impl App {
             && let Err(e) = std::fs::write(&path, text) {
                 log::warn!("cannot write quicksave {}: {e}", path.display());
             }
+        // Each finished level's recording: route guides can be made from the player's own run
+        // (`playbot --from-replay`).
+        for (level, text) in self.game.take_finished_replays() {
+            if let Some(dir) = config::dir().map(|d| d.join("replays")) {
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+                let path = dir.join(format!("{level}-{stamp}.rep"));
+                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {
+                    log::warn!("cannot write replay {}: {e}", path.display());
+                } else {
+                    log::info!("replay of {level} saved to {}", path.display());
+                }
+            }
+        }
         if let Some(text) = self.game.take_config() {
             config::save(&text);
         }
