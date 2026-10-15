@@ -1917,7 +1917,20 @@ impl<'a> Bot<'a> {
             let teleporter = |g: &Goal| self.used.contains(&g.target) && (matches!(g.target, Target::Object(i) if self.session().objects.list.get(i).is_some_and(|o| o.effect == OTELE)) || matches!(g.target, Target::Region(r) if tele_regions.contains(&r)));
             let (firsts, switches): (Vec<Goal>, Vec<Goal>) = goals.iter().partition(|g| !matches!(g.target, Target::Wall(_) | Target::Lift(_)) && !matches!(g.target, Target::Region(r) if movers.contains(&r)) && !teleporter(g));
             let tele_targets: HashSet<Target> = goals.iter().filter(|g| teleporter(g)).map(|g| g.target).collect();
-            let mut found = if fresh.is_empty() { None } else { self.plan(&fresh) };
+            // The level's exit switch (tag 500) first whenever it can be reached: what is left
+            // to collect is optional, and a detour may not come back (LIPS05: past door r79 the
+            // exit was 59 steps off, and the bot went for r81 first and fell into its pit).
+            let exits: Vec<Goal> = {
+                let s = self.session();
+                let sw = s.effects.switches();
+                let p = s.player;
+                // (Only near: a search that fails far off costs minutes, every time.)
+                goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 2048.0 && matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect()
+            };
+            let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
+            if found.is_none() && !fresh.is_empty() {
+                found = self.plan(&fresh);
+            }
             let under_us: HashSet<Target> = {
                 let s = self.session();
                 let w = &s.level.world;
