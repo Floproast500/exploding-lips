@@ -27,7 +27,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]... [--screenshot-after SECONDS FILE.png] | --pad-test [SECONDS] | --bsp <PAK|BSP> <MAP>";
+const USAGE: &str = "usage: lips-desktop [--data <GAME_DIR>] [--size WxH] [--classic] [--fullscreen] [--no-vsync] [--software] [--soundfont FILE.sf2] [--mute] [--level LIPSnn] [--true-color] [--fov DEG] [--set NAME VALUE]... [--host [--port N] [--ws-port N]] [--join HOST[:PORT]] [--name NAME] [--mod DIR]... [--screenshot-after SECONDS FILE.png] [--quickload] | --pad-test [SECONDS] | --bsp <PAK|BSP> <MAP>";
 
 /// Command-line options that are not cvars (cvar options are applied to the registry directly).
 struct Options {
@@ -43,6 +43,8 @@ struct Options {
     mods: Vec<PathBuf>,
     /// `--screenshot-after SECONDS FILE`: save a screenshot after that long, then quit.
     screenshot_after: Option<(f64, PathBuf)>,
+    /// `--quickload`: start from the quicksave (a debugging aid: reproduce a player's spot).
+    quickload: bool,
     /// Cvars set on the command line: (name, value before, value set). They last for this run
     /// only; config.cfg keeps the earlier value unless the player changes it in game.
     overrides: Vec<(String, String, String)>,
@@ -59,6 +61,7 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
         ws_port: None,
         mods: Vec::new(),
         screenshot_after: None,
+        quickload: false,
         overrides: Vec::new(),
         name: std::env::var("USER").unwrap_or_else(|_| "player".into()),
     };
@@ -95,6 +98,7 @@ fn parse_args(cvars: &mut CvarRegistry) -> Result<Options, String> {
             }
             "--software" => opts.software = true,
             "--mute" => opts.mute = true,
+            "--quickload" => opts.quickload = true,
             "--screenshot-after" => {
                 let secs = next("seconds")?.parse().map_err(|_| "--screenshot-after needs seconds")?;
                 opts.screenshot_after = Some((secs, PathBuf::from(next("a .png file")?)));
@@ -564,6 +568,9 @@ fn main() {
     let audio = if opts.mute { None } else { audio::Audio::new(soundfont.as_deref()) };
     if let Some(text) = config::dir().and_then(|d| std::fs::read_to_string(d.join("quick.sav")).ok()) {
         game.set_quicksave(text);
+        if opts.quickload {
+            game.load_quicksave(&vfs);
+        }
     }
     for n in 0..godd_game::saves::SLOTS {
         if let Some(text) = config::dir().and_then(|d| std::fs::read_to_string(d.join("saves").join(format!("slot{}.sav", n + 1))).ok()) {

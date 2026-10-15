@@ -120,7 +120,21 @@ pub fn visible_regions(world: &World, cam: &Camera, (tan_half_h, tan_half_v): (f
     };
     let screen = vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]];
     let start = cam.region.min(world.regions.len() - 1);
-    let mut stack = vec![(start, screen, 0usize)];
+    let mut stack = vec![(start, screen.clone(), 0usize)];
+    // An eye on (or right by) a portal line sees that line's opening edge-on: clipped at the
+    // near plane it collapses, and everything beyond would go missing (a void beside a wall at
+    // some angles). The regions across such lines start with the whole screen too.
+    for &w in &world.regions[start].walls {
+        let wall = &world.walls[w];
+        let Some(back) = wall.back.filter(|&b| b != wall.front) else { continue };
+        let other = if wall.front == start { back } else { wall.front };
+        let ((ax, ay), (bx, by)) = (world.vertices[wall.a], world.vertices[wall.b]);
+        let (dx, dy) = (bx - ax, by - ay);
+        let t = (((cam.x - ax) * dx + (cam.y - ay) * dy) / (dx * dx + dy * dy).max(1e-6)).clamp(0.0, 1.0);
+        if (cam.x - ax - t * dx).hypot(cam.y - ay - t * dy) < 16.0 && other < world.regions.len() {
+            stack.push((other, screen.clone(), 1));
+        }
+    }
     while let Some((r, window, depth)) = stack.pop() {
         if depth > MAX_DEPTH || windows[r].len() >= MAX_WINDOWS || windows[r].iter().any(|w| contains(w, &window)) {
             continue;

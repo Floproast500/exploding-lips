@@ -399,3 +399,34 @@ fn lips00_water_teleport_makes_the_player_swim() {
     let s = game.session().unwrap();
     assert!(!s.player.flying, "SWIMMER2 walks again");
 }
+
+/// A shot is stopped by solid lines at its own height only: on LIPS00's stair (r15 → r16) the
+/// room r431 far below has a wall right under the way, and every tool's shot burst on it.
+#[test]
+fn shots_pass_walls_of_rooms_far_below() {
+    use godd_game::objects::Kind;
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    game.tick(&vfs, &Input::default());
+    game.session_mut().unwrap().restore_position(17885.344, 15220.13, -32.0, 4.79);
+    let mut pick = Input::default();
+    pick.set(Action::TOOLS[9], true);
+    game.tick(&vfs, &pick);
+    for _ in 0..10 {
+        game.tick(&vfs, &Input::default());
+    }
+    let before = game.session().unwrap().objects.list.len();
+    let mut fire = Input::default();
+    fire.set(Action::Use, true);
+    game.tick(&vfs, &fire);
+    let mut furthest = f32::MAX;
+    for _ in 0..40 {
+        game.tick(&vfs, &Input::default());
+        for o in game.session().unwrap().objects.list.iter().skip(before.saturating_sub(5)) {
+            if matches!(o.kind, Kind::Projectile { from_player: true, .. }) {
+                furthest = furthest.min(o.y);
+            }
+        }
+    }
+    assert!(furthest < 15000.0, "the shot flew on down the stair: got to y {furthest}");
+}

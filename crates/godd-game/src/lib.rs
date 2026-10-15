@@ -425,6 +425,11 @@ impl Game {
     }
 
     /// F7: restore the quicksave (the level restarts, then position/states/inventory return).
+    /// Load the quicksave now (front ends: `--quickload`, to start where a player saved).
+    pub fn load_quicksave(&mut self, vfs: &Vfs) {
+        self.quick_load(vfs);
+    }
+
     fn quick_load(&mut self, vfs: &Vfs) {
         let Some(text) = self.quicksave.clone() else { return };
         if self.restore(vfs, &text)
@@ -1030,7 +1035,11 @@ impl Game {
                     },
                 };
                 let others: Vec<(f32, f32, f32)> = session.remote_positions();
-                self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others);
+                // (In the level's BSP part the player is there, not in the orb: its own map.)
+                match session.bsp.as_ref().filter(|_| session.in_bsp) {
+                    Some(world) => self.automap.draw_bsp(frame, world, &style),
+                    None => self.automap.draw(frame, session, &self.scene_cache.as_ref().expect("scene cache").1, &self.shade_rows, &style, &others),
+                }
             }
             let uptime = self.uptime_ticks / TICK_RATE as u64;
             if self.cvars.get_str("hud_style") == "modern" && !self.options.classic {

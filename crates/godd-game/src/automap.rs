@@ -143,6 +143,58 @@ impl Automap {
     }
 }
 
+impl Automap {
+    /// The map while the player is in a level's BSP part (LIPS00 starts in one): its walls
+    /// near the player's height seen from above, the exits, and the player, who is there and
+    /// not in the orb's regions.
+    pub fn draw_bsp(&self, frame: &mut Frame, world: &crate::bsp_world::BspWorld, style: &Style) {
+        let p = &world.player;
+        let feet = p.pos[2] - 24.0;
+        let angle = p.orb_angle();
+        let scale = frame.height as f32 / 1600.0 * style.zoom;
+        let (cx, cy) = (frame.width as f32 / 2.0, frame.height as f32 / 2.0);
+        let turn = if style.rotate { angle - std::f32::consts::FRAC_PI_2 } else { 0.0 };
+        let (sin, cos) = turn.sin_cos();
+        let to_screen = |x: f32, y: f32| {
+            let (dx, dy) = (x - p.pos[0], y - p.pos[1]);
+            let (rx, ry) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+            (cx + rx * scale, cy - ry * scale)
+        };
+        let (bg, _, portal, solid) = style.colors;
+        text_fill(frame, bg);
+        // Walls (faces standing up) around the player's height; floors and ceilings are left out.
+        for face in &world.bsp.faces[world.bsp.world_faces.clone()] {
+            let (lo, hi) = face.points.iter().fold((f32::MAX, f32::MIN), |(l, h), q| (l.min(q[2]), h.max(q[2])));
+            if hi - lo < 8.0 || hi < feet - 48.0 || lo > feet + 160.0 {
+                continue;
+            }
+            let n = face.points.len();
+            for i in 0..n {
+                let (a, b) = (face.points[i], face.points[(i + 1) % n]);
+                if (a[0] - b[0]).abs() + (a[1] - b[1]).abs() < 1.0 {
+                    continue; // (a vertical edge: a point from above)
+                }
+                line(frame, to_screen(a[0], a[1]), to_screen(b[0], b[1]), solid);
+            }
+        }
+        let s = (frame.height / CLASSIC_HEIGHT).max(1) as i32;
+        // The exits: a diamond each, in the guides' exit colour when guides are on.
+        let exit_color = style.guides.first().map_or(portal, |g| g.3);
+        for c in world.exits() {
+            let (x, y) = to_screen(c.centre[0], c.centre[1]);
+            let r = 3.0 * s as f32;
+            for pts in [[(x, y - r), (x + r, y), (x - r, y)], [(x - r, y), (x + r, y), (x, y + r)]] {
+                if let Some(list) = &mut frame.ui_list {
+                    list.push(engine_core::UiCmd::Triangle { points: pts, color: exit_color });
+                } else {
+                    fill_triangle(frame, pts, |_, _| exit_color);
+                }
+            }
+        }
+        arrow(frame, (cx, cy), angle - turn, s, solid);
+    }
+}
+
 fn text_fill(frame: &mut Frame, color: u8) {
     // A dark backdrop so the map reads over the view.
     for o in 0..frame.pixels.len() {

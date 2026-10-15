@@ -1593,3 +1593,18 @@ fn route_guide_follows_progress() {
     run(&mut game, &vfs, 0.1);
     assert_eq!(game.route_next(), None, "pressed the exit: route done");
 }
+
+/// Placed where there is no room to stand (a quicksave loaded in LIPS00's 48-high vent r425),
+/// the player is crouched, not standing with the eye above the ceiling (seeing out of the map).
+#[test]
+fn placed_in_a_vent_the_player_crouches() {
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    run(&mut game, &vfs, 0.2);
+    game.session_mut().unwrap().restore_position(16547.93, 16388.0, -400.0, 5.02);
+    run(&mut game, &vfs, 0.5);
+    let s = game.session().unwrap();
+    assert_eq!(s.player.region, 425);
+    assert!(s.player.crouching, "crouched in the vent");
+    let eye = s.player.eye_z(&s.physics_override.unwrap_or_default());
+    assert!(eye < s.level.world.regions[425].ceiling, "the eye under the ceiling: {eye}");
+}

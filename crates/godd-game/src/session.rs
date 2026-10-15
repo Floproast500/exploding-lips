@@ -836,6 +836,12 @@ impl Session {
         self.player.region = region;
         self.player.z = z.unwrap_or_else(|| self.level.world.solid_floor(region).0).max(self.level.world.solid_floor(region).0);
         self.player.vz = 0.0;
+        // Put down where there is no room to stand (a save loaded in a vent, a teleport into a
+        // duct): crouched, as walking in would have left us, not with the eye above the ceiling.
+        let physics = self.physics_override.unwrap_or_default();
+        if self.level.world.solid_ceiling(region).0 - self.player.z < physics.height + physics.head_clearance {
+            self.player.crouching = true;
+        }
         if let Some(a) = angle {
             self.player.angle = a;
         }

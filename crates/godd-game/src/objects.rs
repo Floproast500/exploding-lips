@@ -1657,7 +1657,9 @@ impl Objects {
                 let keep = o.radius + 12.0;
                 let squeezed = |x: f32, y: f32| [Some(region), o.region].into_iter().flatten().any(|r| near_solid_line(world, r, x, y, keep));
                 let too_close = squeezed(nx, ny) && (!squeezed(o.x, o.y) || near_solid_line(world, region, nx, ny, keep * 0.5));
-                if !blocked && !too_close && !crosses_solid_wall(world, o.x, o.y, nx, ny, o.radius) {
+                // (Bodies: solid lines at any height, as before; the height test is for shots,
+                // and with it a bot in LIPS00 slipped past a wall into the player.)
+                if !blocked && !too_close && !crosses_solid_wall(world, o.x, o.y, nx, ny, f32::MIN / 4.0, f32::MAX) {
                     o.x = nx;
                     o.y = ny;
                     o.region = Some(region);
@@ -1794,7 +1796,7 @@ impl Objects {
                     Some(r) => {
                         let reg = &world.regions[r];
                         z < world.solid_floor(r).0 || z + PROJECTILE_HEIGHT > world.solid_ceiling(r).0.max(reg.floor + PROJECTILE_HEIGHT)
-                            || crosses_solid_wall(world, x, y, nx, ny, 1.0)
+                            || crosses_solid_wall(world, x, y, nx, ny, z, PROJECTILE_HEIGHT)
                     }
                 };
                 if hit_wall {
@@ -2105,9 +2107,21 @@ fn near_solid_line(world: &World, region: usize, x: f32, y: f32, dist: f32) -> b
     })
 }
 
-fn crosses_solid_wall(world: &World, x0: f32, y0: f32, x1: f32, y1: f32, _radius: f32) -> bool {
+/// Whether the move (x0, y0) → (x1, y1) of a body from `z` up `height` crosses a solid line
+/// standing at that height (its regions' floor to ceiling): a wall of a room far below or
+/// above, stacked under this one, does not stop it (LIPS00's stair r15/r16 over r431).
+fn crosses_solid_wall(world: &World, x0: f32, y0: f32, x1: f32, y1: f32, z: f32, height: f32) -> bool {
     world.walls.iter().any(|w| {
         if !(w.blocking || w.back.is_none()) {
+            return false;
+        }
+        let span = |r: usize| world.regions.get(r).map(|g| (g.floor, g.ceiling));
+        let (lo, hi) = match (span(w.front), w.back.and_then(span)) {
+            (Some(a), Some(b)) => (a.0.min(b.0), a.1.max(b.1)),
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => (f32::MIN, f32::MAX),
+        };
+        if z > hi || z + height < lo {
             return false;
         }
         let (ax, ay) = world.vertices[w.a];
