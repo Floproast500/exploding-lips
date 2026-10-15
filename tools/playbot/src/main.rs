@@ -2411,6 +2411,11 @@ impl<'a> Bot<'a> {
                         println!("     boxed at ({:.0},{:.0},{:.0}) r{} h {}: reachable {r:?}", p.x, p.y, p.z, p.region, self.session().physics_override.map_or(48.0, |o| o.height));
                     }
                 }
+                // (Boxed in: no route anywhere new; such decisions count four times towards
+                // going back to the start.)
+                if wp.is_none() {
+                    self.stale_decisions += 3;
+                }
                 let (wp, target) = wp?;
                 // (Headed for the same place again and again with nothing new on the way: the
                 // route there is not really open, LIPS03's r9 behind the locked door r21.)
