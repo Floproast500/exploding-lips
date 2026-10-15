@@ -1685,3 +1685,53 @@ fn lips00_street_past_the_canteen_post() {
     assert!(windows[83].iter().any(inside), "r83 behind the post: {:?}", windows[83]);
 }
 
+
+/// Quicksaves replay the input since the level started, so loading rebuilds the level exactly:
+/// the player, states, every region's floor and ceiling and every object, not just position.
+#[test]
+fn quickload_rebuilds_the_level_exactly() {
+    use godd_game::{Action, Input};
+    let Some((vfs, mut game)) = start("LIPS00") else { return };
+    // Wander with input only (turns, moves, use/fire, jump, crouch), so the run is a pure function of input.
+    let pattern = [(Action::Forward, 70), (Action::TurnLeft, 12), (Action::Forward, 50), (Action::Use, 3), (Action::TurnRight, 25), (Action::Forward, 60), (Action::Jump, 5), (Action::Crouch, 10), (Action::StrafeLeft, 20)];
+    let play = |game: &mut godd_game::Game, rounds: usize| {
+        for r in 0..rounds {
+            for &(action, ticks) in &pattern {
+                for t in 0..ticks {
+                    let mut input = Input::default();
+                    input.set(action, true);
+                    if (r + t) % 9 == 0 {
+                        input.set(Action::Use, true);
+                    }
+                    input.look_delta = ((((r * 7 + t) % 5) as f32 - 2.0) * 0.01, 0.0);
+                    game.tick(&vfs, &input);
+                }
+            }
+        }
+    };
+    play(&mut game, 6);
+    let fingerprint = |game: &godd_game::Game| {
+        let s = game.session().unwrap();
+        let p = &s.player;
+        let regions: Vec<(u32, u32)> = s.level.world.regions.iter().map(|r| (r.floor.to_bits(), r.ceiling.to_bits())).collect();
+        let objects: Vec<(u32, u32, u32, bool, bool)> = s.objects.list.iter().map(|o| (o.x.to_bits(), o.y.to_bits(), o.z.to_bits(), o.hidden, o.destroyed)).collect();
+        (p.x.to_bits(), p.y.to_bits(), p.z.to_bits(), p.angle.to_bits(), s.script.states, regions, objects, s.objects.inventory.clone())
+    };
+    let mut save = Input::default();
+    save.set(Action::QuickSave, true);
+    game.tick(&vfs, &save);
+    let saved = fingerprint(&game);
+    assert!(game.take_quicksave().is_some_and(|t| t.contains("REPLAY 1")), "the quicksave holds a replay");
+    play(&mut game, 3);
+    assert_ne!(fingerprint(&game), saved, "the world moved on after saving");
+    let mut load = Input::default();
+    load.set(Action::QuickLoad, true);
+    game.tick(&vfs, &load);
+    let now = fingerprint(&game);
+    if now != saved {
+        let rd: Vec<usize> = (0..now.5.len()).filter(|&i| now.5[i] != saved.5[i]).collect();
+        let od: Vec<usize> = (0..now.6.len().min(saved.6.len())).filter(|&i| now.6[i] != saved.6[i]).collect();
+        let p = |f: &(u32, u32, u32, u32)| (f32::from_bits(f.0), f32::from_bits(f.1), f32::from_bits(f.2), f32::from_bits(f.3));
+        panic!("player now {:?} saved {:?}; states {:?} vs {:?}; regions differ {rd:?}; objects {} vs {}, differ {:?}; inventory {:?} vs {:?}", p(&(now.0, now.1, now.2, now.3)), p(&(saved.0, saved.1, saved.2, saved.3)), now.4, saved.4, now.6.len(), saved.6.len(), &od[..od.len().min(20)], now.7, saved.7);
+    }
+}

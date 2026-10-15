@@ -176,6 +176,34 @@ impl Input {
     }
 
     /// Clear per-tick edge state and consumed deltas.
+    /// What the simulation reads of one tick's input, as one line of text (replay quicksaves):
+    /// held and pressed actions, the analog axes and typed text.
+    pub fn to_line(&self) -> String {
+        let bits = |v: &[bool; ACTION_COUNT]| v.iter().enumerate().fold(0u64, |m, (i, &b)| m | (u64::from(b) << i));
+        let text = if self.text.is_empty() { "-".to_string() } else { self.text.bytes().map(|b| format!("{b:02x}")).collect() };
+        let (m, l, r, a) = (self.move_axis, self.look_delta, self.mouse, self.look_axis);
+        format!("{:x} {:x} {} {} {} {} {} {} {} {} {text}", bits(&self.held), bits(&self.pressed), m.0, m.1, l.0, l.1, r.0, r.1, a.0, a.1)
+    }
+
+    /// Read `to_line` back.
+    pub fn from_line(line: &str) -> Option<Input> {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let [held, pressed, rest @ ..] = w.as_slice() else { return None };
+        if rest.len() != 9 {
+            return None;
+        }
+        let bits = |hex: &str| -> Option<[bool; ACTION_COUNT]> {
+            let m = u64::from_str_radix(hex, 16).ok()?;
+            Some(std::array::from_fn(|i| m >> i & 1 != 0))
+        };
+        let f: Vec<f32> = rest[..8].iter().map(|v| v.parse()).collect::<Result<_, _>>().ok()?;
+        let text = match rest[8] {
+            "-" => String::new(),
+            hex => String::from_utf8((0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)).collect::<Result<_, _>>().ok()?).ok()?,
+        };
+        Some(Input { held: bits(held)?, pressed: bits(pressed)?, move_axis: (f[0], f[1]), look_delta: (f[2], f[3]), mouse: (f[4], f[5]), look_axis: (f[6], f[7]), text, ..Input::default() })
+    }
+
     pub fn end_tick(&mut self) {
         self.pressed = [false; ACTION_COUNT];
         self.look_delta = (0.0, 0.0);
@@ -188,6 +216,20 @@ impl Input {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_line_round_trip() {
+        let mut i = Input::default();
+        i.set(Action::Forward, true);
+        i.set(Action::QuickLoad, true);
+        i.look_delta = (0.0123, -1.5e-7);
+        i.move_axis = (0.5, -1.0);
+        i.text = "ab c".into();
+        let back = Input::from_line(&i.to_line()).expect("parses");
+        assert_eq!(back.to_line(), i.to_line());
+        assert!(back.held(Action::Forward) && back.pressed(Action::QuickLoad) && !back.held(Action::Back));
+        assert_eq!(back.look_delta, i.look_delta);
+    }
 
     #[test]
     fn names_round_trip() {

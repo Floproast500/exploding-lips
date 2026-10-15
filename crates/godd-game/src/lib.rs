@@ -128,6 +128,9 @@ pub struct Game {
     slots_dirty: [bool; saves::SLOTS],
     /// Quicksave contents and whether they changed since the front end last stored them.
     quicksave: Option<String>,
+    /// The input since the current level was entered: quicksaves replay it to rebuild the level
+    /// exactly (doors, triggers, pickups, enemies), not only position and states.
+    recording: Option<Recording>,
     quicksave_dirty: bool,
     /// F2 automap overlay.
     show_map: bool,
@@ -148,6 +151,103 @@ pub struct GpuView {
     pub epoch: u64,
 }
 
+
+/// How the current level was entered and every tick's input since (replay quicksaves).
+#[derive(Clone)]
+struct Recording {
+    level: String,
+    entry: Entry,
+    /// The script carried in from the previous level (`Entry::Continue`).
+    carried: Option<script::Script>,
+    /// The start object a level change placed the player at.
+    place: Option<String>,
+    /// A LIPSTART "go to game": slot, states copied in, and the slot's position and inventory.
+    goto: Option<GotoSetup>,
+    inputs: Vec<Input>,
+}
+
+#[derive(Clone)]
+struct GotoSetup {
+    slot: Option<usize>,
+    states: Option<[i32; script::STATE_COUNT]>,
+    restore: Option<(f32, f32, f32, f32, Vec<String>)>,
+}
+
+const REPLAY_HEADER: &str = "REPLAY 1";
+
+impl Recording {
+    fn to_text(&self) -> String {
+        let mut out = format!("{REPLAY_HEADER}\nlevel {}\nentry {}\n", self.level, if self.entry == Entry::Continue { "continue" } else { "fresh" });
+        if let Some(name) = &self.place {
+            out += &format!("place {name}\n");
+        }
+        if let Some(g) = &self.goto {
+            out += &format!("goto {}\n", g.slot.map_or("-".to_string(), |n| n.to_string()));
+            if let Some(st) = g.states {
+                out += &format!("gotostates {}\n", st.iter().map(i32::to_string).collect::<Vec<_>>().join(" "));
+            }
+            if let Some((x, y, z, a, inv)) = &g.restore {
+                out += &format!("gotorestore {x} {y} {z} {a} {}\n", inv.join(" "));
+            }
+        }
+        if let Some(c) = &self.carried {
+            out += "script\n";
+            out += &c.to_text();
+            out += "endscript\n";
+        }
+        // Runs of identical ticks as one line: "inputs N" then "COUNT LINE".
+        let lines: Vec<String> = self.inputs.iter().map(Input::to_line).collect();
+        out += &format!("inputs {}\n", lines.len());
+        let mut i = 0;
+        while i < lines.len() {
+            let run = lines[i..].iter().take_while(|l| **l == lines[i]).count();
+            out += &format!("{run} {}\n", lines[i]);
+            i += run;
+        }
+        out
+    }
+
+    fn parse(text: &str) -> Option<Recording> {
+        let mut lines = text.lines().skip_while(|l| *l != REPLAY_HEADER).skip(1);
+        let mut rec = Recording { level: String::new(), entry: Entry::Fresh, carried: None, place: None, goto: None, inputs: Vec::new() };
+        while let Some(line) = lines.next() {
+            let (key, rest) = line.split_once(' ').unwrap_or((line, ""));
+            match key {
+                "level" => rec.level = rest.to_string(),
+                "entry" => rec.entry = if rest == "continue" { Entry::Continue } else { Entry::Fresh },
+                "place" => rec.place = Some(rest.to_string()),
+                "goto" => rec.goto = Some(GotoSetup { slot: rest.parse().ok(), states: None, restore: None }),
+                "gotostates" => {
+                    let v: Vec<i32> = rest.split_whitespace().map(str::parse).collect::<Result<_, _>>().ok()?;
+                    rec.goto.as_mut()?.states = Some(v.try_into().ok()?);
+                }
+                "gotorestore" => {
+                    let w: Vec<&str> = rest.split_whitespace().collect();
+                    let f = |i: usize| w.get(i).and_then(|v| v.parse::<f32>().ok());
+                    let inv = w.iter().skip(4).map(|s| s.to_string()).collect();
+                    rec.goto.as_mut()?.restore = Some((f(0)?, f(1)?, f(2)?, f(3)?, inv));
+                }
+                "script" => {
+                    let body: Vec<&str> = lines.by_ref().take_while(|l| *l != "endscript").collect();
+                    rec.carried = Some(script::Script::from_text(&body.join("\n"))?);
+                }
+                "inputs" => {
+                    let total: usize = rest.parse().ok()?;
+                    while rec.inputs.len() < total {
+                        let (count, input) = lines.next()?.split_once(' ')?;
+                        let input = Input::from_line(input)?;
+                        for _ in 0..count.parse::<usize>().ok()? {
+                            rec.inputs.push(input.clone());
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        (!rec.level.is_empty()).then_some(rec)
+    }
+}
 
 #[derive(Default)]
 struct FpsCounter {
@@ -216,6 +316,7 @@ impl Game {
             slots_dirty: [false; saves::SLOTS],
             quicksave: None,
             quicksave_dirty: false,
+            recording: None,
             show_map: false,
             automap: automap::Automap::default(),
         };
@@ -304,13 +405,19 @@ impl Game {
             (State::Playing(s), Entry::Continue) => Some(s.script.clone()),
             _ => None,
         };
+        self.start_level_with(vfs, name, entry, carried)
+    }
+
+    /// Load a level with `carried` as the script brought in from the previous one.
+    fn start_level_with(&mut self, vfs: &Vfs, name: &str, entry: Entry, carried: Option<script::Script>) -> Result<(), BoxError> {
         if let State::Playing(old) = &mut self.state {
             self.save = std::mem::take(&mut old.save);
             self.current_slot = old.menus.current_slot;
             self.save_dirty |= old.save_dirty;
         }
         let save = std::mem::take(&mut self.save);
-        let session = Session::start(vfs, name, entry, carried, save, self.current_slot)?;
+        let session = Session::start(vfs, name, entry, carried.clone(), save, self.current_slot)?;
+        self.recording = Some(Recording { level: name.to_string(), entry, carried, place: None, goto: None, inputs: Vec::new() });
         self.state = State::Playing(Box::new(session));
         self.epoch += 1;
         let regions = self.session().map_or(0, |s| s.level.world.regions.len());
@@ -365,6 +472,7 @@ impl Game {
                 },
                 None => "usage: warp LIPSnn".into(),
             },
+            // (Console changes to the world are not input: later quicksaves use the snapshot.)
             Some("god") => match self.session_mut() {
                 Some(s) => {
                     s.god = !s.god;
@@ -381,6 +489,9 @@ impl Game {
                 None => "no level loaded".into(),
             },
         };
+        if !line.trim_start().to_ascii_lowercase().starts_with("warp") {
+            self.recording = None;
+        }
         self.console.print(&reply);
     }
 
@@ -396,6 +507,29 @@ impl Game {
 
     /// Restart the snapshot's level, then put back position, states and inventory.
     fn restore(&mut self, vfs: &Vfs, text: &str) -> bool {
+        if let Some(rec) = Recording::parse(text) {
+            if self.replay(vfs, rec) {
+                // The snapshot line still wins where the world was changed other than by input
+                // (tools, tests): its states, and its position if the replay ended elsewhere.
+                let head = text.lines().next().unwrap_or("").split('|').next().unwrap_or("");
+                let parts: Vec<&str> = head.split_whitespace().collect();
+                if parts.len() >= 5 + script::STATE_COUNT
+                    && let Some(s) = self.session_mut()
+                {
+                    for (k, v) in parts[5..5 + script::STATE_COUNT].iter().enumerate() {
+                        s.script.states[k] = v.parse().unwrap_or(s.script.states[k]);
+                    }
+                    let f = |i: usize| parts[i].parse::<f32>().unwrap_or(0.0);
+                    if (s.player.x - f(1)).hypot(s.player.y - f(2)) > 1.0 || (s.player.z - f(3)).abs() > 1.0 {
+                        log::warn!("quicksave replay ended away from the save; moving to it");
+                        s.restore_position(f(1), f(2), f(3), f(4));
+                    }
+                }
+                return true;
+            }
+            log::warn!("quicksave replay failed; restoring the snapshot");
+        }
+        let text = text.lines().next().unwrap_or("");
         let (head, rest) = text.split_once('|').unwrap_or((text, ""));
         let (inventory, view) = rest.split_once('|').unwrap_or((rest, ""));
         let parts: Vec<&str> = head.split_whitespace().collect();
@@ -424,7 +558,10 @@ impl Game {
 
     /// F6: remember the current level, position, states and inventory.
     fn quick_save(&mut self) {
-        let Some(text) = self.snapshot() else { return };
+        let Some(mut text) = self.snapshot() else { return };
+        if let Some(rec) = &self.recording {
+            text = format!("{text}\n{}", rec.to_text());
+        }
         self.quicksave = Some(text);
         self.quicksave_dirty = true;
         if let Some(s) = self.session_mut() {
@@ -451,7 +588,10 @@ impl Game {
         if n >= saves::SLOTS {
             return;
         }
-        let Some(snapshot) = self.snapshot() else { return };
+        let Some(mut snapshot) = self.snapshot() else { return };
+        if let Some(rec) = &self.recording {
+            snapshot = format!("{snapshot}\n{}", rec.to_text());
+        }
         let State::Playing(s) = &self.state else { return };
         let label = format!("{}  {}", s.name, s.level.title.trim());
         let mut thumb = Frame::new(saves::THUMB_W, saves::THUMB_H);
@@ -506,18 +646,84 @@ impl Game {
             log::error!("cannot load {}: {e}", goto.level);
             return;
         }
-        let Some(s) = self.session_mut() else { return };
-        s.menus.current_slot = goto.slot;
-        let Some(slot) = goto.slot.map(|i| s.save.slots[i].clone()) else { return };
-        if slot.is_active() {
-            s.script.states = slot.states();
+        let mut setup = GotoSetup { slot: goto.slot, states: None, restore: None };
+        if let Some(s) = self.session_mut() {
+            s.menus.current_slot = goto.slot;
+            if let Some(slot) = goto.slot.map(|i| s.save.slots[i].clone()) {
+                if slot.is_active() {
+                    s.script.states = slot.states();
+                    setup.states = Some(s.script.states);
+                }
+                if goto.restore {
+                    let (x, y, z) = slot.position();
+                    let angle = slot.angle() as f32 / 2048.0 * std::f32::consts::TAU;
+                    s.restore_position(x, y, z, angle);
+                    s.restore_inventory(&slot.inventory());
+                    setup.restore = Some((x, y, z, angle, slot.inventory()));
+                }
+            }
         }
-        if goto.restore {
-            let (x, y, z) = slot.position();
-            let angle = slot.angle() as f32 / 2048.0 * std::f32::consts::TAU;
-            s.restore_position(x, y, z, angle);
-            s.restore_inventory(&slot.inventory());
+        if let Some(rec) = &mut self.recording {
+            rec.goto = Some(setup);
         }
+    }
+
+    /// Netplay changed the world from outside: the current level can no longer be rebuilt by
+    /// replaying local input (quicksaves fall back to the plain snapshot).
+    pub fn mark_unreplayable(&mut self) {
+        self.recording = None;
+    }
+
+    /// Rebuild a level by replaying its recording: enter it as it was entered, then run every
+    /// recorded tick through the simulation (the route guide follows along).
+    fn replay(&mut self, vfs: &Vfs, rec: Recording) -> bool {
+        if self.start_level_with(vfs, &rec.level, rec.entry, rec.carried.clone()).is_err() {
+            return false;
+        }
+        if let Some(s) = self.session_mut() {
+            if let Some(name) = &rec.place {
+                s.place_player_at(name);
+            }
+            if let Some(g) = &rec.goto {
+                s.menus.current_slot = g.slot;
+                if let Some(states) = g.states {
+                    s.script.states = states;
+                }
+                if let Some((x, y, z, angle, inventory)) = &g.restore {
+                    s.restore_position(*x, *y, *z, *angle);
+                    s.restore_inventory(inventory);
+                }
+            }
+        }
+        let physics = self.physics;
+        let (message_scale, fixes) = (if self.options.long_messages { 2.0 } else { 1.0 }, self.options.fixes);
+        let route = self.routes.get(&rec.level.to_ascii_uppercase()).cloned();
+        self.route_progress = (rec.level.clone(), route::RouteProgress::default());
+        for (n, input) in rec.inputs.iter().enumerate() {
+            let State::Playing(s) = &mut self.state else { return false };
+            s.message_scale = message_scale;
+            s.fixes = fixes;
+            s.tick(input, &physics);
+            let walls = std::mem::take(&mut s.effects.touch_log);
+            let entered = std::mem::take(&mut s.effects.enter_log);
+            let bumped = std::mem::take(&mut s.objects.bump_log);
+            if let Some(route) = &route {
+                self.route_progress.1.advance(route, &walls, &bumped, &entered);
+            }
+            if n % 8 == 0 {
+                let cam = camera(s, &physics, 1.0, (0.0, 0.0));
+                self.automap.reveal(&s.level.world, &cam);
+            }
+            // (A level change ends a recording, so none happens inside one.)
+            s.pending_goto = None;
+            s.pending_level = None;
+        }
+        if let Some(s) = self.session_mut() {
+            s.wants_options = false;
+            s.messages.clear();
+        }
+        self.recording = Some(rec);
+        true
     }
 
     /// The save file's bytes when it changed since the last call (front ends persist it).
@@ -679,6 +885,10 @@ impl Game {
                 let cam = camera(s, &self.physics, 1.0, (0.0, 0.0));
                 self.automap.reveal(&s.level.world, &cam);
             }
+        // (Recorded before a quicksave: the tick F6 is pressed on still runs, and is in the save.)
+        if let (State::Playing(_), Some(rec)) = (&self.state, &mut self.recording) {
+            rec.inputs.push(input.clone());
+        }
         if input.pressed(Action::QuickSave) {
             self.quick_save();
         }
@@ -750,6 +960,9 @@ impl Game {
                         Ok(()) => {
                             if let (Some(name), Some(s)) = (start, self.session_mut()) {
                                 s.place_player_at(&name);
+                                if let Some(rec) = &mut self.recording {
+                                    rec.place = Some(name);
+                                }
                             }
                         }
                         Err(e) => log::error!("cannot load {level}: {e}"),

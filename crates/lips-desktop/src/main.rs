@@ -241,6 +241,7 @@ impl App {
                     if let Some(s) = self.game.session_mut() {
                         s.fire_tag(tag);
                     }
+                    self.game.mark_unreplayable();
                 }
                 ScriptOp::Look(yaw, pitch) => {
                     self.input.look_delta.0 += yaw;
@@ -249,7 +250,7 @@ impl App {
                 ScriptOp::Shot(path) => {
                     if let Some(s) = self.game.session() {
                         let p = &s.player;
-                        log::info!("input script: {} at {} {} {} angle {} look {} region {}", path.display(), p.x, p.y, p.z, p.angle, p.look, p.region);
+                        log::info!("input script: {} at {} {} {} angle {} look {} region {} crouching {}", path.display(), p.x, p.y, p.z, p.angle, p.look, p.region, p.crouching);
                     }
                     if let Some(p) = &mut self.presenter {
                         p.request_screenshot(path);

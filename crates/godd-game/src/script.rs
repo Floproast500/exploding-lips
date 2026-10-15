@@ -680,8 +680,137 @@ fn strip_comment(line: &str) -> &str {
     line
 }
 
+/// `Script::to_text` word escaping: no spaces or line breaks inside a word.
+fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 1);
+    out.push('=');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\s"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn unescape(s: &str) -> Option<String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.strip_prefix('=')?.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        out.push(match chars.next()? {
+            's' => ' ',
+            'n' => '\n',
+            'r' => '\r',
+            't' => '\t',
+            c => c,
+        });
+    }
+    Some(out)
+}
+
+impl Script {
+    /// The whole script state as text, one item per line (replay quicksaves carry the script a
+    /// level was entered with). Pending events are not kept: none are left between ticks.
+    pub fn to_text(&self) -> String {
+        let ints = |v: &[i32]| v.iter().map(i32::to_string).collect::<Vec<_>>().join(" ");
+        let tags = |v: &[TagRange]| v.iter().map(|t| format!("{} {}", t.lo, t.hi)).collect::<Vec<_>>().join(" ");
+        let t = &self.thresholds;
+        let mut out = format!("rng {} {} {}\n", self.rng, self.depth, self.available_tools);
+        out += &format!("states {}\n", ints(&self.states));
+        for (name, v) in [("max", &t.max), ("min", &t.min), ("low", &t.low), ("high", &t.high)] {
+            out += &format!("th {name} {}\n", ints(v));
+        }
+        for (name, v) in [("max", &t.max_tags), ("min", &t.min_tags), ("low", &t.low_tags), ("high", &t.high_tags)] {
+            out += &format!("tt {name} {}\n", tags(v));
+        }
+        if let Some((n, sounds)) = &self.jump {
+            out += &format!("jump {} {}\n", ints(n), sounds.iter().map(|s| escape(s)).collect::<Vec<_>>().join(" "));
+        }
+        out += &format!("inv {}\n", self.inventory.iter().map(|s| escape(s)).collect::<Vec<_>>().join(" "));
+        let mut ontag: Vec<_> = self.ontag.iter().collect();
+        ontag.sort();
+        for (tag, body) in ontag {
+            out += &format!("ontag {tag} {}\n", escape(body));
+        }
+        out
+    }
+
+    /// Read `to_text` back; None if it is not one.
+    pub fn from_text(text: &str) -> Option<Script> {
+        let mut s = Script::default();
+        let fill = |dst: &mut [i32], words: &[&str]| -> Option<()> {
+            (words.len() == dst.len()).then_some(())?;
+            for (d, w) in dst.iter_mut().zip(words) {
+                *d = w.parse().ok()?;
+            }
+            Some(())
+        };
+        for line in text.lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            match words.as_slice() {
+                ["rng", rng, depth, tools] => {
+                    s.rng = rng.parse().ok()?;
+                    s.depth = depth.parse().ok()?;
+                    s.available_tools = tools.parse().ok()?;
+                }
+                ["states", rest @ ..] => fill(&mut s.states, rest)?,
+                ["th", name, rest @ ..] => {
+                    let t = &mut s.thresholds;
+                    let dst = match *name { "max" => &mut t.max, "min" => &mut t.min, "low" => &mut t.low, "high" => &mut t.high, _ => return None };
+                    fill(dst, rest)?;
+                }
+                ["tt", name, rest @ ..] => {
+                    let t = &mut s.thresholds;
+                    let dst = match *name { "max" => &mut t.max_tags, "min" => &mut t.min_tags, "low" => &mut t.low_tags, "high" => &mut t.high_tags, _ => return None };
+                    (rest.len() == 2 * dst.len()).then_some(())?;
+                    for (k, d) in dst.iter_mut().enumerate() {
+                        *d = TagRange { lo: rest[2 * k].parse().ok()?, hi: rest[2 * k + 1].parse().ok()? };
+                    }
+                }
+                ["jump", rest @ ..] if rest.len() == 9 => {
+                    let mut n = [0; 5];
+                    fill(&mut n, &rest[..5])?;
+                    let sounds = [unescape(rest[5])?, unescape(rest[6])?, unescape(rest[7])?, unescape(rest[8])?];
+                    s.jump = Some((n, sounds));
+                }
+                ["inv", rest @ ..] => s.inventory = rest.iter().map(|w| unescape(w)).collect::<Option<_>>()?,
+                ["ontag", tag, body] => {
+                    s.ontag.insert(tag.parse().ok()?, unescape(body)?);
+                }
+                [] => {}
+                _ => return None,
+            }
+        }
+        Some(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn script_text_round_trip() {
+        let mut s = Script::new(77);
+        s.states[3] = -5;
+        s.thresholds.max[1] = 100;
+        s.thresholds.low_tags[2] = TagRange { lo: 7, hi: 9 };
+        s.available_tools = 0x3ff;
+        s.jump = Some(([0, 250, 0, 200, 0], ["A B".into(), String::new(), "x\\y".into(), "c".into()]));
+        s.inventory = vec!["ABD01".into(), "LAMP NICE".into()];
+        s.ontag.insert(510, "{ OSOUND( ZWOO03 )  OTEXT( \" Fair exchange.\") }\nsecond".into());
+        let back = Script::from_text(&s.to_text()).expect("parses");
+        assert_eq!(back.to_text(), s.to_text());
+        assert_eq!(back.ontag, s.ontag);
+        assert_eq!(back.jump, s.jump);
+    }
+
     use super::*;
 
     const LEVEL: &str = "[commands9999]\r\n\

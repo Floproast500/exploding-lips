@@ -55,6 +55,9 @@ impl NetSession {
 
     /// Exchange packets; call once per rendered frame with the elapsed time.
     pub fn update(&mut self, game: &mut Game, vfs: &Vfs, elapsed: f64) {
+        // Remote players and shared tags change the world from outside: a replay of local input
+        // alone cannot rebuild it, so quicksaves fall back to the plain snapshot.
+        game.mark_unreplayable();
         let events = match &mut self.net {
             Net::Host(s) => s.poll(),
             Net::Join(c) => c.poll(),
