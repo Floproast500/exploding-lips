@@ -10,6 +10,9 @@ pub struct RegionMesh {
     pub outline: Outline,
     /// Point-id triangles, counter-clockwise seen from above.
     pub triangles: Vec<[u32; 3]>,
+    /// Edges of the outline with no wall (a boundary with a wall missing, closed straight
+    /// across): the original's trace sees through them into darkness.
+    pub gaps: Vec<(u32, u32)>,
 }
 
 /// Directed boundary edges of a region with the region on the right (the front side of a
@@ -44,8 +47,21 @@ pub fn build(world: &World) -> Vec<RegionMesh> {
     let mut earcut = earcut_state();
     (0..world.regions.len())
         .map(|r| {
-            let (outline, triangles) = polygon::region_mesh(&pts, &region_edges(world, r, &weld), &mut earcut);
-            RegionMesh { outline, triangles }
+            let edges = region_edges(world, r, &weld);
+            let (outline, triangles) = polygon::region_mesh(&pts, &edges, &mut earcut);
+            let mut gaps = Vec::new();
+            if outline.open_edges > 0 {
+                let rings = outline.parts.iter().flat_map(|p| std::iter::once(&p.outer).chain(&p.holes));
+                for ring in rings {
+                    for i in 0..ring.len() {
+                        let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                        if !edges.iter().any(|&e| e == (a, b) || e == (b, a)) {
+                            gaps.push((a, b));
+                        }
+                    }
+                }
+            }
+            RegionMesh { outline, triangles, gaps }
         })
         .collect()
 }
@@ -323,6 +339,12 @@ pub fn frame(world: &World, meshes: &[RegionMesh], cam: &Camera, tan_half: (f32,
                 let top = reg.ceiling.min(far.ceiling);
                 section(out, wall.middle, (reg.floor.max(far.floor), top), top, TRANSPARENT | DISCARD_OUTSIDE_V);
             }
+        }
+        // A missing wall: dark, as the original's flats fading out past it.
+        for &(a, b) in meshes.get(r).map_or(&[][..], |m| &m.gaps) {
+            let ((ax, ay), (bx, by)) = (world.vertices[a as usize], world.vertices[b as usize]);
+            let corner = |x: f32, y: f32, z: f32| SceneVertex { pos: [x, y, z], image: NO_IMAGE, flags: VOID, ..Default::default() };
+            out.quad([corner(ax, ay, reg.floor), corner(bx, by, reg.floor), corner(bx, by, reg.ceiling), corner(ax, ay, reg.ceiling)]);
         }
         for window in region_windows {
             out.batch(first, Some(window.clone()));

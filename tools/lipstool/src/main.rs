@@ -17,6 +17,8 @@
 //!                                                  a Quake-family map (Quake, Hexen II) from the start
 //!   lipstool sweep <GAME_DIR> <LEVEL> <x0,y0,x1,y1,step> <look,look..> [OUT_DIR] [WxH] [set:CVAR=VALUE]...
 //!                                                  GPU vs software over a grid of views: missing geometry
+//!   lipstool walk <GAME_DIR> <LEVEL> <TICKS> [OUT_DIR] [WxH] [turn] [forward] [set:CVAR=VALUE]...
+//!                                                  walk and compare GPU vs software between ticks
 //!   lipstool bench-gpu <GAME_DIR> <LEVEL> [WxH] [turn] [forward] [-] [look] [modern] [pack=DIR] [set:CVAR=VALUE]... [frames=N]
 //!                                                  GPU frame time
 
@@ -60,6 +62,15 @@ fn main() -> AnyResult {
             }
             let opts: Vec<&str> = rest.iter().copied().filter(|a| Some(Path::new(a)) != out).collect();
             lipstool::sweep(Path::new(dir), level, &opts, area, &looks, out)?;
+            Ok(())
+        }
+        ["walk", dir, level, ticks, rest @ ..] => {
+            let out = rest.first().filter(|a| a.contains('/')).map(Path::new);
+            if let Some(out) = out {
+                std::fs::create_dir_all(out)?;
+            }
+            let opts: Vec<&str> = rest.iter().copied().filter(|a| Some(Path::new(a)) != out).collect();
+            lipstool::walk(Path::new(dir), level, &opts, ticks.parse()?, out)?;
             Ok(())
         }
         ["bench-gpu", dir, level, rest @ ..] => {

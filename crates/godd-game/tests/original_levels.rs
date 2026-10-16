@@ -581,6 +581,20 @@ fn lips00_autorun_and_toggle_crouch() {
 /// region's walls) says it is inside. Regions with unclosed stray edges (walls that name a
 /// region they don't bound, e.g. LIPS07 region 132's lone wall 64 units east of its box) break
 /// that even-odd test, so for them the oracle is the closed outline loops instead.
+/// LIPS01 region 282 lacks one of its four walls: it still has a floor and ceiling (the whole
+/// 64x64 box, the gap closed straight), and the gap shows as darkness, not sky.
+#[test]
+fn lips01_region_with_a_missing_wall_keeps_its_floor() {
+    let Some(dir) = original_dir() else { return };
+    let vfs = godd_game::Vfs::from_dir(&dir).unwrap();
+    let lvl = godd_game::level::Level::load(vfs.read("LIPS01.XRB").unwrap(), vfs.read("LIPS01.XPG").unwrap()).unwrap();
+    let w = &lvl.world;
+    let m = &godd_game::scene::build(w)[282];
+    let pts = godd_game::scene::points(w);
+    assert!((engine_scene::polygon::triangles_area(&pts, &m.triangles) - 64.0 * 64.0).abs() < 1e-6);
+    assert_eq!(m.gaps.len(), 1);
+}
+
 #[test]
 fn every_region_triangulates() {
     use engine_scene::polygon::contains;

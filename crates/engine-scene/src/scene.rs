@@ -165,6 +165,10 @@ impl SceneFrame {
 }
 
 /// Clip a convex polygon (counter-clockwise) to another convex polygon (Sutherland-Hodgman).
+/// Window edges shorter than [`CLIP_EPSILON`] are skipped: their direction is rounding noise
+/// (clipping leaves corners a hair apart), and a half-plane along one cut an arbitrary wedge out
+/// of the result (LIPS01's streets lost whole buildings to sky at a slight look down). The
+/// result has no corners closer than that either.
 pub fn clip_convex(subject: &[[f32; 2]], window: &[[f32; 2]]) -> Vec<[f32; 2]> {
     let mut out = subject.to_vec();
     for i in 0..window.len() {
@@ -172,6 +176,9 @@ pub fn clip_convex(subject: &[[f32; 2]], window: &[[f32; 2]]) -> Vec<[f32; 2]> {
             break;
         }
         let (p, q) = (window[i], window[(i + 1) % window.len()]);
+        if (q[0] - p[0]).hypot(q[1] - p[1]) < CLIP_EPSILON {
+            continue;
+        }
         let side = |v: [f32; 2]| (q[0] - p[0]) * (v[1] - p[1]) - (q[1] - p[1]) * (v[0] - p[0]);
         let input = std::mem::take(&mut out);
         for j in 0..input.len() {
@@ -186,8 +193,17 @@ pub fn clip_convex(subject: &[[f32; 2]], window: &[[f32; 2]]) -> Vec<[f32; 2]> {
             }
         }
     }
+    let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) < CLIP_EPSILON;
+    out.dedup_by(|b, a| near(*a, *b));
+    while out.len() > 1 && near(out[0], out[out.len() - 1]) {
+        out.pop();
+    }
     out
 }
+
+/// Corners of clip polygons closer than this (in normalized device coordinates, about a
+/// thousandth of a pixel at 4K) are one corner.
+pub const CLIP_EPSILON: f32 = 1e-5;
 
 /// Signed area (counter-clockwise positive).
 pub fn polygon_area(p: &[[f32; 2]]) -> f32 {
@@ -223,6 +239,15 @@ pub fn convex_hull(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_ignores_a_window_edge_of_rounding_length() {
+        // Two corners a hair apart: the edge between them points anywhere, and must not cut.
+        let window = [[-0.25, -0.24717832], [-0.25, -0.24717827], [0.0, -0.16], [0.0, 1.0], [-0.27, 1.0]];
+        let subject = [[-0.2, -0.1], [-0.01, -0.1], [-0.01, 0.9], [-0.2, 0.9]];
+        let out = clip_convex(&subject, &window);
+        assert!((polygon_area(&out) - polygon_area(&subject)).abs() < 1e-6, "{out:?}");
+    }
 
     #[test]
     fn hull_of_two_squares() {

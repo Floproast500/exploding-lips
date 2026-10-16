@@ -74,6 +74,7 @@ pub fn chain_loops(points: &[[f64; 2]], edges: &[(u32, u32)]) -> (Vec<Vec<u32>>,
     };
     let mut used = vec![false; edges.len()];
     let (mut loops, mut open) = (Vec::new(), 0);
+    let mut paths: Vec<Vec<u32>> = Vec::new();
     for start in 0..edges.len() {
         if used[start] || edges[start].0 == edges[start].1 {
             continue;
@@ -114,6 +115,38 @@ pub fn chain_loops(points: &[[f64; 2]], edges: &[(u32, u32)]) -> (Vec<Vec<u32>>,
             loops.push(ring);
         } else {
             open += taken.len();
+            ring.push(edges[cur].1);
+            paths.push(ring);
+        }
+    }
+    // A boundary with a wall missing (LIPS01 region 282) leaves chains that stop short. The
+    // original's column trace looks straight through the gap at the region's floor and ceiling,
+    // so the region still has them: each chain joins the chain starting nearest its end (itself
+    // last), closing the gap with a straight edge.
+    let dist = |a: u32, b: u32| {
+        let ([x0, y0], [x1, y1]) = (points[a as usize], points[b as usize]);
+        (x1 - x0).hypot(y1 - y0)
+    };
+    while let Some(mut ring) = paths.pop() {
+        loop {
+            let end = *ring.last().expect("chain");
+            let join = paths.iter().enumerate().map(|(i, p)| (i, dist(end, p[0]))).min_by(|a, b| a.1.total_cmp(&b.1));
+            match join {
+                Some((i, d)) if d < dist(end, ring[0]) => {
+                    let next = paths.swap_remove(i);
+                    if ring.last() == next.first() {
+                        ring.pop();
+                    }
+                    ring.extend(next);
+                }
+                _ => break,
+            }
+        }
+        if ring.len() > 1 && ring.last() == ring.first() {
+            ring.pop();
+        }
+        if ring.len() >= 3 {
+            loops.push(ring);
         }
     }
     (loops, open)
@@ -246,8 +279,9 @@ mod tests {
         let e: Vec<(u32, u32)> = [(0, 1), (1, 2), (2, 3), (3, 4)].iter().map(|&(a, b)| (w[a], w[b as usize])).collect();
         let (outline, _) = region_mesh(&pts, &e, &mut earcut::Earcut::new());
         assert_eq!((outline.parts.len(), outline.open_edges), (1, 0));
-        let (outline, _) = region_mesh(&pts, &[(0, 1), (1, 2)], &mut earcut::Earcut::new());
-        assert_eq!(outline.open_edges, 2);
+        let (outline, tris) = region_mesh(&pts, &[(0, 1), (1, 2), (2, 3)], &mut earcut::Earcut::new());
+        assert_eq!(outline.open_edges, 3);
+        assert!((triangles_area(&pts, &tris) - 1.0).abs() < 1e-9, "the missing wall is closed: the floor stays");
     }
 
     #[test]

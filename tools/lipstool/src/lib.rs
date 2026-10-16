@@ -189,7 +189,7 @@ pub fn sweep(dir: &Path, level: &str, rest: &[&str], area: [f32; 5], looks: &[f3
                         views += 1;
                         if gb > sb + rows * w / 50 {
                             flagged += 1;
-                            println!("{x:.0},{y:.0},{floor},{:.3} look {look}: black gpu {:.1}% sw {:.1}%", k as f32 * std::f32::consts::FRAC_PI_4, gb as f64 * 100.0 / (rows * w) as f64, sb as f64 * 100.0 / (rows * w) as f64);
+                            println!("{x:.0},{y:.0},{floor},{:.3} look {look}: differs {:.1}% ({:.1})", k as f32 * std::f32::consts::FRAC_PI_4, gb as f64 * 100.0 / (rows * w) as f64, sb as f64 * 100.0 / (rows * w) as f64);
                             if let Some(out) = out.filter(|_| flagged <= 30) {
                                 let rgb = |v: &[u8]| v.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<u8>>();
                                 save_rgb(&out.join(format!("{flagged:02}_gpu.png")), w, h, &rgb(&rgba))?;
@@ -202,6 +202,66 @@ pub fn sweep(dir: &Path, level: &str, rest: &[&str], area: [f32; 5], looks: &[f3
             x += step;
         }
         y += step;
+    }
+    println!("{views} views, {flagged} flagged");
+    Ok(flagged)
+}
+
+/// Walk the level (forward and running, turning now and then) and at fractions of each tick
+/// compare the GPU view with the software one: missing geometry while moving, where views in
+/// between ticks are drawn. Returns how many views were flagged.
+pub fn walk(dir: &Path, level: &str, rest: &[&str], ticks: usize, out: Option<&Path>) -> AnyResult<usize> {
+    use godd_game::{Action, Input};
+    let pack = rest.iter().find_map(|a| a.strip_prefix("pack:"));
+    let rest: Vec<&str> = rest.iter().copied().filter(|a| !a.starts_with("pack:")).collect();
+    let (vfs, mut game, w, h) = view_game(dir, level, &rest)?;
+    let (adapter, device, queue) = engine_gpu::headless_adapter().ok_or("no GPU adapter")?;
+    let mut renderer = engine_gpu::WorldRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    renderer.use_adapter(&device, &queue, &adapter);
+    let (uw, uh) = game.ui_layer_size(w, h);
+    let mut ui = godd_game::Frame::new(uw, uh);
+    game.gpu_frame(&mut ui, 1.0).ok_or("no level running")?;
+    renderer.set_palette(&device, &queue, game.palette(), game.shade_rows());
+    renderer.set_images(&device, &queue, &game.world_images());
+    if let Some(pack) = pack {
+        renderer.set_hd(&device, &queue, &hd_textures(&game, Path::new(pack))?);
+    }
+    let mut frame = godd_game::Frame::new(w, h);
+    let rows = h * 3 / 4;
+    // pixels (in the view above the HUD) where the two renders disagree strongly
+    let diff = |a: &[u8], b: &[u8]| (0..rows * w).filter(|&i| (0..3).any(|c| a[i * 4 + c].abs_diff(b[i * 4 + c]) > 60)).count();
+    let mut input = Input::default();
+    let (mut views, mut flagged) = (0usize, 0usize);
+    for t in 0..ticks {
+        input.set(Action::Forward, true);
+        input.set(Action::Run, true);
+        input.set(Action::TurnLeft, (t / 50) % 4 == 1);
+        input.set(Action::TurnRight, (t / 50) % 4 == 3);
+        game.tick(&vfs, &input);
+        input.end_tick();
+        for alpha in [0.25f32, 0.5, 0.75] {
+            let Some(view) = game.gpu_frame(&mut ui, alpha) else { continue };
+            let coverage = ui.coverage.clone().unwrap_or_default();
+            let rgba = engine_gpu::render_offscreen(&device, &queue, &mut renderer, (w as u32, h as u32), &view.camera, &view.shading, &view.scene, Some(((ui.width, ui.height), &ui.pixels, &coverage, ui.ui_list.as_deref().unwrap_or_default())));
+            game.render(&mut frame, alpha);
+            let mut sw = Vec::new();
+            frame.to_rgba(game.palette(), &mut sw);
+            let (gb, sb) = (diff(&rgba, &sw), 0);
+            views += 1;
+            if gb > rows * w / 25 {
+                flagged += 1;
+                let p = game.session().ok_or("no level")?.player;
+                if let Some(c) = game.view_camera(alpha) {
+                    println!("  camera {} {} {} angle {} pitch {} r{}", c.x, c.y, c.z, c.angle, c.pitch, c.region);
+                }
+                println!("tick {t} alpha {alpha}: ({:.0},{:.0}) r{}: differs {:.1}% ({:.1})", p.x, p.y, p.region, gb as f64 * 100.0 / (rows * w) as f64, sb as f64 * 100.0 / (rows * w) as f64);
+                if let Some(out) = out.filter(|_| flagged <= 20) {
+                    let rgb = |v: &[u8]| v.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<u8>>();
+                    save_rgb(&out.join(format!("{flagged:02}_gpu.png")), w, h, &rgb(&rgba))?;
+                    save_rgb(&out.join(format!("{flagged:02}_sw.png")), w, h, &rgb(&sw))?;
+                }
+            }
+        }
     }
     println!("{views} views, {flagged} flagged");
     Ok(flagged)

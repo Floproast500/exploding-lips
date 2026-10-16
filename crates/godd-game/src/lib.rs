@@ -95,6 +95,10 @@ pub struct Game {
     crouch_latched: bool,
     /// Mouse look not yet consumed by a tick (yaw radians, look units), shown by the camera.
     pending_look: (f32, f32),
+    /// Width / height of the GPU view, recorded by [`Game::ui_layer_size`]: the UI layer is
+    /// rounded up to whole pixels, so its own aspect is a little off (LIPS01's facades split by
+    /// sky seams near the screen edges, where portal windows came out a few pixels short).
+    view_aspect: std::cell::Cell<Option<f32>>,
     /// Bumped whenever a level is loaded (GPU renderers re-upload images and geometry).
     epoch: u64,
     /// Triangulated regions of the current level, for the GPU scene.
@@ -329,6 +333,7 @@ impl Game {
             saved_config: (0, engine_core::BindTable::default()),
             crouch_latched: false,
             pending_look: (0.0, 0.0),
+            view_aspect: std::cell::Cell::new(None),
             epoch: 0,
             scene_cache: None,
             reverb_cache: ((u64::MAX, 0), 0.0),
@@ -1123,7 +1128,7 @@ impl Game {
         self.settings.fullbright = session.flash;
         let modern = modern_settings(&self.cvars, self.light_fit);
         if in_bsp {
-            let aspect = ui.width as f32 / ui.height.max(1) as f32;
+            let aspect = self.view_aspect.get().unwrap_or(ui.width as f32 / ui.height.max(1) as f32);
             let guides_on = self.cvars.get_bool("hud_guides") && modern.is_some_and(|m| m.dynamic_lights);
             let t = self.uptime_ticks as f32 / TICK_RATE as f32;
             let world = session.bsp.as_mut()?;
@@ -1177,11 +1182,11 @@ impl Game {
         let cam = camera(session, &self.physics, alpha, self.pending_look);
         let mut frame = engine_scene::scene::SceneFrame::default();
         let tan_half_v = (self.settings.vfov_degrees.to_radians() / 2.0).tan();
-        let tan_half_h = tan_half_v * ui.width as f32 / ui.height.max(1) as f32;
+        let tan_half_h = tan_half_v * self.view_aspect.get().unwrap_or(ui.width as f32 / ui.height.max(1) as f32);
         let freelook = self.cvars.get_bool("r_freelook");
         scene::frame(&session.level.world, &self.scene_cache.as_ref().expect("scene cache").1, &cam, (tan_half_h, tan_half_v), freelook, &mut frame);
         frame.dirty_images = session.tvs.iter().map(|t| t.image as u32).collect();
-        weapon_quad(&mut frame, session, ui.width as f32 / ui.height.max(1) as f32);
+        weapon_quad(&mut frame, session, self.view_aspect.get().unwrap_or(ui.width as f32 / ui.height.max(1) as f32));
         draw_overlays(ui, session);
         let c = &self.cvars;
         if modern.is_some_and(|m| m.dynamic_lights) {
@@ -1235,7 +1240,9 @@ impl Game {
     /// Size of the UI layer for a `width`x`height` GPU view: the UI is pixel art drawn at a whole
     /// scale (HUD scale option, or the largest that fits), so the layer is drawn at 1/scale and
     /// the GPU enlarges it.
+    /// It also records the view's aspect for the next [`Game::gpu_frame`].
     pub fn ui_layer_size(&self, width: usize, height: usize) -> (usize, usize) {
+        self.view_aspect.set(Some(width as f32 / height.max(1) as f32));
         let fit = (height / CLASSIC_HEIGHT).max(1);
         let s = if self.options.hud_scale > 0 { self.options.hud_scale.min(fit) } else { fit };
         (width.div_ceil(s), height.div_ceil(s))
@@ -1404,13 +1411,24 @@ fn camera(session: &Session, physics: &PhysicsParams, alpha: f32, pending: (f32,
         angle_delta -= std::f32::consts::TAU;
     }
     let look = (lerp(p.look, q.look - q.direct_look) + q.direct_look + pending.1).clamp(-physics.look_limit, physics.look_limit);
+    let (x, y) = (lerp(p.x, q.x), lerp(p.y, q.y));
+    // The region the drawn position is in: between two ticks across a portal it is still the
+    // one before (seen from the tick's region, behind the portal it came through, the view
+    // lost and regained geometry every time a line was crossed while moving). Not across a
+    // teleport.
+    let w = &session.level.world;
+    let region = if p.region != q.region && (q.x - p.x).hypot(q.y - p.y) < 64.0 && !w.point_in_region(x, y, q.region) && w.point_in_region(x, y, p.region) {
+        p.region
+    } else {
+        q.region
+    };
     Camera {
-        x: lerp(p.x, q.x),
-        y: lerp(p.y, q.y),
+        x,
+        y,
         z: lerp(p.eye_z(physics), q.eye_z(physics)),
         angle: (p.angle + angle_delta * alpha + q.direct_turn + pending.0).rem_euclid(std::f32::consts::TAU),
         pitch: PhysicsParams::look_to_pitch(look),
-        region: q.region,
+        region,
     }
 }
 

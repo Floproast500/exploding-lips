@@ -250,6 +250,10 @@ impl GpuPresenter {
             let list = ui.ui_list.as_deref().unwrap_or_default();
             world.draw_ui(device, queue, &mut encoder, &target, vp, (ui.width, ui.height), &ui.pixels, coverage, list, game.cvars.get_bool("hud_smooth"));
         }
+        if let Some(path) = &self.screenshot {
+            let c = &view.camera;
+            log::info!("screenshot {} camera {} {} {} angle {} pitch {}", path.display(), c.pos[0], c.pos[1], c.pos[2], c.angle, c.pitch);
+        }
         let grab = self.grab(&mut encoder, &output.texture);
         self.queue.submit([encoder.finish()]);
         if let Some((world, _)) = &mut self.world {
