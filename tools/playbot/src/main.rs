@@ -305,6 +305,8 @@ struct Bot<'a> {
     rot_home: std::cell::OnceCell<HashMap<usize, Vec<(f32, f32)>>>,
     /// Plan through switch objects' keep-clear zones too (a retry).
     no_avoid: bool,
+    /// The search may cross trap floors (no way round them was found).
+    allow_traps: bool,
     /// Spots the last failed search expanded.
     last_expanded: usize,
     /// Waypoints taken towards each route target since something new was used.
@@ -1192,6 +1194,11 @@ impl<'a> Bot<'a> {
             };
             if walk_into {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: false });
+                // (A walker wanders off from where the plan saw it: shot from wherever in range,
+                // aimed where it is then. LIPS00's #243, walked to and missed, the way out.)
+                if o.effect == OWALK {
+                    goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
+                }
             } else if (o.effect == OTAGSW && !self.death_tags().contains(&o.tag))
                 || (o.name.starts_with("KEYBOT") && o.mover.is_some()) || (o.effect == OWALK && o.mover.is_none() && o.tag > 0 && !self.death_tags().contains(&o.tag)) || self.boss.is_some_and(|(b, _)| b == i) {
                 goals.push(Goal { target: Target::Object(i), at: [o.x, o.y, o.z], face: None, shoot: true });
@@ -1274,7 +1281,7 @@ impl<'a> Bot<'a> {
         let teleports = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| tele_tags.contains(x)));
         // (The boss stays a goal until killed: one round of shooting may not do it.)
         let boss = self.boss.map(|(b, _)| Target::Object(b));
-        goals.retain(|g| (Some(g.target) == boss || matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        goals.retain(|g| (Some(g.target) == boss || matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (o.effect == OWALK && o.counter > 0) || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         // (A teleporter taken twice since anything new was used: no way on there, LIPS01's
         // REST01/PARK01 pair.)
         goals.retain(|g| self.tele_uses.get(&g.target).is_none_or(|&n| n < 2));
@@ -1419,6 +1426,16 @@ impl<'a> Bot<'a> {
         Some(corridor)
     }
 
+    /// Whether the level has a trap floor not yet dropped (see `trap_floors` in the search).
+    fn has_trap_floors(&self) -> bool {
+        let s = self.session();
+        let names = s.level.region_names();
+        let deadly_land: HashSet<usize> = s.effects.triggers().iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
+        s.objects.list.iter().filter(|o| o.effect == 41 && o.tag > 0).any(|o| {
+            o.aux.as_ref().is_some_and(|a| names.iter().position(|n| a.slot(9).is_some_and(|m| n.eq_ignore_ascii_case(m))).is_some_and(|r| deadly_land.contains(&r) && s.level.world.regions[r].floor > a.ints[0] as f32 + 24.0))
+        })
+    }
+
     fn plan(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
         // A search that failed from this spot for these goals fails again until something
         // changes (the world, or where we are): skip it.
@@ -1464,6 +1481,12 @@ impl<'a> Bot<'a> {
             self.no_avoid = true;
             r = self.plan_search(goals);
             self.no_avoid = false;
+        }
+        // (Over a trap floor, when there is no way round: LIPS00's FALLZ corridor, ridden down.)
+        if r.is_none() && self.has_trap_floors() {
+            self.allow_traps = true;
+            r = self.plan_search(goals);
+            self.allow_traps = false;
         }
         if r.is_none() {
             // (The last search was a full one, not in a corridor; complete if under its budget.)
@@ -1534,6 +1557,17 @@ impl<'a> Bot<'a> {
         let triggers = s.effects.triggers();
         let deadly_enter: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[0])).map(|t| t.0).collect();
         let deadly_land: HashSet<usize> = triggers.iter().filter(|t| self.death_tags().contains(&t.1[2])).map(|t| t.0).collect();
+        // Trap floors: where landing kills and a floor mover will drop it (LIPS00's OPENPIT1
+        // r223, sprung by stepping onto the rim r205 round it, KEY2 off the rim's far side):
+        // kept off while not yet dropped, unless no way round them is found.
+        let trap_floors: HashSet<usize> = if self.allow_traps { HashSet::new() } else {
+            let names = s.level.region_names();
+            s.objects.list.iter().filter(|o| o.effect == 41 && o.tag > 0).filter_map(|o| {
+                let a = o.aux.as_ref()?;
+                let r = names.iter().position(|n| a.slot(9).is_some_and(|m| n.eq_ignore_ascii_case(m)))?;
+                (deadly_land.contains(&r) && world.regions[r].floor > a.ints[0] as f32 + 24.0).then_some(r)
+            }).collect()
+        };
         // Switch objects fire (and toggle doors back) on touch: walk around the ones that are
         // not the goal.
         let goal_objects: HashSet<usize> = goals.iter().filter_map(|g| if let Target::Object(i) = g.target { Some(i) } else { None }).collect();
@@ -1646,6 +1680,15 @@ impl<'a> Bot<'a> {
                         break;
                     }
                 }
+                // (Onto a trap floor's edge: just past it, on the rim round it. LIPS00's r205 is
+                // 32 across beside OPENPIT1, the grid's points on one side of it or the other.)
+                if let Some(r) = world.region_at(to.0, to.1).filter(|r| trap_floors.contains(r)) {
+                    let ((x0, y0), (x1, y1)) = world.regions[r].bounds;
+                    let edges = [(to.0, y1 + 8.0, y1 - to.1), (to.0, y0 - 8.0, to.1 - y0), (x1 + 8.0, to.1, x1 - to.0), (x0 - 8.0, to.1, to.0 - x0)];
+                    if let Some(&(x, y, _)) = edges.iter().filter(|e| e.2 < STEP).find(|e| world.region_at(e.0, e.1).is_some_and(|q| !trap_floors.contains(&q))) {
+                        to = (x, y);
+                    }
+                }
                 let long = dx.abs() > 1.0 || dy.abs() > 1.0;
                 let mut over_death = false;
                 if long {
@@ -1743,7 +1786,7 @@ impl<'a> Bot<'a> {
                     }).fold(p.z, f32::max);
                     jump || rim - floor > physics.step_height
                 };
-                if deadly_enter.contains(&q.region) || falls_in {
+                if deadly_enter.contains(&q.region) || falls_in || trap_floors.contains(&q.region) {
                     continue;
                 }
                 if corridor.as_ref().is_some_and(|c| !c.contains(&q.region)) {
@@ -1984,6 +2027,23 @@ impl<'a> Bot<'a> {
                     self.tick(&idle);
                 }
             }
+            // A perpetual lift: on at the height planned, off at the floor beyond (the plan saw
+            // it where it was then; LIPS00's r211..r213 and r405 on the way down to KEY2).
+            if let Some(z) = step.z {
+                let lifts: HashSet<usize> = self.session().effects.lifts().into_iter().map(|(r, _)| r).collect();
+                let idle = Input::default();
+                for _ in 0..(TICK_RATE as usize * 20) {
+                    let s = self.session();
+                    let p = s.player;
+                    let w = &s.level.world;
+                    let boarding = step.region.is_some_and(|r| lifts.contains(&r) && p.region != r && (w.regions[r].floor - z).abs() > 12.0);
+                    let leaving = lifts.contains(&p.region) && step.region.is_some_and(|r| r != p.region) && (p.z - z).abs() > 20.0;
+                    if !(boarding || leaving) || self.teleported || self.level_done() {
+                        break;
+                    }
+                    self.tick(&idle);
+                }
+            }
             loop {
                 if self.level_done() {
                     return true;
@@ -2125,7 +2185,8 @@ impl<'a> Bot<'a> {
                 // the plan.)
                 input.set(Action::Jump, (step.jump && !launched && best == progress) || (!deadly && !next_jump && step.z.is_none_or(|z| z > p.z + 8.0) && (stalled == 30 || stalled == 60)));
                 if std::env::var("PLAYBOT_TRACE_R").is_ok_and(|v| v.parse() == Ok(p.region)) {
-                    println!("       trace k {k}/{last} p ({:.0},{:.0},{:.1}) vz {:.0} ground {} → ({:.0},{:.0},{:?}) jump {} stalled {stalled} d {d:.0} in {:?}", p.x, p.y, p.z, p.vz, p.on_ground, step.to.0, step.to.1, step.z, input.held(Action::Jump), input.held(Action::Run));
+                    let near = self.session().objects.list.iter().enumerate().filter(|(_, o)| o.mover.is_some() && !o.destroyed && !o.hidden).map(|(i, o)| ((o.x - p.x).hypot(o.y - p.y), i)).min_by(|a, b| a.0.total_cmp(&b.0));
+                    println!("       trace k {k}/{last} p ({:.0},{:.0},{:.1}) vz {:.0} ground {} → ({:.0},{:.0},{:?}) jump {} stalled {stalled} d {d:.0} in {:?} mover {near:?}", p.x, p.y, p.z, p.vz, p.on_ground, step.to.0, step.to.1, step.z, input.held(Action::Jump), input.held(Action::Run));
                 }
                 // Over a jump pad on a hop: hold Jump, so the landing that relaunches us adds it
                 // (the pad fires on the tick of contact).
@@ -2484,6 +2545,7 @@ impl<'a> Bot<'a> {
         // (Out of reach while a floor moves: wait for it, not off elsewhere. LIPS00's ELEV02 on
         // its way down: the bot went for wall 389 meanwhile, through r477, and sprang the trap.)
         let mut seq_waits = 0;
+        let mut lift_rides = 0;
         while self.ticks < max_ticks {
             if self.level_done() {
                 let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
@@ -2633,9 +2695,52 @@ impl<'a> Bot<'a> {
                         found = self.plan(&g);
                         // (Too far to plan in one go: part of the way first, along the planner's
                         // route. LIPS00's KEY2, 586 steps off past the lifts, gave up the search.)
-                        if found.is_none() {
+                        // (On a perpetual lift: ride it to its end, then plan again; the way off
+                        // is there only at the bottom or the top, LIPS00's r211..r213 down to r210.)
+                        let on_lift = {
+                            let s = self.session();
+                            s.effects.lifts().into_iter().find(|&(r, _)| r == s.player.region)
+                        };
+                        if found.is_none() && let Some((lift, _)) = on_lift && lift_rides < 6 {
+                            lift_rides += 1;
+                            // (The next region on the way, when its floor comes level with ours:
+                            // a chain of lifts each moving on its own.)
                             let route = chains::route_to(self.session(), self.death_tags(), st.at);
-                            for k in [route.len() * 2 / 3, route.len() / 2, route.len() / 3] {
+                            let next = route.iter().skip_while(|&&r| r != lift).nth(1).copied();
+                            let idle = Input::default();
+                            for _ in 0..(TICK_RATE as usize * 30) {
+                                let s = self.session();
+                                let w = &s.level.world;
+                                if s.player.region != lift || next.is_none_or(|n| (w.regions[n].floor - w.regions[lift].floor).abs() < 16.0) {
+                                    break;
+                                }
+                                self.tick(&idle);
+                            }
+                            self.stale_decisions = 0;
+                            self.last_progress.1 = self.ticks;
+                            if let Some(n) = next {
+                                let goal = {
+                                    let w = &self.session().level.world;
+                                    let ((x0, y0), (x1, y1)) = w.regions[n].bounds;
+                                    let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                                    Goal { target: Target::Region(n), at: [c.0, c.1, w.regions[n].floor], face: None, shoot: false }
+                                };
+                                found = self.plan(&[goal]);
+                                if self.verbose {
+                                    println!("     seq: off lift r{lift} to r{n}: {}", if found.is_some() { "planned" } else { "no plan" });
+                                }
+                            }
+                            if found.is_none() {
+                                continue;
+                            }
+                        }
+                        if found.is_none() {
+                            lift_rides = 0;
+                            let route = chains::route_to(self.session(), self.death_tags(), st.at);
+                            let lifts: HashSet<usize> = self.session().effects.lifts().into_iter().map(|(r, _)| r).collect();
+                            // (The first perpetual lift on the way, first: boarding waits for it.)
+                            let first_lift = route.iter().position(|r| lifts.contains(r));
+                            for k in first_lift.into_iter().chain([route.len() * 2 / 3, route.len() / 2, route.len() / 3]) {
                                 let Some(&r) = route.get(k).filter(|&&r| r != self.session().player.region) else { continue };
                                 let goal = {
                                     let w = &self.session().level.world;
@@ -3267,7 +3372,7 @@ fn main() -> AnyResult {
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
             let mut shared_taken = 0usize;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
             // (Another bot's furthest checkpoint, when it got further than ours.)
             if bot.journal.is_some() && let Some(sh) = &bot.shared && sh.ckpt_used() > resume.last().map_or(0, |c| c.used.len()).max(shared_bad)
                 && let Some((c, j)) = sh.take_ckpt()
