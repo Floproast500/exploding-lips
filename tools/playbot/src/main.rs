@@ -224,6 +224,8 @@ struct Bot<'a> {
     /// `--rush`: only what the way to the exit needs (the chain solver's openers, teleports on
     /// the route, the exit), the rest only when that finds nothing.
     rush: bool,
+    /// The teleport the last route search ended its pick with (rushing tries it last).
+    route_teleport: std::cell::Cell<Option<Goal>>,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
     cam_reported: HashSet<(i32, i32, usize)>,
     /// The last level's boss (object, look): killing it ends the game.
@@ -512,6 +514,7 @@ impl<'a> Bot<'a> {
             if self.verbose {
                 println!("     route teleport: {t:?}; openers further on: {:?}", later.iter().map(|g| g.target).collect::<Vec<_>>());
             }
+            self.route_teleport.set(goal_for(t));
             later.extend(goal_for(t));
             return (later, Some(goal_region));
         }
@@ -2455,12 +2458,26 @@ impl<'a> Bot<'a> {
             // Rushing: the first obstacle on the way to the exit (what opens a door, a
             // teleport to take), or the exit itself.
             if found.is_none() && self.rush {
+                self.route_teleport.set(None);
                 let (pick, target) = self.door_on_route(&goals, &switches);
                 if self.verbose {
                     println!("     rush: {:?} toward r{:?}", pick.iter().map(|g| g.target).collect::<Vec<_>>(), target);
                 }
-                if !pick.is_empty() {
-                    found = self.plan(&pick);
+                // (A teleport on the way only once nothing that opens a door further on is
+                // reachable from here: the nearest-goal search took LIPS00's pool-hall exit,
+                // 34 steps off, over OCTRED.)
+                match self.route_teleport.take() {
+                    Some(t) => {
+                        let first: Vec<Goal> = pick.iter().filter(|g| g.target != t.target).copied().collect();
+                        if !first.is_empty() {
+                            found = self.plan(&first);
+                        }
+                        if found.is_none() {
+                            found = self.plan(&[t]);
+                        }
+                    }
+                    None if !pick.is_empty() => found = self.plan(&pick),
+                    None => {}
                 }
                 // (An opener out of walking reach: what stands between us and it, a teleport
                 // or another door, one level deeper.)
@@ -3022,7 +3039,7 @@ fn main() -> AnyResult {
         let mut episode: u64 = 0;
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
             // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
             // settle (doors, lifts) after each group.
             if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
