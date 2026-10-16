@@ -213,6 +213,17 @@ struct Bot<'a> {
     /// Goal sets a complete search (every reachable cell) found no way to from a region: none
     /// from anywhere in that region either, until the world changes.
     failed_region_plans: HashSet<(usize, Vec<Target>)>,
+    /// The regions a complete search reached (every reachable cell tried) and the world key
+    /// then: from anywhere among them nothing outside is reachable, so goals there are not
+    /// searched for at all until the world changes.
+    reach_cache: Option<(u64, HashSet<usize>)>,
+    /// Regions the current search may enter (the map-level route to the goals and around it),
+    /// and its node budget.
+    corridor: Option<HashSet<usize>>,
+    node_cap: usize,
+    /// `--rush`: only what the way to the exit needs (the chain solver's openers, teleports on
+    /// the route, the exit), the rest only when that finds nothing.
+    rush: bool,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
     cam_reported: HashSet<(i32, i32, usize)>,
     /// The last level's boss (object, look): killing it ends the game.
@@ -329,6 +340,12 @@ impl<'a> Bot<'a> {
     /// the nearest unreached non-switch goal. Doors count as open for routing; steps up to a
     /// jump and any drop are allowed.
     fn door_on_route(&self, goals: &[Goal], switches: &[Goal]) -> (Vec<Goal>, Option<usize>) {
+        self.door_on_route_to(goals, switches, None)
+    }
+
+    /// As `door_on_route`, toward region `to` when given (the region of an opener that cannot
+    /// be walked to: LIPS00's OCTRED, in the pool hall, behind the pool's teleport).
+    fn door_on_route_to(&self, goals: &[Goal], switches: &[Goal], to: Option<usize>) -> (Vec<Goal>, Option<usize>) {
         use std::collections::VecDeque;
         let s = self.session();
         let w = &s.level.world;
@@ -341,10 +358,17 @@ impl<'a> Bot<'a> {
         };
         let openers = self.door_openers();
         let start = s.player.region;
-        let mut prev = vec![usize::MAX; w.regions.len()];
-        prev[start] = start;
         // Teleports link regions too; `via[r]`: what to use to get into r that way.
         let tele = chains::teleports(s, self.death_tags());
+        let exit_regions: Vec<usize> = s.effects.switches().iter().filter(|sw| sw.tags.contains(&500)).flat_map(|sw| {
+            let x = &w.walls[sw.wall];
+            std::iter::once(x.front).chain(x.back)
+        }).collect();
+        // First with shut doors shut (a way round them beats a door to open: LIPS00's pool is
+        // indoors, not past the front door it opens), then through them.
+        let search = |through_shut: bool| {
+        let mut prev = vec![usize::MAX; w.regions.len()];
+        prev[start] = start;
         let mut via: Vec<Option<Target>> = vec![None; w.regions.len()];
         let mut queue = VecDeque::from([start]);
         while let Some(r) = queue.pop_front() {
@@ -373,6 +397,9 @@ impl<'a> Bot<'a> {
                 {
                     continue;
                 }
+                if !through_shut && doors.contains_key(&o) && shut(o) {
+                    continue;
+                }
                 let ((ff, fc), (tf, tc)) = (span(r), span(o));
                 if fc.min(tc) - ff.max(tf) >= 20.0 && tf - ff <= 48.0 {
                     prev[o] = r;
@@ -380,6 +407,16 @@ impl<'a> Bot<'a> {
                 }
             }
         }
+        (prev, via)
+        };
+        let wanted: Vec<usize> = match to {
+            Some(r) => vec![r],
+            None => exit_regions.clone(),
+        };
+        let (prev, via) = {
+            let first = search(false);
+            if wanted.iter().any(|&r| r < first.0.len() && first.0[r] != usize::MAX) { first } else { search(true) }
+        };
         // Nearest (by route length) unreached thing.
         let route_len = |mut r: usize| {
             let mut n = 0;
@@ -404,6 +441,10 @@ impl<'a> Bot<'a> {
             .filter(|&r| r < prev.len() && prev[r] != usize::MAX && r != start)
             .map(|r| (route_len(r), r))
             .min();
+        let exit = match to {
+            Some(r) => (r < prev.len() && prev[r] != usize::MAX).then(|| (route_len(r), r)),
+            None => exit,
+        };
         let target = exit.or_else(|| goals
             .iter()
             .filter(|g| !matches!(g.target, Target::Wall(_)) && !self.used.contains(&g.target))
@@ -1237,6 +1278,70 @@ impl<'a> Bot<'a> {
     /// A* over standing spots from the player to the nearest goal. Each step is a simulated
     /// walk (or jump) to a neighbouring grid spot; results are cached while the regions at
     /// both ends keep their heights.
+    /// Regions on the map-level route to the nearest goals (and the regions next to them):
+    /// two-sided walls into regions not shut, a step up to a jump high with room to crouch
+    /// through, drops through stacked floors, teleports. None if no goal is on that map.
+    fn map_corridor(&self, goals: &[Goal]) -> Option<HashSet<usize>> {
+        use std::collections::VecDeque;
+        let s = self.session();
+        let w = &s.level.world;
+        let start = s.player.region;
+        let n = w.regions.len();
+        let goal_regions: HashSet<usize> = goals.iter().filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0))).collect();
+        let tele = chains::teleports(s, self.death_tags());
+        let mut prev = vec![usize::MAX; n];
+        prev[start] = start;
+        let mut queue = VecDeque::from([start]);
+        let mut found: Vec<usize> = Vec::new();
+        while let Some(r) = queue.pop_front() {
+            if goal_regions.contains(&r) {
+                found.push(r);
+                if found.len() >= 3 {
+                    break;
+                }
+            }
+            let reg = &w.regions[r];
+            let mut next: Vec<usize> = Vec::new();
+            for &wi in &reg.walls {
+                let x = &w.walls[wi];
+                let Some(b) = x.back.filter(|&b| b != x.front) else { continue };
+                let o = if x.front == r { b } else { x.front };
+                let far = &w.regions[o];
+                let room = reg.ceiling.min(far.ceiling) - reg.floor.max(far.floor);
+                if room >= 24.0 && far.floor - reg.floor <= 80.0 {
+                    next.push(o);
+                }
+            }
+            next.extend(reg.below);
+            next.extend(tele.iter().filter(|e| e.0 == r).map(|e| e.1));
+            for o in next {
+                if o < n && prev[o] == usize::MAX {
+                    prev[o] = r;
+                    queue.push_back(o);
+                }
+            }
+        }
+        if found.is_empty() {
+            return None;
+        }
+        let mut corridor = HashSet::new();
+        for mut r in found {
+            loop {
+                corridor.insert(r);
+                for &wi in &w.regions[r].walls {
+                    let x = &w.walls[wi];
+                    corridor.insert(x.front);
+                    corridor.extend(x.back);
+                }
+                if prev[r] == r {
+                    break;
+                }
+                r = prev[r];
+            }
+        }
+        Some(corridor)
+    }
+
     fn plan(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
         // A search that failed from this spot for these goals fails again until something
         // changes (the world, or where we are): skip it.
@@ -1248,8 +1353,34 @@ impl<'a> Bot<'a> {
             return None;
         }
         let started = std::time::Instant::now();
+        let key = self.world_key();
+        let kept: Vec<Goal> = match &self.reach_cache {
+            Some((k, set)) if *k == key && set.contains(&p.region) => {
+                let w = &self.session().level.world;
+                goals.iter().filter(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0)).is_none_or(|r| set.contains(&r))).copied().collect()
+            }
+            _ => goals.to_vec(),
+        };
+        if kept.is_empty() {
+            self.failed_plans.insert(memo);
+            return None;
+        }
+        let goals = &kept[..];
         self.last_expanded = usize::MAX;
-        let mut r = self.plan_search(goals);
+        // The map first (as a bot with the level's map would): a region-level route to the
+        // goals; the step-by-step search then stays in that corridor. No route on the map: a
+        // smaller full search, as the map rules are rough.
+        let mut r = match self.map_corridor(goals) {
+            Some(c) => {
+                self.corridor = Some(c);
+                let r = self.plan_search(goals);
+                self.corridor = None;
+                r.or_else(|| self.plan_search(goals))
+            }
+            // (A full search with the whole budget: long ways through big levels, LIPS04's 784
+            // steps, are beyond a smaller one.)
+            None => self.plan_search(goals),
+        };
         // (Boxed in, maybe by switch objects we keep clear of, a corridor one fills, LIPS13's
         // #211 in r141: brushing it again beats staying put.)
         if r.is_none() && self.last_expanded < 2000 {
@@ -1258,8 +1389,10 @@ impl<'a> Bot<'a> {
             self.no_avoid = false;
         }
         if r.is_none() {
+            // (The last search was a full one, not in a corridor; complete if under its budget.)
             if self.last_expanded <= MAX_NODES {
                 self.failed_region_plans.insert((p.region, memo.1.clone()));
+                self.reach_cache = Some((key, self.reached.clone()));
             }
             self.failed_plans.insert(memo);
         }
@@ -1273,6 +1406,7 @@ impl<'a> Bot<'a> {
     fn plan_search(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
+        let corridor = self.corridor.clone();
         let s = self.game.session().expect("session");
         let world = &s.level.world;
         let physics = s.physics_override.unwrap_or_default();
@@ -1391,7 +1525,7 @@ impl<'a> Bot<'a> {
                 return Some((goal, steps));
             }
             expanded += 1;
-            if expanded > MAX_NODES {
+            if expanded > self.node_cap {
                 self.reached = came.keys().map(|c| c.3).collect();
                 self.known.extend(self.reached.iter().copied());
                 return None;
@@ -1533,6 +1667,9 @@ impl<'a> Bot<'a> {
                     jump || rim - floor > physics.step_height
                 };
                 if deadly_enter.contains(&q.region) || falls_in {
+                    continue;
+                }
+                if corridor.as_ref().is_some_and(|c| !c.contains(&q.region)) {
                     continue;
                 }
                 // Nor up against a wall that kills when touched (LIPS03's maze r180-r189: walls
@@ -2307,6 +2444,40 @@ impl<'a> Bot<'a> {
                 goals.iter().filter(|g| (g.at[0] - p.x).hypot(g.at[1] - p.y) < 2048.0 && matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect()
             };
             let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
+            // Rushing: the first obstacle on the way to the exit (what opens a door, a
+            // teleport to take), or the exit itself.
+            if found.is_none() && self.rush {
+                let (pick, target) = self.door_on_route(&goals, &switches);
+                if self.verbose {
+                    println!("     rush: {:?} toward r{:?}", pick.iter().map(|g| g.target).collect::<Vec<_>>(), target);
+                }
+                if !pick.is_empty() {
+                    found = self.plan(&pick);
+                }
+                // (An opener out of walking reach: what stands between us and it, a teleport
+                // or another door, one level deeper.)
+                if found.is_none() {
+                    let w = &self.session().level.world;
+                    let regions: Vec<usize> = pick.iter().filter_map(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0))).collect();
+                    for r in regions {
+                        let (deeper, _) = self.door_on_route_to(&goals, &switches, Some(r));
+                        if self.verbose && !deeper.is_empty() {
+                            println!("     rush, toward r{r}: {:?}", deeper.iter().map(|g| g.target).collect::<Vec<_>>());
+                        }
+                        if !deeper.is_empty() && let Some(f) = self.plan(&deeper) {
+                            found = Some(f);
+                            break;
+                        }
+                    }
+                }
+                if found.is_none() {
+                    let sw = self.session().effects.switches();
+                    let all_exits: Vec<Goal> = goals.iter().filter(|g| matches!(g.target, Target::Wall(wi) if sw.iter().any(|x| x.wall == wi && x.tags.contains(&500)))).copied().collect();
+                    if !all_exits.is_empty() {
+                        found = self.plan(&all_exits);
+                    }
+                }
+            }
             // Now and then something at random (each bot's seed makes it try a different order;
             // not what never helped anyone), else what led other bots somewhere new.
             if found.is_none() && self.shared.is_some() && self.random().is_multiple_of(4) {
@@ -2810,6 +2981,7 @@ fn main() -> AnyResult {
     // learned) after M game minutes without progress, until --minutes of play in all.
     let share: Option<std::path::PathBuf> = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     let seed: u64 = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1);
+    let rush = args.iter().any(|a| a == "--rush");
     let episode_minutes: Option<f64> = args.iter().position(|a| a == "--episode-minutes").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
     let mut levels: Vec<String> = args[1..].iter().filter(|a| a.starts_with("LIPS") && !a.ends_with(".share")).cloned().collect();
     if levels.is_empty() {
@@ -2842,7 +3014,7 @@ fn main() -> AnyResult {
         let mut episode: u64 = 0;
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
             // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
             // settle (doors, lifts) after each group.
             if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
