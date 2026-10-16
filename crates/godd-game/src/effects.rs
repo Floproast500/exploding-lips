@@ -229,6 +229,14 @@ impl Effects {
         }).collect()
     }
 
+    /// Open ceiling height of each RTDOOR (some open only to a crawl: LIPS00's r424, 48 up).
+    pub fn door_tops(&self) -> Vec<(usize, f32)> {
+        self.regions.iter().filter_map(|r| match r.kind {
+            RegionKind::Door { open, .. } => Some((r.region, open)),
+            _ => None,
+        }).collect()
+    }
+
     /// Whether any door (RTDOOR) is opening or closing now.
     /// The effect a region carries, by name (debug and tools): "door", "lift", "bounce",
     /// "animated", "trigger" or "rotate".
@@ -511,6 +519,11 @@ impl Effects {
                 PlayerEvent::HitCeiling(r) => self.region_event(r, 0x800),
             }
         }
+    }
+
+    /// A player's missile hit `wall`: a switch line answers as to a touch.
+    pub fn shot_wall(&mut self, wall: usize) {
+        self.touch_wall(wall);
     }
 
     fn touch_wall(&mut self, wall: usize) {

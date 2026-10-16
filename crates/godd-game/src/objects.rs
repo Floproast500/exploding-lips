@@ -362,6 +362,10 @@ pub enum ObjRequest {
     Audio(crate::audio::AudioEvent),
     /// OWTOW: give the wall named `target` the look and behaviour of wall `source`.
     CopyWall { target: String, source: String },
+    /// A player's shot hit this wall: switch lines answer it as a touch (WTAGSW accepts the
+    /// player or the player's missile; LIPS00's 1841, the front door's switch behind a wall,
+    /// is shot through the gap beside it).
+    ShotWall(usize),
     /// OOTOO on the player: new height and speed (units per 1.2 s).
     MorphPlayer { height: f32, speed: f32 },
     /// OFLYON / OFLYOFF (optional height while flying).
@@ -1811,6 +1815,9 @@ impl Objects {
                     }
                 };
                 if hit_wall {
+                    if from_player && let Some(wi) = crossed_wall(world, x, y, nx, ny) {
+                        self.requests.push(ObjRequest::ShotWall(wi));
+                    }
                     impact = Some(None);
                     break;
                 }
@@ -2139,6 +2146,17 @@ fn crosses_solid_wall(world: &World, x0: f32, y0: f32, x1: f32, y1: f32, z: f32,
         let (bx, by) = world.vertices[w.b];
         segments_cross((x0, y0), (x1, y1), (ax, ay), (bx, by))
     })
+}
+
+/// The wall nearest along (x0, y0) → (x1, y1) that the step crosses, if any.
+fn crossed_wall(world: &World, x0: f32, y0: f32, x1: f32, y1: f32) -> Option<usize> {
+    world.walls.iter().enumerate().filter(|(_, w)| segments_cross((x0, y0), (x1, y1), world.vertices[w.a], world.vertices[w.b])).min_by(|(_, a), (_, b)| {
+        let d = |w: &&crate::world::Wall| {
+            let ((ax, ay), (bx, by)) = (world.vertices[w.a], world.vertices[w.b]);
+            ((ax + bx) / 2.0 - x0).hypot((ay + by) / 2.0 - y0)
+        };
+        d(a).total_cmp(&d(b))
+    }).map(|(i, _)| i)
 }
 
 fn segments_cross(p: (f32, f32), q: (f32, f32), a: (f32, f32), b: (f32, f32)) -> bool {

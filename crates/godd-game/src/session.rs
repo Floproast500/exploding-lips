@@ -649,6 +649,7 @@ impl Session {
                 }
             }
             ObjRequest::CopyWall { target, source } => self.copy_wall(&target, &source),
+            ObjRequest::ShotWall(w) => self.effects.shot_wall(w),
             ObjRequest::MorphPlayer { height, speed } => {
                 let mut p = self.physics_override.unwrap_or_default();
                 p.height = height.max(8.0);
@@ -993,7 +994,7 @@ impl Session {
         }
     }
 
-    fn region_named(&self, name: &str) -> Option<usize> {
+    pub fn region_named(&self, name: &str) -> Option<usize> {
         use godd_formats::xrb::Section;
         self.level.orb.records(Section::Regions).iter().position(|r| c_name(&r[0xa4..0xac]).eq_ignore_ascii_case(name))
     }

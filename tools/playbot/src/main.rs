@@ -352,7 +352,9 @@ impl<'a> Bot<'a> {
         let s = self.session();
         let w = &s.level.world;
         let doors: HashMap<usize, i32> = s.effects.doors().into_iter().collect();
-        let shut = |r: usize| w.regions[r].ceiling - w.regions[r].floor < 56.0;
+        let tops: HashMap<usize, f32> = s.effects.door_tops().into_iter().collect();
+        // (Open is at its open height: some open only to a crawl, LIPS00's r424.)
+        let shut = |r: usize| w.regions[r].ceiling - w.regions[r].floor < 56.0 && tops.get(&r).is_none_or(|&t| w.regions[r].ceiling < t - 1.0);
         let span = |r: usize| {
             let reg = &w.regions[r];
             let floor = reg.floor;
@@ -1032,7 +1034,8 @@ impl<'a> Bot<'a> {
             if door.is_empty() && movers.is_empty() {
                 return None;
             }
-            Some(door.iter().any(|&r| w.regions[r].ceiling - w.regions[r].floor < 56.0) || movers.iter().any(|&m| m))
+            let tops: HashMap<usize, f32> = s.effects.door_tops().into_iter().collect();
+            Some(door.iter().any(|&r| w.regions[r].ceiling - w.regions[r].floor < 56.0 && tops.get(&r).is_none_or(|&t| w.regions[r].ceiling < t - 1.0)) || movers.iter().any(|&m| m))
         };
         for sw in s.effects.switches().into_iter().filter(|sw| sw.usable && *sw.tags.start() > 0 && !pointless(&sw.tags)) {
             match useful(&sw.tags) {
@@ -1042,63 +1045,7 @@ impl<'a> Bot<'a> {
                 None if self.used.contains(&Target::Wall(sw.wall)) && !locks.contains(&Target::Wall(sw.wall)) => continue,
                 None => {}
             }
-            let wall = &w.walls[sw.wall];
-            let (a, b) = (w.vertices[wall.a], w.vertices[wall.b]);
-            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-            let len = dx.hypot(dy).max(1e-3);
-            let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-            // Stand facing the wall where there is room: in front of it if possible, else on
-            // either side with open space (a door face fires when walked into from outside).
-            let open = |r: usize| w.regions.get(r).is_some_and(|reg| reg.ceiling - reg.floor > 40.0);
-            let joined = |a: usize, b: usize| w.regions[b].walls.iter().chain(&w.regions[a].walls).any(|&wi| {
-                let x = &w.walls[wi];
-                (x.front == a && x.back == Some(b)) || (x.front == b && x.back == Some(a))
-            });
-            let spots: Vec<((f32, f32), usize)> = [1.0f32, -1.0]
-                .into_iter()
-                .map(|side| {
-                    let n = (-dy / len * side, dx / len * side);
-                    ((mid.0 + n.0 * 40.0, mid.1 + n.1 * 40.0), side)
-                })
-                // At the switch's own height (another level may lie above or below). A region
-                // with an open outline is not found by the lookup: the spot on the wall's right
-                // (its front side) then lies in its front region.
-                // (A one-sided wall is only faced from its front: behind it lies no level.)
-                .filter(|&(_, side)| wall.back.is_some() || side < 0.0)
-                .filter_map(|(at, side)| {
-                    let ((x0, y0), (x1, y1)) = w.regions[wall.front].bounds;
-                    let front = (side < 0.0 && at.0 >= x0 && at.0 <= x1 && at.1 >= y0 && at.1 <= y1).then_some(wall.front);
-                    w.region_at_z(at.0, at.1, Some(w.regions[wall.front].floor + 1.0)).or(front).filter(|&r| open(r)).map(|r| (at, r))
-                })
-                // Nothing solid (a wall, a shut door) between the spot and the switch.
-                .filter(|&(at, _)| {
-                    let to = (mid.0 - (mid.0 - at.0) * 0.02, mid.1 - (mid.1 - at.1) * 0.02);
-                    !w.walls.iter().enumerate().any(|(wi, x)| {
-                        if wi == sw.wall {
-                            return false;
-                        }
-                        // Only walls at this height (not a level above or below).
-                        let zf = w.regions[wall.front].floor;
-                        let at_height = |r: usize| w.regions.get(r).is_some_and(|g| g.floor < zf + 48.0 && g.ceiling > zf);
-                        if !at_height(x.front) && !x.back.is_some_and(at_height) {
-                            return false;
-                        }
-                        // One-sided, or next to somewhere too low to stand (a shut door). (The
-                        // "blocking" flag marks door lines too, so it says nothing here.)
-                        let solid = x.back.is_none() || [Some(x.front), x.back].into_iter().flatten().any(|r| !open(r));
-                        solid && segments_cross(at, to, w.vertices[x.a], w.vertices[x.b])
-                    })
-                })
-                .collect();
-            // A two-sided line (a door face) works from either side: offer both and let the
-            // planner take the one it can reach. A one-sided switch: the wall's own region,
-            // else one opening onto it (a button alcove's room).
-            let two_sided = wall.back.is_some_and(|b| b != wall.front);
-            let chosen: Vec<((f32, f32), usize)> = if two_sided {
-                spots
-            } else {
-                spots.into_iter().min_by_key(|&(_, r)| if r == wall.front { 0 } else if joined(r, wall.front) { 1 } else { 2 }).into_iter().collect()
-            };
+            let (chosen, mid) = switch_spots(w, sw.wall);
             for (at, r) in chosen {
                 let z = w.regions[r].floor;
                 goals.push(Goal { target: Target::Wall(sw.wall), at: [at.0, at.1, z], face: Some(facing(at, mid)), shoot: false });
@@ -2024,7 +1971,16 @@ impl<'a> Bot<'a> {
                 s.player.angle = angle;
                 let mut input = Input::default();
                 input.set(Action::Forward, true);
-                input.set(Action::Run, d > 48.0 && (!step.jump || d > 100.0));
+                // (And on through a waypoint that the way goes straight on from: walking each
+                // stretch, the bot came off LIPS00's FALLZ trigger too slow to ride the sinking
+                // floor down, and landed in it.)
+                let straight = !step.jump && steps.get(k + 1).is_some_and(|n| {
+                    let a = facing((p.x, p.y), step.to);
+                    let b = facing(step.to, n.to);
+                    let turn = (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+                    !n.jump && !n.crouch && turn.abs() < 0.35
+                });
+                input.set(Action::Run, (d > 48.0 && (!step.jump || d > 100.0)) || straight);
                 let low = {
                     let s = self.session();
                     let physics = s.physics_override.unwrap_or_default();
@@ -2046,6 +2002,9 @@ impl<'a> Bot<'a> {
                 // nor where the spot is not above us: a hop up onto a ledge beside the way leaves
                 // the plan.)
                 input.set(Action::Jump, (step.jump && !launched && best == progress) || (!deadly && !next_jump && step.z.is_none_or(|z| z > p.z + 8.0) && (stalled == 30 || stalled == 60)));
+                if std::env::var("PLAYBOT_TRACE_R").is_ok_and(|v| v.parse() == Ok(p.region)) {
+                    println!("       trace k {k}/{last} p ({:.0},{:.0},{:.1}) vz {:.0} ground {} → ({:.0},{:.0},{:?}) jump {} stalled {stalled} d {d:.0} in {:?}", p.x, p.y, p.z, p.vz, p.on_ground, step.to.0, step.to.1, step.z, input.held(Action::Jump), input.held(Action::Run));
+                }
                 // Over a jump pad on a hop: hold Jump, so the landing that relaunches us adds it
                 // (the pad fires on the tick of contact).
                 {
@@ -2375,6 +2334,17 @@ impl<'a> Bot<'a> {
     /// Play the level until it is left or nothing new is reachable; Ok(next level name).
     fn play(&mut self, max_ticks: u64) -> Result<String, String> {
         self.boss = self.find_boss();
+        // PLAYBOT_SEQ=1: the level's sequence from the data (chains::sequence).
+        if std::env::var("PLAYBOT_SEQ").is_ok() {
+            for (k, st) in chains::sequence(self.session(), self.death_tags(), None, false).iter().enumerate() {
+                println!("     seq {}: {:?} ({})", k + 1, st.target, st.why);
+            }
+        }
+        if std::env::var("PLAYBOT_TELE").is_ok() {
+            for t in chains::teleports(self.session(), self.death_tags()) {
+                println!("     tele r{} -> r{} by {:?}", t.0, t.1, t.2);
+            }
+        }
         // PLAYBOT_CHAIN="40,53": what the level data says fires those tags (chains.rs).
         if let Ok(v) = std::env::var("PLAYBOT_CHAIN") {
             for t in v.split(',').filter_map(|x| x.parse::<i32>().ok()) {
@@ -2383,6 +2353,14 @@ impl<'a> Bot<'a> {
                 println!("     tag {t} fires from {p:?}");
             }
         }
+        // Rushing: decisions in a row with no way to the exit left, after there was one (a trap
+        // sprung: LIPS00's FALLZ corridor, once sunk, kills on landing, and wall 1012 lies past it).
+        let (mut seq_seen, mut seq_lost) = (false, 0);
+        // (And the same next step out of walking reach decision after decision.)
+        let mut seq_stuck: (Option<Target>, u32) = (None, 0);
+        // (Out of reach while a floor moves: wait for it, not off elsewhere. LIPS00's ELEV02 on
+        // its way down: the bot went for wall 389 meanwhile, through r477, and sprang the trap.)
+        let mut seq_waits = 0;
         while self.ticks < max_ticks {
             if self.level_done() {
                 let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
@@ -2457,6 +2435,88 @@ impl<'a> Bot<'a> {
             let mut found = if exits.is_empty() { None } else { self.plan(&exits) };
             // Rushing: the first obstacle on the way to the exit (what opens a door, a
             // teleport to take), or the exit itself.
+            // Rushing: the next step of the level's sequence from the data (worked out again
+            // from the world as it is now; a lift already called is not called again).
+            if found.is_none() && self.rush {
+                let can: HashSet<Target> = goals.iter().map(|g| g.target).collect();
+                // PLAYBOT_SEQDBG_R=303: the planner's working out, while the player is in r303.
+                let here = self.session().player.region;
+                chains::DEBUG.store(std::env::var("PLAYBOT_SEQDBG_R").is_ok_and(|v| v.parse() == Ok(here)), std::sync::atomic::Ordering::Relaxed);
+                let seq = chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1);
+                chains::DEBUG.store(false, std::sync::atomic::Ordering::Relaxed);
+                if seq.is_empty() {
+                    seq_lost += 1;
+                    if seq_seen && seq_lost >= 6 {
+                        return Err("no way to the exit left in the level's sequence".into());
+                    }
+                } else {
+                    (seq_seen, seq_lost) = (true, 0);
+                }
+                let next = seq.iter().find(|st| !(st.why.starts_with("calls the lift") && self.used.contains(&st.target)));
+                if let Some(st) = next {
+                    let g: Vec<Goal> = goals.iter().filter(|g| g.target == st.target).copied().collect();
+                    if self.verbose {
+                        let then: Vec<Target> = seq.iter().skip_while(|x| x.target != st.target).skip(1).take(3).map(|x| x.target).collect();
+                        println!("     seq: next {:?} ({}) of {}{}, then {then:?}; player r{}", st.target, st.why, seq.len(), if g.is_empty() { ", not a goal" } else { "" }, self.session().player.region);
+                    }
+                    // (Before dying out of a place: a later step that can be walked to from here
+                    // first. LIPS00's west rooms: door r458 shut again before the bot got through;
+                    // its switch 364 is right here.)
+                    if st.why == "back to the start" {
+                        let later: Vec<Target> = seq.iter().skip_while(|x| x.target != st.target).skip(1).take(6).map(|x| x.target).collect();
+                        for t in later {
+                            let g: Vec<Goal> = goals.iter().filter(|g| g.target == t).copied().collect();
+                            if !g.is_empty() && let Some(f) = self.plan(&g) {
+                                found = Some(f);
+                                break;
+                            }
+                        }
+                    }
+                    if found.is_none() && st.why == "back to the start" && self.respawn() {
+                        self.note(format!("     seq: shut in, back to the start (step {:?})", st.target));
+                        self.last_progress.1 = self.ticks;
+                        self.stale_decisions = 0;
+                        self.edges.clear();
+                        continue;
+                    }
+                    // (A floor or ceiling moving where we stand or next to it: wait for it before
+                    // planning. Off LIPS00's ELEV02 on its way down, the bot was still falling at
+                    // the FALLZ trigger, and landed in the sunk corridor.)
+                    let riding = {
+                        let s = self.session();
+                        let w = &s.level.world;
+                        let r = s.player.region;
+                        s.objects.any_height_motion() && std::iter::once(r).chain(w.regions[r].walls.iter().filter_map(|&wi| {
+                            let x = &w.walls[wi];
+                            x.back.map(|b| if x.front == r { b } else { x.front })
+                        })).any(|q| s.objects.region_moving(q))
+                    };
+                    if found.is_none() && !g.is_empty() && !riding {
+                        found = self.plan(&g);
+                    }
+                    if found.is_none() && seq_waits < 40 && self.session().objects.any_height_motion() {
+                        seq_waits += 1;
+                        // (Waiting on a ride is not being stuck.)
+                        self.stale_decisions = 0;
+                        self.last_progress.1 = self.ticks;
+                        let idle = Input::default();
+                        for _ in 0..10 {
+                            self.tick(&idle);
+                        }
+                        continue;
+                    }
+                    seq_waits = 0;
+                    if found.is_some() || seq_stuck.0 != Some(st.target) {
+                        seq_stuck = (Some(st.target), 0);
+                    }
+                    if found.is_none() {
+                        seq_stuck.1 += 1;
+                        if seq_stuck.1 >= 8 {
+                            return Err(format!("the sequence's next step {:?} ({}) is out of reach", st.target, st.why));
+                        }
+                    }
+                }
+            }
             if found.is_none() && self.rush {
                 self.route_teleport.set(None);
                 let (pick, target) = self.door_on_route(&goals, &switches);
@@ -3109,6 +3169,74 @@ fn main() -> AnyResult {
 }
 
 /// Whether segments p1-p2 and q1-q2 properly intersect.
+/// A place to stand and the region it is in.
+type Spot = ((f32, f32), usize);
+
+/// Where to stand to press switch wall `wi` (none: it cannot be pressed, a switch behind a
+/// wall), and the wall's middle.
+fn switch_spots(w: &godd_game::world::World, wi: usize) -> (Vec<Spot>, (f32, f32)) {
+    let wall = &w.walls[wi];
+    let (a, b) = (w.vertices[wall.a], w.vertices[wall.b]);
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy).max(1e-3);
+    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+    // Stand facing the wall where there is room: in front of it if possible, else on
+    // either side with open space (a door face fires when walked into from outside).
+    let open = |r: usize| w.regions.get(r).is_some_and(|reg| reg.ceiling - reg.floor > 40.0);
+    let joined = |a: usize, b: usize| w.regions[b].walls.iter().chain(&w.regions[a].walls).any(|&wi| {
+        let x = &w.walls[wi];
+        (x.front == a && x.back == Some(b)) || (x.front == b && x.back == Some(a))
+    });
+    let spots: Vec<((f32, f32), usize)> = [1.0f32, -1.0]
+        .into_iter()
+        .map(|side| {
+            let n = (-dy / len * side, dx / len * side);
+            ((mid.0 + n.0 * 40.0, mid.1 + n.1 * 40.0), side)
+        })
+        // At the switch's own height (another level may lie above or below). A region
+        // with an open outline is not found by the lookup: the spot on the wall's right
+        // (its front side) then lies in its front region.
+        // (A one-sided wall is only faced from its front: behind it lies no level.)
+        .filter(|&(_, side)| wall.back.is_some() || side < 0.0)
+        .filter_map(|(at, side)| {
+            let ((x0, y0), (x1, y1)) = w.regions[wall.front].bounds;
+            let front = (side < 0.0 && at.0 >= x0 && at.0 <= x1 && at.1 >= y0 && at.1 <= y1).then_some(wall.front);
+            // (Nor is one inside a door's open outline: LIPS00's 1841, the front door's
+            // switch on r24's west wall, looked up as the shut door r5 itself.)
+            w.region_at_z(at.0, at.1, Some(w.regions[wall.front].floor + 1.0)).filter(|&r| open(r)).or(front).filter(|&r| open(r)).map(|r| (at, r))
+        })
+        // Nothing solid (a wall, a shut door) between the spot and the switch.
+        .filter(|&(at, _)| {
+            let to = (mid.0 - (mid.0 - at.0) * 0.02, mid.1 - (mid.1 - at.1) * 0.02);
+            !w.walls.iter().enumerate().any(|(other, x)| {
+                if other == wi {
+                    return false;
+                }
+                // Only walls at this height (not a level above or below).
+                let zf = w.regions[wall.front].floor;
+                let at_height = |r: usize| w.regions.get(r).is_some_and(|g| g.floor < zf + 48.0 && g.ceiling > zf);
+                if !at_height(x.front) && !x.back.is_some_and(at_height) {
+                    return false;
+                }
+                // One-sided, or next to somewhere too low to stand (a shut door). (The
+                // "blocking" flag marks door lines too, so it says nothing here.)
+                let solid = x.back.is_none() || [Some(x.front), x.back].into_iter().flatten().any(|r| !open(r));
+                solid && segments_cross(at, to, w.vertices[x.a], w.vertices[x.b])
+            })
+        })
+        .collect();
+    // A two-sided line (a door face) works from either side: offer both and let the
+    // planner take the one it can reach. A one-sided switch: the wall's own region,
+    // else one opening onto it (a button alcove's room).
+    let two_sided = wall.back.is_some_and(|b| b != wall.front);
+    let chosen: Vec<((f32, f32), usize)> = if two_sided {
+        spots
+    } else {
+        spots.into_iter().min_by_key(|&(_, r)| if r == wall.front { 0 } else if joined(r, wall.front) { 1 } else { 2 }).into_iter().collect()
+    };
+    (chosen, mid)
+}
+
 fn segments_cross(p1: (f32, f32), p2: (f32, f32), q1: (f32, f32), q2: (f32, f32)) -> bool {
     let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
     let (d1, d2) = (cross(q1, q2, p1), cross(q1, q2, p2));

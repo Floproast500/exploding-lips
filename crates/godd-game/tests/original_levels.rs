@@ -1783,6 +1783,30 @@ fn bot_hit_groans_come_from_the_bot() {
     }
 }
 
+/// A switch line answers the player's shots as well as touches (WTAGSW accepts the player or
+/// the player's missile): LIPS00's 1841, a face of the front door r5 in a closed pocket beside
+/// it, shot from inside the pocket, opens the door; standing there without firing does not.
+#[test]
+fn lips00_shot_fires_a_switch_line() {
+    use godd_game::{Action, Input};
+    for shoot in [false, true] {
+        let Some((vfs, mut game)) = start("LIPS00") else { return };
+        run(&mut game, &vfs, 0.1);
+        {
+            let s = game.session_mut().unwrap();
+            (s.player.x, s.player.y, s.player.z, s.player.region, s.player.angle) = (18060.0, 16984.0, 4.0, 24, std::f32::consts::PI);
+            s.previous = s.player;
+        }
+        let mut input = Input::default();
+        input.set(Action::Use, shoot);
+        for _ in 0..(3.0 * godd_game::TICK_RATE) as usize {
+            game.tick(&vfs, &input);
+        }
+        let ceiling = game.session().unwrap().level.world.regions[5].ceiling;
+        assert_eq!(ceiling > 8.0, shoot, "shoot {shoot}: door r5 ceiling {ceiling}");
+    }
+}
+
 /// LIPS00's pool: landing in r468 makes the player a swimmer in hall r303 (tag 77); swimming up
 /// into the ceiling of r305 fires tag 78, out to SWIMMER2 on foot. Holding Jump keeps a swimmer's
 /// speed up, so the ceiling hit must be seen when the head arrives, not when the rise stops.
