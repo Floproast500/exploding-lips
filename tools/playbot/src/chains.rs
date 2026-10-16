@@ -85,12 +85,14 @@ fn item_sources(s: &Session, name: &str, death: &HashSet<i32>, depth: u32, seen:
 /// The tags of the OOTOO switches that turn something in the world into template `name`.
 fn morphs_into(s: &Session, name: &str, death: &HashSet<i32>, depth: u32, seen: &mut HashSet<i32>, out: &mut HashSet<Target>) {
     let list = &s.objects.list;
-    for o in list.iter().filter(|o| o.effect == OOTOO && o.tag > 0) {
+    for o in list.iter().filter(|o| o.effect == OOTOO) {
         let Some(a) = &o.aux else { continue };
         let (Some(template), Some(placeholder)) = (a.slot(8), a.slot(9)) else { continue };
         // (A placeholder must exist in the world to become it.)
         if template.eq_ignore_ascii_case(name) && list.iter().any(|p| p.name.eq_ignore_ascii_case(placeholder) && !p.hidden && !p.destroyed && p.region.is_some()) {
-            collect(s, o.tag, death, depth + 1, seen, out);
+            for t in activators(list, o) {
+                collect(s, t, death, depth + 1, seen, out);
+            }
         }
     }
 }
@@ -125,6 +127,16 @@ pub fn teleports(s: &Session, death: &HashSet<i32>) -> Vec<(usize, usize, Target
 
 /// A thing to do on the way: (region, door tag, a teleport to take and where from).
 type Call = (usize, i32, Option<(Target, usize)>);
+
+/// The tags that set object `o` off: its own, and those of timers and trigger-by-name objects
+/// naming it (LIPS01's EXITUS, untagged, set off by #170's timer on tag 129).
+fn activators(list: &[godd_game::objects::Obj], o: &godd_game::objects::Obj) -> Vec<i32> {
+    let mut tags: Vec<i32> = (o.tag > 0).then_some(o.tag).into_iter().collect();
+    if !o.name.is_empty() {
+        tags.extend(list.iter().filter(|t| matches!(t.effect, 80 | 81) && t.tag > 0 && t.aux.as_ref().and_then(|a| a.slot(9)).is_some_and(|n| n.eq_ignore_ascii_case(&o.name))).map(|t| t.tag));
+    }
+    tags
+}
 
 /// Planner debug output on (PLAYBOT_SEQDBG, or set by the bot for one decision).
 pub static DEBUG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -237,7 +249,9 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
     let heights = by_region.keys().map(|&r| (r, (w.regions[r].floor, w.regions[r].ceiling))).collect();
     let perpetual = s.effects.lifts().into_iter().map(|(r, _)| r).collect();
     let mut p = Plan { s, death, open, morphed: Default::default(), carried, used: HashSet::new(), start: s.player.region, steps: Vec::new(), tele: teleports(s, death), doors, depth: 0, active: HashSet::new(), perpetual, movers: by_region, heights, seed: 0, rng: std::cell::Cell::new(1), longest: Default::default(), blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first, timed: HashSet::new(), home: None, may_die, pressable: HashSet::new(), deadly: Default::default() };
-    p.pressable = s.effects.switches().iter().filter(|sw| sw.usable && !crate::switch_spots(w, sw.wall).0.is_empty()).map(|sw| sw.wall).collect();
+    // (Or in a door's own recess, pressed once the door is open, LIPS01's 1224 in r317; or a
+    // door's face, walked into, LIPS14's 261 on r364.)
+    p.pressable = s.effects.switches().iter().filter(|sw| sw.usable && (!crate::switch_spots(w, sw.wall).0.is_empty() || p.doors.contains_key(&w.walls[sw.wall].front) || w.walls[sw.wall].back.is_some_and(|b| p.doors.contains_key(&b)))).map(|sw| sw.wall).collect();
     p.deadly = s.effects.triggers().into_iter().filter_map(|(r, t)| {
         let (enter, land) = (death.contains(&t[0]), death.contains(&t[2]));
         (enter || land).then_some((r, (enter, land)))
@@ -928,16 +942,16 @@ impl Plan<'_> {
         }
         // A template pickup that fires it: morph a placeholder into it, then take that.
         for o in list.iter().filter(|o| o.effect == OPICKUP && o.region.is_none() && o.aux.as_ref().is_some_and(|a| a.ints[0] == t)) {
-            for m in list.iter().filter(|m| m.effect == OOTOO && m.tag > 0) {
+            for (m, mt) in list.iter().filter(|m| m.effect == OOTOO).flat_map(|m| activators(list, m).into_iter().map(move |t| (m, t))) {
                 let Some(a) = &m.aux else { continue };
                 let (Some(template), Some(placeholder)) = (a.slot(8), a.slot(9)) else { continue };
                 if !template.eq_ignore_ascii_case(&o.name) {
                     continue;
                 }
                 if debugging() {
-                    println!("       seq: tag {t}: template {template} from {placeholder} needs tag {}", m.tag);
+                    println!("       seq: tag {t}: template {template} from {placeholder} needs tag {mt}");
                 }
-                if !self.need_tag(m.tag, &format!("turns {placeholder} into {template}")) {
+                if !self.need_tag(mt, &format!("turns {placeholder} into {template}")) {
                     continue;
                 }
                 let made: Vec<usize> = self.morphed.iter().filter(|(_, v)| v.0.eq_ignore_ascii_case(template)).map(|(&k, _)| k).collect();
@@ -1083,7 +1097,7 @@ impl Plan<'_> {
                 self.blocking.insert(to, b);
             }
         }
-        for m in list.iter().filter(|m| m.effect == OOTOO && m.tag == t) {
+        for m in list.iter().filter(|m| m.effect == OOTOO && activators(list, m).contains(&t)) {
             let Some(a) = &m.aux else { continue };
             let (Some(template), Some(placeholder)) = (a.slot(8), a.slot(9)) else { continue };
             let Some(tpl) = list.iter().find(|o| o.name.eq_ignore_ascii_case(template)) else { continue };
