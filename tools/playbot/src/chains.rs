@@ -316,7 +316,11 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
     // seed (LIPS00: BRONZE opens the front door once, for 20 s; an order that spends that trip
     // outside before GOLD is fetched there has no second one).
     let mut best: Vec<Step> = Vec::new();
+    let mut complete: Option<Vec<Step>> = None;
     for seed in 0..48u64 {
+        if complete.is_some() && seed >= 12 {
+            break;
+        }
         let mut q = p.clone();
         q.longest = Default::default();
         q.rng.set(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
@@ -327,7 +331,12 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
             // (Not undone on failure here: the steps so far are the partial plan.)
             if regions.iter().any(|&r| q.reach_region_inner(r)) {
                 q.steps.push(Step { target: Target::Wall(wall), why: "the exit".into(), at: x.front });
-                return q.steps;
+                // (The shortest of a few whole plans: a ride up and back down again, LIPS01's
+                // lift r34, is one plan's detour, not another's.)
+                if complete.as_ref().is_none_or(|c: &Vec<Step>| q.steps.len() < c.len()) {
+                    complete = Some(q.steps.clone());
+                }
+                break;
             }
         }
         if debugging() {
@@ -339,6 +348,9 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
         if longest.len() > best.len() {
             best = longest;
         }
+    }
+    if let Some(c) = complete {
+        return c;
     }
     // (No whole way worked out: the longest run of steps found, the way they go is still right;
     // the bot works the plan out again after each.)
@@ -546,9 +558,15 @@ impl Plan<'_> {
                 let w = &self.s.level.world;
                 let mut q = r;
                 let (mut first, mut gate) = (None, None);
+                // (A timed door no switch to hand opens is a door like any other: what opens it
+                // first, before a ride toward it. LIPS01's r8 on #104, before the lift r34.)
+                let switchless = |q: usize| {
+                    let t = self.doors[&q];
+                    !self.s.effects.switches().iter().any(|sw| sw.usable && sw.tags.contains(&t) && self.pressable.contains(&sw.wall) && !self.avoid.contains(&Target::Wall(sw.wall)))
+                };
                 while prev[q] != q {
                     let p0 = prev[q];
-                    if self.doors.contains_key(&q) && !self.open[q] && !self.timed.contains(&q) {
+                    if self.doors.contains_key(&q) && !self.open[q] && (!self.timed.contains(&q) || switchless(q)) {
                         (first, gate) = (Some(q), None);
                     } else {
                         // Only blocking walls between, one of them a gate.

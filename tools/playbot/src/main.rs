@@ -1550,7 +1550,9 @@ impl<'a> Bot<'a> {
                         let reach = if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == 131)) {
                             40.0
                         } else if matches!(g.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) {
-                            36.0
+                            // (Further for one up a ledge we can't step onto, jumped for from
+                            // where we stand: no grid spot is within 36 of LIPS14's TOKEN.)
+                            if g.at[2] - p.z > physics.step_height { 56.0 } else { 36.0 }
                         } else {
                             STEP * 0.75
                         };
@@ -1649,7 +1651,10 @@ impl<'a> Bot<'a> {
                     let crouch = steps.last().is_some_and(|s: &Step| s.crouch);
                     // (Swimming: up or down to the thing's own height.)
                     let z = came.get(&k).is_some_and(|e| e.0.flying).then_some(goal.at[2]);
-                    steps.push(Step { to: (goal.at[0], goal.at[1]), z, crouch, jump: false, region: None });
+                    // (A pickup up a ledge higher than a step is jumped for: LIPS14's TOKEN in
+                    // the nook r217, 33 over r209.)
+                    let jump = matches!(goal.target, Target::Object(i) if s.objects.list.get(i).is_some_and(|o| o.effect == OPICKUP)) && goal.at[2] - p.z > physics.step_height;
+                    steps.push(Step { to: (goal.at[0], goal.at[1]), z, crouch, jump, region: None });
                 }
                 return Some((goal, steps));
             }
@@ -2595,8 +2600,6 @@ impl<'a> Bot<'a> {
         let mut seq_waits = 0;
         let mut lift_rides = 0;
         let mut last_seq_walk: Option<Target> = None;
-        // (The last ride step taken, and the plan it came from.)
-        let (mut last_ride, mut last_ride_target, mut prev_seq): (Option<usize>, Target, Vec<chains::Step>) = (None, Target::Region(usize::MAX), Vec::new());
         while self.ticks < max_ticks {
             if self.level_done() {
                 let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
@@ -2708,27 +2711,7 @@ impl<'a> Bot<'a> {
                 } else {
                     (seq_seen, seq_lost) = (true, 0);
                 }
-                let mut next = seq.iter().find(|st| !(st.why.starts_with("calls the lift") && self.used.contains(&st.target)));
-                // (A ride just taken, undone by the next plan: the plan it was part of goes on
-                // instead. LIPS01's lift r34 up for 1166 and down for #104, by turns, for ever.)
-                let ride_of = |why: &str| why.strip_prefix("moves r").and_then(|r| r.split(' ').next()).and_then(|r| r.parse::<usize>().ok());
-                if let (Some(st), Some(last)) = (next, last_ride) && ride_of(&st.why) == Some(last) && st.target != last_ride_target
-                    && let Some(k) = prev_seq.iter().position(|x| x.target == last_ride_target)
-                {
-                    next = prev_seq.get(k + 1).filter(|x| goals.iter().any(|g| g.target == x.target));
-                    if self.verbose && next.is_some() {
-                        println!("     seq: not undoing the ride on r{last}: the plan before goes on");
-                    }
-                    next = next.or(Some(st));
-                }
-                let next = next.cloned();
-                if let Some(st) = &next && ride_of(&st.why).is_some() {
-                    (last_ride, last_ride_target) = (ride_of(&st.why), st.target);
-                    prev_seq = seq.clone();
-                } else if next.is_some() {
-                    last_ride = None;
-                }
-                let next = next.as_ref();
+                let next = seq.iter().find(|st| !(st.why.starts_with("calls the lift") && self.used.contains(&st.target)));
                 if let Some(st) = next {
                     let g: Vec<Goal> = goals.iter().filter(|g| g.target == st.target).copied().collect();
                     if self.verbose {
@@ -2771,6 +2754,25 @@ impl<'a> Bot<'a> {
                     // behind a counter the search wrongly walks onto.)
                     let shots: Vec<Goal> = g.iter().filter(|x| x.shoot).copied().collect();
                     let g: Vec<Goal> = if !shots.is_empty() && self.seq_fails.get(&st.target).is_some_and(|&n| n >= 1) { shots } else { g };
+                    // (A ride first, when what follows it is in reach from here as it is: that,
+                    // not up and back down again. LIPS01's lift r34 before door r27's 76.)
+                    // (Past timed doors already open: through them while they are.)
+                    let door_open = |b: &Bot, why: &str| why.strip_prefix("opens door r").and_then(|r| r.split(' ').next()).and_then(|r| r.parse::<usize>().ok()).is_some_and(|r| {
+                        let g = &b.session().level.world.regions[r];
+                        g.ceiling - g.floor >= 56.0
+                    });
+                    if found.is_none() && !riding && st.why.starts_with("moves r") {
+                        let after = seq.iter().skip_while(|x| x.target != st.target).skip(1).take(4).find(|x| !(x.why.ends_with("(it shuts again)") && door_open(self, &x.why)));
+                        if let Some(after) = after {
+                            let g2: Vec<Goal> = goals.iter().filter(|x| x.target == after.target).copied().collect();
+                            if !g2.is_empty() && let Some(f) = self.plan(&g2) {
+                                if self.verbose {
+                                    println!("     seq: {:?} is in reach without the ride first", after.target);
+                                }
+                                found = Some(f);
+                            }
+                        }
+                    }
                     if found.is_none() && !g.is_empty() && !riding {
                         found = self.plan(&g);
                         // (Too far to plan in one go: part of the way first, along the planner's
@@ -2817,6 +2819,9 @@ impl<'a> Bot<'a> {
                         if found.is_none() {
                             lift_rides = 0;
                             let route = chains::route_to(self.session(), self.death_tags(), st.at);
+                            if self.verbose {
+                                println!("     seq: route to r{}: {route:?}", st.at);
+                            }
                             let lifts: HashSet<usize> = self.session().effects.lifts().into_iter().map(|(r, _)| r).collect();
                             // (The first perpetual lift on the way, first: boarding waits for it.)
                             let first_lift = route.iter().position(|r| lifts.contains(r));
