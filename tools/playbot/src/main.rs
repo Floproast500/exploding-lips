@@ -480,8 +480,10 @@ impl<'a> Bot<'a> {
         // Walk back to the first obstacle on the route: a shut door, or a teleport to take.
         let mut first = None;
         let mut first_tele = None;
+        let mut path_doors: Vec<usize> = Vec::new();
         while prev[r] != r {
             if doors.contains_key(&r) && shut(r) {
+                path_doors.push(r);
                 first = Some(r);
                 first_tele = None;
             }
@@ -502,10 +504,16 @@ impl<'a> Bot<'a> {
             })
         };
         if let Some(t) = first_tele {
+            // (What opens a shut door further on comes first if it is here: LIPS00's OCTRED
+            // floats in the pool hall, and the exit's way runs through the front door it opens;
+            // leaving by the hall's teleport first, the bot came round to the pool forever.)
+            let mut later: Vec<Goal> = path_doors.iter().flat_map(|&d| chains::producers(s, doors[&d], self.death_tags())).filter_map(goal_for).collect();
+            later.dedup_by_key(|g| g.target);
             if self.verbose {
-                println!("     route teleport: {t:?}");
+                println!("     route teleport: {t:?}; openers further on: {:?}", later.iter().map(|g| g.target).collect::<Vec<_>>());
             }
-            return (goal_for(t).into_iter().collect(), Some(goal_region));
+            later.extend(goal_for(t));
+            return (later, Some(goal_region));
         }
         let Some(door) = first else { return (Vec::new(), None) };
         let tag = doors[&door];
