@@ -17,6 +17,9 @@ const OWTOW: i32 = 67;
 const ODROP: i32 = 131;
 /// How many links back a chain is followed.
 const MAX_DEPTH: u32 = 6;
+/// How deep the sequence planner follows what a tag needs (LIPS01: the exit wall's tag 107
+/// back through a dozen buttons in door recesses to GARGON's 116, fifteen deep).
+const SEQ_DEPTH: u32 = 40;
 
 /// Things usable now (in the world, not hidden, not a death trap) that fire `tag`, directly or
 /// through a chain of morphs and locks.
@@ -125,6 +128,8 @@ pub fn teleports(s: &Session, death: &HashSet<i32>) -> Vec<(usize, usize, Target
     out
 }
 
+static NO_TARGETS: std::sync::LazyLock<HashSet<Target>> = std::sync::LazyLock::new(HashSet::new);
+
 /// A thing to do on the way: (region, door tag, a teleport to take and where from).
 type Call = (usize, i32, Option<(Target, usize)>);
 
@@ -205,6 +210,7 @@ struct Plan<'a> {
     /// Rides being worked out (a ride's switch reached by another ride: not too deep).
     riding: u32,
     first: Option<&'a HashSet<Target>>,
+    avoid: &'a HashSet<Target>,
     /// Doors that shut again by themselves (RTDOOR wait) and have a switch: passed as open,
     /// their switch pressed right before the step that goes through (LIPS00's r81 and r253:
     /// opened early, they were shut again by the time the bot came back that way).
@@ -228,7 +234,8 @@ struct Plan<'a> {
 /// `first` limits the first step to what can be used now (the bot's goals); `None` for any.
 /// `may_die`: going back to the start by dying is a way from the first step on (not before
 /// anything was done: the level's opening is played, not skipped).
-pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target>>, may_die: bool) -> Vec<Step> {
+/// `avoid`: targets the bot failed to use again and again (not planned with).
+pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target>>, may_die: bool, avoid: &HashSet<Target>) -> Vec<Step> {
     let w = &s.level.world;
     let doors: std::collections::HashMap<usize, i32> = s.effects.doors().into_iter().collect();
     let tops: std::collections::HashMap<usize, f32> = s.effects.door_tops().into_iter().collect();
@@ -248,7 +255,7 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
     }
     let heights = by_region.keys().map(|&r| (r, (w.regions[r].floor, w.regions[r].ceiling))).collect();
     let perpetual = s.effects.lifts().into_iter().map(|(r, _)| r).collect();
-    let mut p = Plan { s, death, open, morphed: Default::default(), carried, used: HashSet::new(), start: s.player.region, steps: Vec::new(), tele: teleports(s, death), doors, depth: 0, active: HashSet::new(), perpetual, movers: by_region, heights, seed: 0, rng: std::cell::Cell::new(1), longest: Default::default(), blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first, timed: HashSet::new(), home: None, may_die, pressable: HashSet::new(), deadly: Default::default() };
+    let mut p = Plan { s, death, open, morphed: Default::default(), carried, used: HashSet::new(), start: s.player.region, steps: Vec::new(), tele: teleports(s, death), doors, depth: 0, active: HashSet::new(), perpetual, movers: by_region, heights, seed: 0, rng: std::cell::Cell::new(1), longest: Default::default(), blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first, avoid, timed: HashSet::new(), home: None, may_die, pressable: HashSet::new(), deadly: Default::default() };
     // (Or in a door's own recess, pressed once the door is open, LIPS01's 1224 in r317; or a
     // door's face, walked into, LIPS14's 261 on r364.)
     p.pressable = s.effects.switches().iter().filter(|sw| sw.usable && (!crate::switch_spots(w, sw.wall).0.is_empty() || p.doors.contains_key(&w.walls[sw.wall].front) || w.walls[sw.wall].back.is_some_and(|b| p.doors.contains_key(&b)))).map(|sw| sw.wall).collect();
@@ -349,7 +356,7 @@ pub fn route_to(s: &Session, death: &HashSet<i32>, to: usize) -> Vec<usize> {
     let mut p = Plan {
         s, death, open, morphed: Default::default(), carried: Vec::new(), used: HashSet::new(), start: s.player.region, steps: Vec::new(), tele: teleports(s, death), doors, depth: 0, active: HashSet::new(),
         perpetual: s.effects.lifts().into_iter().map(|(r, _)| r).collect(), movers: Default::default(), heights: Default::default(), seed: 0, rng: std::cell::Cell::new(1), longest: Default::default(),
-        blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first: None, timed: HashSet::new(), home: None, may_die: false, pressable: HashSet::new(), deadly: Default::default(),
+        blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first: None, avoid: &NO_TARGETS, timed: HashSet::new(), home: None, may_die: false, pressable: HashSet::new(), deadly: Default::default(),
     };
     p.timed = s.effects.door_waits().into_iter().map(|(r, _)| r).collect();
     let (prev, set) = p.reachable(false);
@@ -757,7 +764,9 @@ impl Plan<'_> {
                     let x = &w.walls[wi];
                     (x.front == a && x.back == Some(b)) || (x.front == b && x.back == Some(a))
                 });
-                if !walked || !now.contains(&b) {
+                // (Nor through a timed door: opened as a step of its own, LIPS01's r8 after the
+                // lift r34, which needs #104 fetched first.)
+                if !walked || !now.contains(&b) || (self.timed.contains(&b) && !self.open[b]) {
                     break;
                 }
                 stop = b;
@@ -847,7 +856,7 @@ impl Plan<'_> {
         self.timed.remove(&q);
         let now = self.reachable(false).1;
         self.timed.insert(q);
-        let mut cands: Vec<(usize, bool)> = s.effects.switches().iter().filter(|sw| sw.usable && sw.tags.contains(&t) && self.pressable.contains(&sw.wall)).filter_map(|sw| {
+        let mut cands: Vec<(usize, bool)> = s.effects.switches().iter().filter(|sw| sw.usable && sw.tags.contains(&t) && self.pressable.contains(&sw.wall) && !self.avoid.contains(&Target::Wall(sw.wall))).filter_map(|sw| {
             let x = &w.walls[sw.wall];
             let sides: Vec<usize> = std::iter::once(x.front).chain(x.back).collect();
             let near = sides.contains(&from);
@@ -862,7 +871,7 @@ impl Plan<'_> {
 
     /// Fire tag `t`: use something that fires it (reaching it first), or what makes one.
     fn need_tag(&mut self, t: i32, why: &str) -> bool {
-        if self.depth > MAX_DEPTH * 2 || self.death.contains(&t) || !self.active.insert(t) {
+        if self.depth > SEQ_DEPTH || self.death.contains(&t) || !self.active.insert(t) {
             return false;
         }
         let saved = (self.depth > 0).then(|| self.clone());
@@ -918,7 +927,7 @@ impl Plan<'_> {
             }
         }
         // (A walker answers every shot: LIPS00's #243, each time a way back outside.)
-        direct.retain(|(target, _)| !self.used.contains(target) || matches!(target, Target::Object(i) if list[*i].effect == OWALK));
+        direct.retain(|(target, _)| (!self.used.contains(target) || matches!(target, Target::Object(i) if list[*i].effect == OWALK)) && !self.avoid.contains(target));
         // (The first step only from what can be used now: LIPS00's 1841, the front door's face
         // from r24, is no goal of the bot's while BRONZE opens it.)
         if self.steps.is_empty() && let Some(ok) = self.first {

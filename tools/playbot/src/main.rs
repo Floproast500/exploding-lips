@@ -21,6 +21,8 @@ type AnyResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Planner grid spacing (world units).
 const STEP: f32 = 32.0;
+/// Real seconds a rushing bot's search may run before it gives up.
+const SEARCH_SECONDS: f32 = 20.0;
 /// Tags that only send the player back (3: DEATH01 teleport to the start; 661: death).
 /// Tags that send the player back to the start (PLAYTRN1's 661 → 3, DEATH01).
 const BASE_DEATH_TAGS: [i32; 2] = [3, 661];
@@ -307,6 +309,9 @@ struct Bot<'a> {
     no_avoid: bool,
     /// The search may cross trap floors (no way round them was found).
     allow_traps: bool,
+    /// Sequence steps planned and walked to without taking effect, by target (three: the
+    /// planner looks for another way; LIPS01's 302, a face of door r8 from a spot not reached).
+    seq_fails: HashMap<Target, u32>,
     /// Spots the last failed search expanded.
     last_expanded: usize,
     /// Waypoints taken towards each route target since something new was used.
@@ -1167,6 +1172,18 @@ impl<'a> Bot<'a> {
                 None => {}
             }
             let (chosen, mid) = switch_spots(w, sw.wall);
+            // (Nowhere to stand and press it: shot, over what stands in front of it. LIPS01's
+            // 302 behind the counter r397/r392 opens door r8.)
+            let door_face = { let wall = &w.walls[sw.wall]; doors.iter().any(|&(r, _)| wall.front == r || wall.back == Some(r)) };
+            if chosen.is_empty() || door_face {
+                let wall = &w.walls[sw.wall];
+                // (At the middle of its opening, over a counter in front of it.)
+                let sides: Vec<&godd_game::world::Region> = std::iter::once(wall.front).chain(wall.back).filter_map(|r| w.regions.get(r)).collect();
+                let floor = sides.iter().map(|g| g.floor).fold(f32::MIN, f32::max);
+                let ceiling = sides.iter().map(|g| g.ceiling).filter(|&c| c > floor + 16.0).fold(f32::MAX, f32::min);
+                let z = if ceiling < f32::MAX { (floor + ceiling) / 2.0 } else { floor + 24.0 };
+                goals.push(Goal { target: Target::Wall(sw.wall), at: [mid.0, mid.1, z - 16.0], face: None, shoot: true });
+            }
             for (at, r) in chosen {
                 let z = w.regions[r].floor;
                 goals.push(Goal { target: Target::Wall(sw.wall), at: [at.0, at.1, z], face: Some(facing(at, mid)), shoot: false });
@@ -1504,6 +1521,7 @@ impl<'a> Bot<'a> {
     }
 
     fn plan_search(&mut self, goals: &[Goal]) -> Option<(Goal, Vec<Step>)> {
+        let search_started = std::time::Instant::now();
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         let corridor = self.corridor.clone();
@@ -1636,7 +1654,10 @@ impl<'a> Bot<'a> {
                 return Some((goal, steps));
             }
             expanded += 1;
-            if expanded > self.node_cap {
+            // (And a time cap when rushing: a search that runs for minutes and fails holds play
+            // up; part of the way is planned instead. LIPS14's TOKEN: 610 s, then nothing.)
+            let out_of_time = self.rush && expanded % 512 == 0 && search_started.elapsed().as_secs_f32() > SEARCH_SECONDS;
+            if expanded > self.node_cap || out_of_time {
                 self.reached = came.keys().map(|c| c.3).collect();
                 self.known.extend(self.reached.iter().copied());
                 return None;
@@ -2038,6 +2059,10 @@ impl<'a> Bot<'a> {
                     let w = &s.level.world;
                     let boarding = step.region.is_some_and(|r| lifts.contains(&r) && p.region != r && (w.regions[r].floor - z).abs() > 12.0);
                     let leaving = lifts.contains(&p.region) && step.region.is_some_and(|r| r != p.region) && (p.z - z).abs() > 20.0;
+                    // (A floor a switch set moving: off or on once it stops, LIPS01's lift r34
+                    // left halfway up.)
+                    let moving = s.objects.region_moving(p.region) || step.region.is_some_and(|r| s.objects.region_moving(r));
+                    let boarding = boarding || (moving && (p.z - z).abs() > 20.0);
                     if !(boarding || leaving) || self.teleported || self.level_done() {
                         break;
                     }
@@ -2325,6 +2350,29 @@ impl<'a> Bot<'a> {
                     }
                 }
             }
+        } else if goal.shoot && let Target::Wall(wi) = goal.target {
+            // A switch line out of reach is shot: aim at it and fire until it answers.
+            let _ = wi;
+            let mut fire = Input::default();
+            fire.set(Action::Use, true);
+            for _ in 0..(TICK_RATE as usize * 3 / 2) {
+                if self.level_done() {
+                    break;
+                }
+                let s = self.session();
+                let physics = s.physics_override.unwrap_or_default();
+                let angle = facing((s.player.x, s.player.y), (goal.at[0], goal.at[1]));
+                let dist = (goal.at[0] - s.player.x).hypot(goal.at[1] - s.player.y).max(1.0);
+                let slope = (goal.at[2] + 16.0 - s.player.eye_z(&physics)) / dist;
+                let look = (slope * 220.2 * 256.0 / 200.0).clamp(-512.0, 512.0);
+                let p = &mut self.game.session_mut().expect("session").player;
+                p.angle = angle;
+                p.look = look;
+                self.tick(&fire);
+            }
+            if let Some(s) = self.game.session_mut() {
+                s.player.look = 0.0;
+            }
         } else if goal.shoot {
             let Target::Object(i) = goal.target else { return };
             let counter = self.session().objects.list.get(i).map_or(0, |o| o.counter);
@@ -2519,7 +2567,7 @@ impl<'a> Bot<'a> {
         self.boss = self.find_boss();
         // PLAYBOT_SEQ=1: the level's sequence from the data (chains::sequence).
         if std::env::var("PLAYBOT_SEQ").is_ok() {
-            for (k, st) in chains::sequence(self.session(), self.death_tags(), None, false).iter().enumerate() {
+            for (k, st) in chains::sequence(self.session(), self.death_tags(), None, false, &std::env::var("PLAYBOT_SEQ_AVOID").map(|v| v.split(',').filter_map(target_from_code).collect()).unwrap_or_default()).iter().enumerate() {
                 println!("     seq {}: {:?} ({})", k + 1, st.target, st.why);
             }
         }
@@ -2546,6 +2594,9 @@ impl<'a> Bot<'a> {
         // its way down: the bot went for wall 389 meanwhile, through r477, and sprang the trap.)
         let mut seq_waits = 0;
         let mut lift_rides = 0;
+        let mut last_seq_walk: Option<Target> = None;
+        // (The last ride step taken, and the plan it came from.)
+        let (mut last_ride, mut last_ride_target, mut prev_seq): (Option<usize>, Target, Vec<chains::Step>) = (None, Target::Region(usize::MAX), Vec::new());
         while self.ticks < max_ticks {
             if self.level_done() {
                 let next = self.game.session().map_or_else(String::new, |s| s.name.clone());
@@ -2595,7 +2646,11 @@ impl<'a> Bot<'a> {
                 self.failed_plans.clear();
                 self.failed_region_plans.clear();
             }
-            let goals = self.goals();
+            let mut goals = self.goals();
+            // (Rushing: not what was walked to three times without taking effect.)
+            if self.rush {
+                goals.retain(|g| self.seq_fails.get(&g.target).is_none_or(|&n| n < 3));
+            }
             if goals.is_empty() {
                 return Err("nothing left to use".into());
             }
@@ -2642,7 +2697,8 @@ impl<'a> Bot<'a> {
                 // PLAYBOT_SEQDBG_R=303: the planner's working out, while the player is in r303.
                 let here = self.session().player.region;
                 chains::DEBUG.store(std::env::var("PLAYBOT_SEQDBG_R").is_ok_and(|v| v.parse() == Ok(here)), std::sync::atomic::Ordering::Relaxed);
-                let seq = chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1);
+                let avoid: HashSet<Target> = self.seq_fails.iter().filter(|e| *e.1 >= 3).map(|e| *e.0).collect();
+                let seq = chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1, &avoid);
                 chains::DEBUG.store(false, std::sync::atomic::Ordering::Relaxed);
                 if seq.is_empty() {
                     seq_lost += 1;
@@ -2652,7 +2708,27 @@ impl<'a> Bot<'a> {
                 } else {
                     (seq_seen, seq_lost) = (true, 0);
                 }
-                let next = seq.iter().find(|st| !(st.why.starts_with("calls the lift") && self.used.contains(&st.target)));
+                let mut next = seq.iter().find(|st| !(st.why.starts_with("calls the lift") && self.used.contains(&st.target)));
+                // (A ride just taken, undone by the next plan: the plan it was part of goes on
+                // instead. LIPS01's lift r34 up for 1166 and down for #104, by turns, for ever.)
+                let ride_of = |why: &str| why.strip_prefix("moves r").and_then(|r| r.split(' ').next()).and_then(|r| r.parse::<usize>().ok());
+                if let (Some(st), Some(last)) = (next, last_ride) && ride_of(&st.why) == Some(last) && st.target != last_ride_target
+                    && let Some(k) = prev_seq.iter().position(|x| x.target == last_ride_target)
+                {
+                    next = prev_seq.get(k + 1).filter(|x| goals.iter().any(|g| g.target == x.target));
+                    if self.verbose && next.is_some() {
+                        println!("     seq: not undoing the ride on r{last}: the plan before goes on");
+                    }
+                    next = next.or(Some(st));
+                }
+                let next = next.cloned();
+                if let Some(st) = &next && ride_of(&st.why).is_some() {
+                    (last_ride, last_ride_target) = (ride_of(&st.why), st.target);
+                    prev_seq = seq.clone();
+                } else if next.is_some() {
+                    last_ride = None;
+                }
+                let next = next.as_ref();
                 if let Some(st) = next {
                     let g: Vec<Goal> = goals.iter().filter(|g| g.target == st.target).copied().collect();
                     if self.verbose {
@@ -2691,6 +2767,10 @@ impl<'a> Bot<'a> {
                             x.back.map(|b| if x.front == r { b } else { x.front })
                         })).any(|q| s.objects.region_moving(q))
                     };
+                    // (A step that failed once and can be shot: shot. LIPS01's 302, its spots
+                    // behind a counter the search wrongly walks onto.)
+                    let shots: Vec<Goal> = g.iter().filter(|x| x.shoot).copied().collect();
+                    let g: Vec<Goal> = if !shots.is_empty() && self.seq_fails.get(&st.target).is_some_and(|&n| n >= 1) { shots } else { g };
                     if found.is_none() && !g.is_empty() && !riding {
                         found = self.plan(&g);
                         // (Too far to plan in one go: part of the way first, along the planner's
@@ -2773,10 +2853,19 @@ impl<'a> Bot<'a> {
                         continue;
                     }
                     seq_waits = 0;
+                    // (Planned for again right after a walk to it: that walk did not take effect.)
+                    if last_seq_walk == Some(st.target) && g.iter().any(|x| x.target == st.target) {
+                        *self.seq_fails.entry(st.target).or_insert(0) += 1;
+                    }
+                    last_seq_walk = found.as_ref().filter(|f| f.0.target == st.target).map(|_| st.target);
                     if found.is_some() || seq_stuck.0 != Some(st.target) {
                         seq_stuck = (Some(st.target), 0);
                     }
                     if found.is_none() {
+                        // (Out of reach as well as walked to in vain: three and it is planned round.)
+                        if g.iter().any(|x| x.target == st.target) && !riding {
+                            *self.seq_fails.entry(st.target).or_insert(0) += 1;
+                        }
                         seq_stuck.1 += 1;
                         if seq_stuck.1 >= 8 {
                             return Err(format!("the sequence's next step {:?} ({}) is out of reach", st.target, st.why));
@@ -3309,6 +3398,7 @@ impl<'a> Bot<'a> {
             } else {
                 self.unreachable.insert(goal.target);
                 *self.failures.entry(goal.target).or_default() += 1;
+                *self.seq_fails.entry(goal.target).or_default() += 1;
                 let p = self.session().player;
                 self.note(format!("   could not follow the path to {:?} (at {:.0}, {:.0})", goal.target, p.x, p.y));
             }
@@ -3369,10 +3459,12 @@ fn main() -> AnyResult {
         let mut journal_kept: Vec<Ev> = Vec::new();
         // (A shared checkpoint an episode got nowhere from is not taken again.)
         let mut shared_bad = 0usize;
+        // (What the episodes before walked to in vain: not again.)
+        let mut fails_kept: HashMap<Target, u32> = HashMap::new();
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
             let mut shared_taken = 0usize;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: fails_kept.clone(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
             // (Another bot's furthest checkpoint, when it got further than ours.)
             if bot.journal.is_some() && let Some(sh) = &bot.shared && sh.ckpt_used() > resume.last().map_or(0, |c| c.used.len()).max(shared_bad)
                 && let Some((c, j)) = sh.take_ckpt()
@@ -3463,6 +3555,7 @@ fn main() -> AnyResult {
             if let Some(j) = bot.journal.take() {
                 journal_kept = j;
             }
+            fails_kept = std::mem::take(&mut bot.seq_fails);
             match result {
                 Ok(next) => {
                     println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32());
