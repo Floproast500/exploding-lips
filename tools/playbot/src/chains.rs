@@ -324,6 +324,34 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
     best
 }
 
+/// The planner's region route from the player to region `to` with the world as it is now
+/// (doors as they are, timed ones passed, lifts at any height): the regions in order, empty
+/// when there is none.
+pub fn route_to(s: &Session, death: &HashSet<i32>, to: usize) -> Vec<usize> {
+    let w = &s.level.world;
+    let doors: std::collections::HashMap<usize, i32> = s.effects.doors().into_iter().collect();
+    let tops: std::collections::HashMap<usize, f32> = s.effects.door_tops().into_iter().collect();
+    let open = (0..w.regions.len()).map(|r| !doors.contains_key(&r) || w.regions[r].ceiling - w.regions[r].floor >= 56.0 || tops.get(&r).is_some_and(|&t| w.regions[r].ceiling >= t - 1.0)).collect();
+    let mut p = Plan {
+        s, death, open, morphed: Default::default(), carried: Vec::new(), used: HashSet::new(), start: s.player.region, steps: Vec::new(), tele: teleports(s, death), doors, depth: 0, active: HashSet::new(),
+        perpetual: s.effects.lifts().into_iter().map(|(r, _)| r).collect(), movers: Default::default(), heights: Default::default(), seed: 0, rng: std::cell::Cell::new(1), longest: Default::default(),
+        blocking: Default::default(), gates: Default::default(), gate_pairs: Default::default(), closed_gates: HashSet::new(), closed_doors: HashSet::new(), riding: 0, first: None, timed: HashSet::new(), home: None, may_die: false, pressable: HashSet::new(), deadly: Default::default(),
+    };
+    p.timed = s.effects.door_waits().into_iter().map(|(r, _)| r).collect();
+    let (prev, set) = p.reachable(false);
+    if !set.contains(&to) {
+        return Vec::new();
+    }
+    let mut path = vec![to];
+    let mut q = to;
+    while prev[q] != q {
+        q = prev[q];
+        path.push(q);
+    }
+    path.reverse();
+    path
+}
+
 impl Plan<'_> {
     /// Regions reachable from the start with doors as they are in the plan.
     fn reachable(&self, through_shut: bool) -> (Vec<usize>, HashSet<usize>) {

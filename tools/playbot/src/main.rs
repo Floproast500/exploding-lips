@@ -48,6 +48,29 @@ enum Target {
     Lift(usize),
 }
 
+/// One entry of a bot's journal: a tick with the facing the bot gave the player, or a tag it
+/// fired itself (going back to the start). Played again into a fresh game, it rebuilds the
+/// world exactly: the simulation is deterministic.
+// (Nearly every entry is a tick: boxing its input would only add an allocation per tick.)
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+enum Ev {
+    Tick { angle: f32, look: f32, bsp: Option<(f32, f32)>, input: Input, pos: [f32; 3] },
+    Fire(u32),
+}
+
+/// Where an episode can start again instead of at the level's start: the journal up to here,
+/// and what the bot had done by then.
+#[derive(Clone)]
+struct Checkpoint {
+    journal: usize,
+    used: HashSet<Target>,
+    route: godd_game::route::Route,
+    trail: Vec<[f32; 3]>,
+    /// The player then (a replay that ends elsewhere is not exact).
+    at: [f32; 3],
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Goal {
     target: Target,
@@ -138,6 +161,94 @@ impl Shared {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
             let _ = f.write_all(format!("{line}\n").as_bytes());
         }
+    }
+
+    /// The shared checkpoint file beside the share file: the furthest any bot got.
+    fn ckpt_path(&self) -> std::path::PathBuf {
+        let mut p = self.path.clone().into_os_string();
+        p.push(format!(".{}.ckpt", self.level));
+        p.into()
+    }
+
+    /// Things used at the shared checkpoint (0: none).
+    fn ckpt_used(&self) -> usize {
+        use std::io::BufRead;
+        let Ok(f) = std::fs::File::open(self.ckpt_path()) else { return 0 };
+        let mut line = String::new();
+        let _ = std::io::BufReader::new(f).read_line(&mut line);
+        line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// Offer a checkpoint (with the journal it indexes): kept when it got further.
+    fn offer_ckpt(&self, c: &Checkpoint, journal: &[Ev]) {
+        if c.used.len() <= self.ckpt_used() {
+            return;
+        }
+        let mut out = format!("ckpt {}\nused", c.used.len());
+        for t in &c.used {
+            out.push(' ');
+            out.push_str(&target_code(*t));
+        }
+        out.push_str("\nat");
+        for v in c.at {
+            out.push_str(&format!(" {v}"));
+        }
+        out.push_str("\ntrail");
+        for p in &c.trail {
+            out.push_str(&format!(" {},{},{}", p[0], p[1], p[2]));
+        }
+        out.push('\n');
+        out.push_str(&c.route.to_text());
+        out.push_str("endroute\n");
+        for ev in &journal[..c.journal] {
+            match ev {
+                Ev::Fire(t) => out.push_str(&format!("f {t}\n")),
+                Ev::Tick { angle, look, bsp, input, pos } => {
+                    let (yaw, pitch) = bsp.map_or(("-".to_string(), "-".to_string()), |b| (b.0.to_string(), b.1.to_string()));
+                    out.push_str(&format!("t {angle} {look} {yaw} {pitch} {} {} {}|{}\n", pos[0], pos[1], pos[2], input.to_line()));
+                }
+            }
+        }
+        let tmp = self.ckpt_path().with_extension("tmp");
+        if std::fs::write(&tmp, out).is_ok() {
+            let _ = std::fs::rename(&tmp, self.ckpt_path());
+        }
+    }
+
+    /// The shared checkpoint and its journal, if any.
+    fn take_ckpt(&self) -> Option<(Checkpoint, Vec<Ev>)> {
+        let text = std::fs::read_to_string(self.ckpt_path()).ok()?;
+        let mut lines = text.lines();
+        lines.next()?;
+        let used: HashSet<Target> = lines.next()?.split_whitespace().skip(1).filter_map(target_from_code).collect();
+        let at: Vec<f32> = lines.next()?.split_whitespace().skip(1).filter_map(|v| v.parse().ok()).collect();
+        let trail: Vec<[f32; 3]> = lines.next()?.split_whitespace().skip(1).filter_map(|p| {
+            let v: Vec<f32> = p.split(',').filter_map(|x| x.parse().ok()).collect();
+            (v.len() == 3).then(|| [v[0], v[1], v[2]])
+        }).collect();
+        let mut route_text = String::new();
+        for l in lines.by_ref() {
+            if l == "endroute" {
+                break;
+            }
+            route_text.push_str(l);
+            route_text.push('\n');
+        }
+        let route = godd_game::route::Route::parse(&route_text).unwrap_or_default();
+        let mut journal = Vec::new();
+        for l in lines {
+            if let Some(t) = l.strip_prefix("f ") {
+                journal.push(Ev::Fire(t.parse().ok()?));
+            } else if let Some(rest) = l.strip_prefix("t ") {
+                let (head, input) = rest.split_once('|')?;
+                let h: Vec<&str> = head.split_whitespace().collect();
+                let f = |i: usize| h.get(i).and_then(|v| v.parse::<f32>().ok());
+                let bsp = f(2).zip(f(3));
+                journal.push(Ev::Tick { angle: f(0)?, look: f(1)?, bsp, input: Input::from_line(input)?, pos: [f(4)?, f(5)?, f(6)?] });
+            }
+        }
+        let c = Checkpoint { journal: journal.len(), used, route, trail, at: [*at.first()?, *at.get(1)?, *at.get(2)?] };
+        Some((c, journal))
     }
 
     fn get(&self, t: Target) -> (u32, i64, u32) {
@@ -257,6 +368,11 @@ struct Bot<'a> {
     deaths_seen: i32,
     /// Give up the episode after this many ticks without progress (`--episode-minutes`).
     episode_ticks: Option<u64>,
+    /// Every tick and fired tag since the level started (see [`Ev`]); None when the world was
+    /// edited otherwise (PLAYBOT_START), so it cannot be played again.
+    journal: Option<Vec<Ev>>,
+    /// Checkpoints taken this episode (progress made).
+    checkpoints: Vec<Checkpoint>,
 }
 
 fn facing(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -298,6 +414,9 @@ impl<'a> Bot<'a> {
         self.failed_region_plans.clear();
         self.route_fails.clear();
         self.game.session_mut().expect("session").fire_tag(tag as u32);
+        if let Some(j) = self.journal.as_mut() {
+            j.push(Ev::Fire(tag as u32));
+        }
         let p = self.session().player;
         (p.x - before.0).hypot(p.y - before.1) > 64.0
     }
@@ -1759,6 +1878,9 @@ impl<'a> Bot<'a> {
         if let Some(s) = self.game.session_mut() {
             s.god = self.god;
         }
+        if let (Some(j), Some(s)) = (self.journal.as_mut(), self.game.session()) {
+            j.push(Ev::Tick { angle: s.player.angle, look: s.player.look, bsp: s.bsp.as_ref().filter(|_| s.in_bsp).map(|b| (b.player.yaw, b.player.pitch)), input: input.clone(), pos: [s.player.x, s.player.y, s.player.z] });
+        }
         let before = self.game.session().map(|s| s.player);
         self.game.tick(self.vfs, input);
         self.ticks += 1;
@@ -2356,6 +2478,7 @@ impl<'a> Bot<'a> {
         // Rushing: decisions in a row with no way to the exit left, after there was one (a trap
         // sprung: LIPS00's FALLZ corridor, once sunk, kills on landing, and wall 1012 lies past it).
         let (mut seq_seen, mut seq_lost) = (false, 0);
+        let ckpt_base = self.used.len();
         // (And the same next step out of walking reach decision after decision.)
         let mut seq_stuck: (Option<Target>, u32) = (None, 0);
         // (Out of reach while a floor moves: wait for it, not off elsewhere. LIPS00's ELEV02 on
@@ -2372,6 +2495,21 @@ impl<'a> Bot<'a> {
             }
             if let Some(why) = self.learn() {
                 return Err(why);
+            }
+            // PLAYBOT_END_AT=120: end the first episode at 120 s of play (testing checkpoints).
+            if std::env::var("PLAYBOT_END_AT").is_ok_and(|v| v.parse::<f32>().is_ok_and(|t| self.ticks as f32 / TICK_RATE >= t)) && self.journal.as_ref().is_some_and(|j| j.len() == self.ticks as usize) {
+                return Err("PLAYBOT_END_AT".into());
+            }
+            // A checkpoint whenever something new was used (episodes start again from there).
+            if let Some(j) = &self.journal
+                && self.used.len() > self.checkpoints.last().map_or(ckpt_base, |c| c.used.len())
+            {
+                let p = self.session().player;
+                let c = Checkpoint { journal: j.len(), used: self.used.clone(), route: self.route.clone(), trail: self.trail.clone(), at: [p.x, p.y, p.z] };
+                if let Some(sh) = &self.shared {
+                    sh.offer_ckpt(&c, j);
+                }
+                self.checkpoints.push(c);
             }
             // No new region for a minute and a half (shut in, a timed door's faces fresh again
             // each time it shuts: LIPS00's west rooms after the parlour pickup, left only by
@@ -2493,6 +2631,30 @@ impl<'a> Bot<'a> {
                     };
                     if found.is_none() && !g.is_empty() && !riding {
                         found = self.plan(&g);
+                        // (Too far to plan in one go: part of the way first, along the planner's
+                        // route. LIPS00's KEY2, 586 steps off past the lifts, gave up the search.)
+                        if found.is_none() {
+                            let route = chains::route_to(self.session(), self.death_tags(), st.at);
+                            for k in [route.len() * 2 / 3, route.len() / 2, route.len() / 3] {
+                                let Some(&r) = route.get(k).filter(|&&r| r != self.session().player.region) else { continue };
+                                let goal = {
+                                    let w = &self.session().level.world;
+                                    let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
+                                    let c = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+                                    if w.region_at_z(c.0, c.1, Some(w.regions[r].floor + 1.0)) != Some(r) {
+                                        continue;
+                                    }
+                                    Goal { target: Target::Region(r), at: [c.0, c.1, w.regions[r].floor], face: None, shoot: false }
+                                };
+                                if let Some(f) = self.plan(&[goal]) {
+                                    if self.verbose {
+                                        println!("     seq: part of the way, to r{r} ({k} of {} regions)", route.len());
+                                    }
+                                    found = Some(f);
+                                    break;
+                                }
+                            }
+                        }
                     }
                     if found.is_none() && seq_waits < 40 && self.session().objects.any_height_motion() {
                         seq_waits += 1;
@@ -3097,9 +3259,58 @@ fn main() -> AnyResult {
         let mut shared = share.as_ref().map(|p| Shared::new(p.clone(), level));
         let mut played: u64 = 0;
         let mut episode: u64 = 0;
+        // Checkpoints to start episodes from, and the journal they index.
+        let mut resume: Vec<Checkpoint> = Vec::new();
+        let mut journal_kept: Vec<Ev> = Vec::new();
+        // (A shared checkpoint an episode got nowhere from is not taken again.)
+        let mut shared_bad = 0usize;
         loop {
             let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64) };
+            let mut shared_taken = 0usize;
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            // (Another bot's furthest checkpoint, when it got further than ours.)
+            if bot.journal.is_some() && let Some(sh) = &bot.shared && sh.ckpt_used() > resume.last().map_or(0, |c| c.used.len()).max(shared_bad)
+                && let Some((c, j)) = sh.take_ckpt()
+            {
+                println!("{level}: taking the shared checkpoint ({} things used)", c.used.len());
+                shared_taken = c.used.len();
+                journal_kept = j;
+                resume = vec![c];
+            }
+            // Start again from the last checkpoint (the journal played into the fresh game).
+            if let Some(c) = resume.last() {
+                let journal = journal_kept[..c.journal].to_vec();
+                for (journal_n, ev) in journal.iter().enumerate() {
+                    match ev {
+                        Ev::Fire(t) => {
+                            if let Some(s) = bot.game.session_mut() {
+                                s.fire_tag(*t);
+                            }
+                        }
+                        Ev::Tick { angle, look, bsp, input, pos } => {
+                            if let Some(s) = bot.game.session_mut() {
+                                s.god = god;
+                                if std::env::var("PLAYBOT_CKPT_DBG").is_ok() && (s.player.x - pos[0]).hypot(s.player.y - pos[1]) > 0.5 {
+                                    println!("     replay diverges at tick {}: ({:.1},{:.1},{:.1}) r{} vs {pos:?}, bsp {}", journal_n, s.player.x, s.player.y, s.player.z, s.player.region, s.in_bsp);
+                                    std::process::exit(3);
+                                }
+                                (s.player.angle, s.player.look) = (*angle, *look);
+                                if let (Some((yaw, pitch)), Some(b)) = (bsp, s.bsp.as_mut()) {
+                                    (b.player.yaw, b.player.pitch) = (*yaw, *pitch);
+                                }
+                            }
+                            bot.game.tick(&vfs, input);
+                        }
+                    }
+                }
+                bot.used = c.used.clone();
+                bot.route = c.route.clone();
+                bot.trail = c.trail.clone();
+                bot.journal = Some(journal);
+                let p = bot.session().player;
+                let off = (p.x - c.at[0]).hypot(p.y - c.at[1]).hypot(p.z - c.at[2]);
+                println!("{level}: episode {episode} starts at checkpoint {} ({} things used, at ({:.0}, {:.0}) r{}; {off:.1} off the checkpoint)", resume.len(), c.used.len(), p.x, p.y, p.region);
+            }
             // PLAYBOT_FIRE="21,30;21": fire those tags first (before PLAYBOT_START), letting things
             // settle (doors, lifts) after each group.
             if let Ok(v) = std::env::var("PLAYBOT_FIRE") {
@@ -3107,6 +3318,9 @@ fn main() -> AnyResult {
                     for t in group.split(',').filter_map(|x| x.parse().ok()) {
                         if let Some(s) = bot.game.session_mut() {
                             s.fire_tag(t);
+                        }
+                        if let Some(j) = bot.journal.as_mut() {
+                            j.push(Ev::Fire(t));
                         }
                     }
                     for _ in 0..(TICK_RATE as usize * 8) {
@@ -3122,6 +3336,7 @@ fn main() -> AnyResult {
                 {
                     (s.player.x, s.player.y, s.player.z, s.player.region) = (n[0], n[1], n[2], n[3] as usize);
                     s.previous = s.player;
+                    bot.journal = None;
                 }
             }
             let started = std::time::Instant::now();
@@ -3130,6 +3345,19 @@ fn main() -> AnyResult {
             played += bot.ticks;
             let game_time = bot.ticks as f32 / TICK_RATE;
             shared = bot.shared.take();
+            // (An episode that got no further than where it started: start the next one from
+            // the checkpoint before, the last may be doomed, a trap sprung.)
+            if bot.checkpoints.is_empty() {
+                if shared_taken > 0 && resume.len() == 1 {
+                    shared_bad = shared_bad.max(shared_taken);
+                }
+                resume.pop();
+            } else {
+                resume.append(&mut bot.checkpoints);
+            }
+            if let Some(j) = bot.journal.take() {
+                journal_kept = j;
+            }
             match result {
                 Ok(next) => {
                     println!("{level}: completed in {game_time:.0} s of play ({} things used) → {next} [{:.1} s]", bot.used.len(), started.elapsed().as_secs_f32());
@@ -3166,6 +3394,27 @@ fn main() -> AnyResult {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// A target as a short code for files (W12, O3, R7, L5).
+fn target_code(t: Target) -> String {
+    match t {
+        Target::Wall(i) => format!("W{i}"),
+        Target::Object(i) => format!("O{i}"),
+        Target::Region(i) => format!("R{i}"),
+        Target::Lift(i) => format!("L{i}"),
+    }
+}
+
+fn target_from_code(c: &str) -> Option<Target> {
+    let n = c.get(1..)?.parse().ok()?;
+    Some(match c.as_bytes().first()? {
+        b'W' => Target::Wall(n),
+        b'O' => Target::Object(n),
+        b'R' => Target::Region(n),
+        b'L' => Target::Lift(n),
+        _ => return None,
+    })
 }
 
 /// Whether segments p1-p2 and q1-q2 properly intersect.
