@@ -128,7 +128,14 @@ pub fn optimise(vfs: &Vfs, level: &str, route: &Route) -> Result<Route, String> 
         [p.x, p.y, p.z]
     };
     // Doors shut at the start, by region: the tag that opens each.
-    let shut_doors: std::collections::HashMap<usize, i32> = bot.session().effects.doors().into_iter().filter(|(r, _)| world.regions[*r].ceiling - world.regions[*r].floor < 56.0).collect();
+    // (A rotating door is shut until turned, whatever its height.)
+    let shut_doors: std::collections::HashMap<usize, i32> = bot
+        .session()
+        .effects
+        .doors()
+        .into_iter()
+        .filter(|&(r, t)| t > 0 && (world.regions[r].ceiling - world.regions[r].floor < 56.0 || bot.session().effects.region_kind(r) == Some("rotate")))
+        .collect();
     let used: HashSet<Target> = all.iter().map(|st| target_of(st.target)).collect();
     // (A lift called is a region stepped into, in the recording.)
     let as_used = |t: Target| match t {
@@ -190,17 +197,50 @@ pub fn optimise(vfs: &Vfs, level: &str, route: &Route) -> Result<Route, String> 
         let walked: Vec<[f32; 3]> = (at..=j).flat_map(|k| all[k].trail.iter().copied()).collect();
         // The run's walk is the way, unless it goes through a door that started shut and that
         // nothing kept so far (or a trigger crossed on the way) opens: then the planned way.
-        let mut fired: HashSet<i32> = out.steps.iter().flat_map(|o| tags_of(bot.session(), target_of(o.target))).collect();
+        // A door the walk needs that nothing kept has opened: the run's own opener for it (the
+        // last thing it used before here that fires its tag) goes in first; LIPS14's rotating
+        // door r223, turned by wall 489.
         let mut walk_ok = true;
-        for p in &walked {
-            let Some(r) = world.region_at_z(p[0], p[1], Some(p[2] + 1.0)).or_else(|| world.region_at(p[0], p[1])) else { continue };
-            fired.extend(tags_of(bot.session(), Target::Region(r)));
-            if let Some(t) = shut_doors.get(&r)
-                && !fired.contains(t)
-            {
-                walk_ok = false;
-                break;
+        for _ in 0..8 {
+            // (What this step opens itself counts: the walk ends at its face.)
+            let mut fired: HashSet<i32> = out.steps.iter().map(|o| target_of(o.target)).chain(std::iter::once(t)).flat_map(|x| tags_of(bot.session(), x)).collect();
+            let mut needs = None;
+            // (Door regions are thin: crossed between two trail spots, not landed in.)
+            'walk: for seg in walked.windows(2) {
+                let (a, b) = (seg[0], seg[1]);
+                if let Some(r) = world.region_at_z(a[0], a[1], Some(a[2] + 1.0)) {
+                    fired.extend(tags_of(bot.session(), Target::Region(r)));
+                }
+                if (b[0] - a[0]).hypot(b[1] - a[1]) > 256.0 {
+                    continue; // (a teleport, a fall: not walked)
+                }
+                for (&r, &t) in &shut_doors {
+                    // (Open by its tag, or by a face of it pressed: LIPS14's r364 by wall 1294.)
+                    let pressed = out.steps.iter().map(|o| o.target).chain(std::iter::once(all[j].target)).any(|x| matches!(x, RouteTarget::Wall(wi) if world.regions[r].walls.contains(&wi)));
+                    if !fired.contains(&t) && !pressed && world.regions[r].walls.iter().any(|&wi| crosses(&world, wi, a, b)) {
+                        if std::env::var("PLAYBOT_OPTDBG").is_ok() {
+                            println!("    crosses door r{r} (tag {t}) from ({:.0},{:.0},{:.0}) to ({:.0},{:.0},{:.0})", a[0], a[1], a[2], b[0], b[1], b[2]);
+                        }
+                        needs = Some((t, r));
+                        break 'walk;
+                    }
+                }
             }
+            let Some((t, door)) = needs else {
+                walk_ok = true;
+                break;
+            };
+            walk_ok = false;
+            let face = |k: usize| matches!(all[k].target, RouteTarget::Wall(wi) if world.regions[door].walls.contains(&wi));
+            let opener = (0..j).rev().find(|&k| (face(k) || tags_of(bot.session(), target_of(all[k].target)).contains(&t)) && !out.steps.iter().any(|o| o.target == all[k].target));
+            if std::env::var("PLAYBOT_OPTDBG").is_ok() {
+                println!("  step {:?}: the walk needs tag {t}; the run's opener: {:?}", all[j].target, opener.map(|k| all[k].target));
+            }
+            let Some(k) = opener else { break };
+            out.steps.push(RouteStep { target: all[k].target, pos: all[k].pos, trail: untangle_in(&world, &all[k].trail, 96.0) });
+        }
+        if std::env::var("PLAYBOT_OPTDBG").is_ok() {
+            println!("  step {:?}: walk {} ({} spots), planned path {:?}", all[j].target, if walk_ok { "kept" } else { "not kept" }, walked.len(), st.path);
         }
         let trail = if walk_ok || st.path.len() < 2 {
             untangle_in(&world, &walked, 96.0)
@@ -250,12 +290,33 @@ fn inert_steps(s: &godd_game::session::Session) -> impl Fn(&RouteStep) -> bool +
     }
 }
 
-/// The tags a step fires: a switch wall's, a pickup's or switch object's, a trigger region's.
+/// The tags a step fires: a switch wall's, a pickup's or switch object's, a trigger region's,
+/// and what those set off in turn (a lock fired by a tag firing its own: LIPS14's wall 276 →
+/// 103 → the TOKEN lock #189 → 102, door r169).
 fn tags_of(s: &godd_game::session::Session, t: Target) -> HashSet<i32> {
+    let mut set = direct_tags(s, t);
+    loop {
+        let more: Vec<i32> = s
+            .objects
+            .list
+            .iter()
+            .filter(|o| o.effect == 131 && o.tag > 0 && set.contains(&o.tag))
+            .filter_map(|o| o.aux.as_ref().map(|a| a.ints[0]))
+            .filter(|&x| x > 0 && !set.contains(&x))
+            .collect();
+        if more.is_empty() {
+            return set;
+        }
+        set.extend(more);
+    }
+}
+
+fn direct_tags(s: &godd_game::session::Session, t: Target) -> HashSet<i32> {
     match t {
         Target::Wall(w) => s.effects.switches().into_iter().filter(|sw| sw.wall == w).flat_map(|sw| sw.tags).filter(|&x| x > 0).collect(),
         Target::Object(i) => s.objects.list.get(i).map_or_else(HashSet::new, |o| {
-            let mut set: HashSet<i32> = o.aux.as_ref().map(|a| a.ints[0]).into_iter().filter(|&x| x > 0).collect();
+            // (Only a pickup's and a lock's first number is a tag: OINCOS's is life points.)
+            let mut set: HashSet<i32> = o.aux.as_ref().filter(|_| matches!(o.effect, 130 | 131)).map(|a| a.ints[0]).into_iter().filter(|&x| x > 0).collect();
             if matches!(o.effect, 20 | 22) && o.tag > 0 {
                 set.insert(o.tag);
             }
@@ -263,4 +324,18 @@ fn tags_of(s: &godd_game::session::Session, t: Target) -> HashSet<i32> {
         }),
         Target::Region(r) | Target::Lift(r) => s.effects.triggers().into_iter().filter(|(q, _)| *q == r).flat_map(|(_, tags)| tags).filter(|&x| x > 0).collect(),
     }
+}
+
+/// Whether the segment from `a` to `b` crosses wall `wi`.
+fn crosses(world: &godd_game::world::World, wi: usize, a: [f32; 3], b: [f32; 3]) -> bool {
+    let w = &world.walls[wi];
+    let (p, q) = (world.vertices[w.a], world.vertices[w.b]);
+    let (dx, dy, ex, ey) = (b[0] - a[0], b[1] - a[1], q.0 - p.0, q.1 - p.1);
+    let den = dx * ey - dy * ex;
+    if den.abs() < 1e-9 {
+        return false;
+    }
+    let t = ((p.0 - a[0]) * ey - (p.1 - a[1]) * ex) / den;
+    let u = ((p.0 - a[0]) * dy - (p.1 - a[1]) * dx) / den;
+    (0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)
 }
