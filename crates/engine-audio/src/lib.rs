@@ -81,14 +81,16 @@ impl Audio {
     pub fn new(soundfont: Option<Vec<u8>>) -> Option<Self> {
         // A limiter on the whole mix: sounds started together (a level's opening sounds over
         // its music) summed past full scale and clipped, a harsh burst at full volume.
-        let mut settings = AudioManagerSettings::<DefaultBackend>::default();
-        settings.main_track_builder = kira::track::MainTrackBuilder::new().with_effect(
-            kira::effect::compressor::CompressorBuilder::new()
-                .threshold(-6.0)
-                .ratio(20.0)
-                .attack_duration(std::time::Duration::from_millis(1))
-                .release_duration(std::time::Duration::from_millis(120)),
-        );
+        let settings = AudioManagerSettings::<DefaultBackend> {
+            main_track_builder: kira::track::MainTrackBuilder::new().with_effect(
+                kira::effect::compressor::CompressorBuilder::new()
+                    .threshold(-6.0)
+                    .ratio(20.0)
+                    .attack_duration(std::time::Duration::from_millis(1))
+                    .release_duration(std::time::Duration::from_millis(120)),
+            ),
+            ..Default::default()
+        };
         let mut manager = AudioManager::<DefaultBackend>::new(settings).map_err(|e| log::warn!("audio disabled: {e}")).ok()?;
         let mut send = SendTrackBuilder::new();
         let reverb = send.add_effect(ReverbBuilder::new().feedback(0.82).damping(0.45).mix(Mix::WET));
