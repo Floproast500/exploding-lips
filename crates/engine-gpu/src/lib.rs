@@ -29,7 +29,9 @@ const MAX_LIGHTS: usize = 64;
 
 /// Atlas layer size (the WebGL2 minimum for 2D textures).
 const LAYER: u32 = 2048;
-const NEAR: f32 = 4.0;
+// (1, as the portal windows: at 4 a door's ceiling rising past the eye, 3 units up, was
+// clipped away and showed sky, LIPS01's r149.)
+const NEAR: f32 = 1.0;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// One clip window: edge count and up to 15 edge equations (matches `Clip` in world.wgsl).
 const CLIP_BLOCK: u64 = 256;
