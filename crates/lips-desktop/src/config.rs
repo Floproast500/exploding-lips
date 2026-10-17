@@ -9,9 +9,12 @@ use std::path::PathBuf;
 
 /// The per-user config directory (saves and the quicksave live here too).
 pub fn dir() -> Option<PathBuf> {
+    // (An empty or relative XDG_CONFIG_HOME counts as unset, as the XDG spec says: the game
+    // was downloaded into a relative "exploding-lips/" under whatever folder it ran from.)
+    let absolute = |v: std::ffi::OsString| Some(PathBuf::from(v)).filter(|p| p.is_absolute());
     let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .and_then(absolute)
+        .or_else(|| std::env::var_os("APPDATA").and_then(absolute))
         .or_else(|| {
             std::env::var_os("HOME").map(|h| {
                 let home = PathBuf::from(h);

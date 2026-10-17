@@ -5,11 +5,11 @@
 ; into %APPDATA%\exploding-lips\game, where Big Lips finds it. No game files ship in here.
 ;
 ; Build (after `cargo build --release -p lips-desktop -p packbuilder`):
-;   iscc /DVersion=0.1.0 packaging\windows\biglips.iss
+;   iscc /DVersion=1.0.0 packaging\windows\biglips.iss
 ; The installer lands in target\installer\.
 
 #ifndef Version
-  #define Version "0.1.0"
+  #define Version "1.0.0"
 #endif
 
 [Setup]
@@ -17,7 +17,7 @@ AppId={{6B2C0E1A-5D3E-4C1F-9A57-B16E0C1A5D01}
 AppName=Big Lips
 AppVersion={#Version}
 AppPublisher=Big Lips contributors
-AppSupportURL=https://archive.org/details/exploding-lips-full
+AppSupportURL=https://github.com/Floproast500/exploding-lips
 DefaultDirName={autopf}\Big Lips
 DefaultGroupName=Big Lips
 PrivilegesRequired=lowest
@@ -34,6 +34,8 @@ ArchitecturesAllowed=x64compatible
 Source: "..\..\target\release\biglips.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\target\release\packbuilder.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
+; The route guide's routes, one per level (beside biglips.exe, where it looks for them).
+Source: "..\..\routes\*.route"; DestDir: "{app}\routes"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Big Lips"; Filename: "{app}\biglips.exe"; WorkingDir: "{app}"

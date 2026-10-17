@@ -47,7 +47,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p lips-desktop -p packbuilder
-      - run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DVersion=0.1.0 packaging\windows\biglips.iss'
+      # (The version from Cargo.toml's [workspace.package].)
+      - run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$v" packaging\windows\biglips.iss
       - uses: actions/upload-artifact@v4
         with:
           name: biglips-windows-installer
