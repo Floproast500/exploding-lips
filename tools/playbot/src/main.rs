@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 mod chains;
+mod optimise;
 
 type AnyResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -381,6 +382,11 @@ struct Bot<'a> {
     journal: Option<Vec<Ev>>,
     /// Checkpoints taken this episode (progress made).
     checkpoints: Vec<Checkpoint>,
+}
+
+/// A bot for following a route (`optimise`): rushing, in god mode, sharing nothing.
+fn fresh_bot<'a>(vfs: &'a Vfs, game: Game, level: &str, verbose: bool) -> Bot<'a> {
+    Bot { vfs, game, level: level.to_string(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: HashMap::new(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush: true, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god: true, log: Vec::new(), shared: None, rng: 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: None, journal: Some(Vec::new()), checkpoints: Vec::new() }
 }
 
 fn facing(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -3442,6 +3448,16 @@ fn main() -> AnyResult {
         levels = (0..18).map(|i| format!("LIPS{i:02}")).collect();
     }
     let vfs = Vfs::from_dir(Path::new(dir))?;
+    // --optimise LEVEL [DIR]: make DIR/LEVEL.route (default routes/) a clear-cut way through.
+    if let Some(level) = args.iter().position(|a| a == "--optimise").and_then(|i| args.get(i + 1)) {
+        let dir = args.iter().position(|a| a == "--optimise").and_then(|i| args.get(i + 2)).filter(|d| !d.starts_with("--")).map_or_else(|| std::path::PathBuf::from("routes"), std::path::PathBuf::from);
+        let path = dir.join(format!("{level}.route"));
+        let route = godd_game::route::Route::parse(&std::fs::read_to_string(&path)?).ok_or("not a route")?;
+        let better = optimise::optimise(&vfs, level, &route)?;
+        std::fs::write(&path, better.to_text())?;
+        println!("{level}: written to {}", path.display());
+        return Ok(());
+    }
     // --from-replay FILE: no bot; replay a player's recorded run (a finished level's .rep, or a
     // quicksave) and write its route guide to --record DIR (or print it).
     if let Some(file) = args.iter().position(|a| a == "--from-replay").and_then(|i| args.get(i + 1)) {

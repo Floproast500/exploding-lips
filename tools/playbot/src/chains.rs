@@ -157,6 +157,11 @@ pub struct Step {
     pub why: String,
     /// The region it is used from.
     pub at: usize,
+    /// The regions walked to get there from the step before, with the doors as they are by
+    /// then in the plan (empty: not worked out, a death sent home).
+    pub path: Vec<usize>,
+    /// Every region reachable then (the ways open for walking to it).
+    pub reach: Vec<usize>,
 }
 
 /// The abstract state a sequence is planned over: which doors are open, what placeholders a
@@ -330,7 +335,8 @@ pub fn sequence(s: &Session, death: &HashSet<i32>, first: Option<&HashSet<Target
             let regions: Vec<usize> = std::iter::once(x.front).chain(x.back).collect();
             // (Not undone on failure here: the steps so far are the partial plan.)
             if regions.iter().any(|&r| q.reach_region_inner(r)) {
-                q.steps.push(Step { target: Target::Wall(wall), why: "the exit".into(), at: x.front });
+                let (path, reach) = q.path_to(x.front);
+                q.steps.push(Step { target: Target::Wall(wall), why: "the exit".into(), at: x.front, path, reach });
                 // (The shortest of a few whole plans: a ride up and back down again, LIPS01's
                 // lift r34, is one plan's detour, not another's.)
                 if complete.as_ref().is_none_or(|c: &Vec<Step>| q.steps.len() < c.len()) {
@@ -386,6 +392,25 @@ pub fn route_to(s: &Session, death: &HashSet<i32>, to: usize) -> Vec<usize> {
 }
 
 impl Plan<'_> {
+    /// The regions from the start to `to` (both included) with doors as they are in the plan
+    /// (just `to` when it cannot be walked to: a ride, a teleport), and all reachable then.
+    fn path_to(&self, to: usize) -> (Vec<usize>, Vec<usize>) {
+        let (prev, set) = self.reachable(false);
+        let mut reach: Vec<usize> = set.iter().copied().collect();
+        reach.sort_unstable();
+        if !set.contains(&to) {
+            return (vec![to], reach);
+        }
+        let mut path = vec![to];
+        let mut q = to;
+        while prev[q] != q && path.len() < 10_000 {
+            q = prev[q];
+            path.push(q);
+        }
+        path.reverse();
+        (path, reach)
+    }
+
     /// Regions reachable from the start with doors as they are in the plan.
     fn reachable(&self, through_shut: bool) -> (Vec<usize>, HashSet<usize>) {
         self.reachable_as(through_shut, false)
@@ -531,7 +556,8 @@ impl Plan<'_> {
                     // (A teleport: the bot walks into it as a step; LIPS00's pool r468 to the
                     // swim hall, its ceiling r305 back out.)
                     if let Some((target, from)) = tele {
-                        self.steps.push(Step { target, why: format!("teleports to r{q}"), at: from });
+                        let (path, reach) = self.path_to(from);
+                        self.steps.push(Step { target, why: format!("teleports to r{q}"), at: from, path, reach });
                         continue;
                     }
                     if dbg {
@@ -676,7 +702,7 @@ impl Plan<'_> {
                     }
                     self.start = h;
                     if dbg { println!("       seq: to r{r}: back to the start r{h} from r{here}"); }
-                    self.steps.push(Step { target: Target::Region(h), why: "back to the start".into(), at: h });
+                    self.steps.push(Step { target: Target::Region(h), why: "back to the start".into(), at: h, path: Vec::new(), reach: Vec::new() });
                     for &q in &self.timed {
                         self.open[q] = false;
                     }
@@ -854,7 +880,8 @@ impl Plan<'_> {
     /// next time.
     fn open_timed(&mut self, q: usize, t: i32, from: usize) -> bool {
         if let Some(wall) = self.timed_switch(q, t, from) {
-            self.steps.push(Step { target: Target::Wall(wall), why: format!("opens door r{q} (it shuts again)"), at: from });
+            let (path, reach) = self.path_to(from);
+            self.steps.push(Step { target: Target::Wall(wall), why: format!("opens door r{q} (it shuts again)"), at: from, path, reach });
             self.fire(t);
             return true;
         }
@@ -1057,10 +1084,11 @@ impl Plan<'_> {
     /// `at`: the region it is used from, where the player is afterwards.
     fn use_target(&mut self, target: Target, at: usize, why: &str) {
         let s = self.s;
+        let (path, reach) = self.path_to(at);
         self.start = at;
         let list = &s.objects.list;
         self.used.insert(target);
-        self.steps.push(Step { target, why: why.to_string(), at });
+        self.steps.push(Step { target, why: why.to_string(), at, path, reach });
         if self.steps.len() > self.longest.borrow().len() {
             *self.longest.borrow_mut() = self.steps.clone();
         }
