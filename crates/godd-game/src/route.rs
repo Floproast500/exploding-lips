@@ -102,37 +102,58 @@ pub fn untangle(trail: &[[f32; 3]], near: f32) -> Vec<[f32; 3]> {
     out
 }
 
-/// How far along a route the player is: `next` is the step to show.
+/// How far along a route the player is: `next` is the step to show, the first not yet done.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RouteProgress {
     pub next: usize,
+    /// Steps done, by index (a step done early stays done; the ones before it still show).
+    done: Vec<bool>,
 }
 
-/// How many steps ahead a use may skip to (things done out of order).
+/// How many steps ahead a use counts (things done a little out of order).
 const LOOKAHEAD: usize = 6;
 
 impl RouteProgress {
     /// Follow what the player did since last time: switch walls that fired, objects bumped,
-    /// regions entered. A use of the next step, or of one a few steps on, moves past it.
+    /// regions entered. A use of the next step, or of one a few steps on, marks that step done;
+    /// the guide shows the first step not done. (Skipping to the step used left the ones
+    /// before it behind: a door face pushed early sent LIPS14's guide past the TOKEN and the
+    /// GOLDKEY, on to a way still locked.)
     pub fn advance(&mut self, route: &Route, walls: &[usize], objects: &[usize], regions: &[usize]) {
         let used = |t: RouteTarget| match t {
             RouteTarget::Wall(w) => walls.contains(&w),
             RouteTarget::Object(o) => objects.contains(&o),
             RouteTarget::Region(r) => regions.contains(&r),
         };
+        self.done.resize(route.steps.len(), false);
         let end = (self.next + LOOKAHEAD).min(route.steps.len());
-        if let Some(k) = (self.next..end).rev().find(|&k| used(route.steps[k].target)) {
-            self.next = k + 1;
+        let mut marked: Vec<RouteTarget> = Vec::new();
+        for k in self.next..end {
+            let t = route.steps[k].target;
+            // (One use, one step: a switch pressed twice in the route is shown again.)
+            if !self.done[k] && used(t) && !marked.contains(&t) {
+                self.done[k] = true;
+                marked.push(t);
+            }
         }
+        self.settle();
     }
 
-    /// Steps already done in the world (a pickup no longer there): skip them.
-    pub fn skip_done(&mut self, route: &Route, gone: impl Fn(usize) -> bool) {
-        while let Some(step) = route.steps.get(self.next) {
-            match step.target {
-                RouteTarget::Object(o) if gone(o) => self.next += 1,
-                _ => break,
+    /// Steps already done in the world (a pickup no longer there, a door a switch opens open
+    /// already, as after loading a save): done.
+    pub fn skip_done(&mut self, route: &Route, done: impl Fn(RouteTarget) -> bool) {
+        self.done.resize(route.steps.len(), false);
+        for (k, step) in route.steps.iter().enumerate().skip(self.next) {
+            if !self.done[k] && done(step.target) {
+                self.done[k] = true;
             }
+        }
+        self.settle();
+    }
+
+    fn settle(&mut self) {
+        while self.done.get(self.next).copied().unwrap_or(false) {
+            self.next += 1;
         }
     }
 
@@ -187,20 +208,23 @@ mod tests {
     }
 
     #[test]
-    fn progress_follows_uses_and_skips_ahead() {
+    fn progress_shows_the_first_step_not_done() {
         let r = sample();
         let mut p = RouteProgress::default();
         p.advance(&r, &[5], &[], &[]);
         assert_eq!(p.next, 0, "an unrelated switch");
         p.advance(&r, &[112], &[], &[]);
         assert_eq!(p.next, 1);
-        // Done out of order: the region before the pickup.
+        // Done out of order: the region before the pickup. The pickup still shows.
         p.advance(&r, &[], &[], &[9]);
-        assert_eq!(p.next, 3);
+        assert_eq!(p.next, 1, "the pickup before it is not done yet");
+        p.advance(&r, &[], &[257], &[]);
+        assert_eq!(p.next, 3, "then everything is");
         assert!(p.current(&r).is_none());
-        let mut q = RouteProgress { next: 1 };
-        q.skip_done(&r, |o| o == 257);
-        assert_eq!(q.next, 2);
+        let mut q = RouteProgress::default();
+        q.advance(&r, &[112], &[], &[]);
+        q.skip_done(&r, |t| t == RouteTarget::Object(257));
+        assert_eq!(q.next, 2, "a pickup gone from the world is done");
     }
 
     #[test]

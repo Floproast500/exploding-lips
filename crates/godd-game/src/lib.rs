@@ -801,7 +801,11 @@ impl Game {
             // (A level change ends a recording, so none happens inside one.)
             s.pending_goto = None;
             s.pending_level = None;
+            // The replay is silent: its one-shot sounds all at once were a deafening burst on
+            // quickloading. What plays on (loops started or stopped, the music) is kept.
+            s.audio.retain(|e| matches!(e, AudioEvent::Loop { .. } | AudioEvent::Stop { .. } | AudioEvent::Music { .. }));
         }
+        self.haptics.clear();
         if let Some(s) = self.session_mut() {
             s.wants_options = false;
             s.messages.clear();
@@ -1005,8 +1009,20 @@ impl Game {
                 if let Some(route) = self.routes.get(&session.name.to_ascii_uppercase()) {
                     let progress = &mut self.route_progress.1;
                     progress.advance(route, &walls, &bumped, &entered);
-                    // (Picked up already, as after loading a save.)
-                    progress.skip_done(route, |o| session.objects.inventory.contains(&o));
+                    // (Done already, as after loading a save: picked up, or the doors a switch
+                    // opens open.)
+                    let doors = session.effects.doors();
+                    let switches = session.effects.switches();
+                    let w = &session.level.world;
+                    progress.skip_done(route, |t| match t {
+                        route::RouteTarget::Object(o) => session.objects.inventory.contains(&o) || session.objects.list.get(o).is_some_and(|x| x.destroyed),
+                        route::RouteTarget::Wall(wi) => {
+                            let tags: Vec<i32> = switches.iter().filter(|sw| sw.wall == wi).flat_map(|sw| sw.tags.clone()).filter(|&x| x > 0).collect();
+                            let opens: Vec<usize> = doors.iter().filter(|(r, t)| tags.contains(t) && session.effects.region_kind(*r) != Some("rotate")).map(|d| d.0).collect();
+                            !opens.is_empty() && opens.iter().all(|&r| w.regions[r].ceiling - w.regions[r].floor >= 56.0)
+                        }
+                        route::RouteTarget::Region(_) => false,
+                    });
                 }
                 // Rumble: a light kick per shot, a heavy one when hurt, a thud for nearby blasts.
                 let (life, armor) = (session.script.states[script::LIFE], session.script.states[script::ARMOR]);
