@@ -13,7 +13,7 @@ remaster at any resolution.
 
 **A faithful port**
 - A clean-room reimplementation of the G.O.D.D. engine in Rust. The movement, combat, scripts and level logic follow the original. They're tested against the original running side by side, with screenshot and physics comparisons.
-- Classic mode is the original's software renderer at 320×200, pixel for pixel.
+- Classic mode reproduces the original's software renderer at 320×200, checked against screenshots of the original game.
 - LIPS00's hidden Quake-style catacombs are fully playable.
 
 **A full remaster, if you want one**
