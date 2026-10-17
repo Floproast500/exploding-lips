@@ -21,8 +21,9 @@ type AnyResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 /// Planner grid spacing (world units).
 const STEP: f32 = 32.0;
-/// Real seconds a rushing bot's search may run before it gives up.
-const SEARCH_SECONDS: f32 = 20.0;
+/// Real seconds a rushing bot's search may run before it gives up (LIPS14's r40 to the lift
+/// r206 takes 30 with a fleet sharing the machine).
+const SEARCH_SECONDS: f32 = 60.0;
 /// Tags that only send the player back (3: DEATH01 teleport to the start; 661: death).
 /// Tags that send the player back to the start (PLAYTRN1's 661 → 3, DEATH01).
 const BASE_DEATH_TAGS: [i32; 2] = [3, 661];
@@ -2700,7 +2701,9 @@ impl<'a> Bot<'a> {
                 // PLAYBOT_SEQDBG_R=303: the planner's working out, while the player is in r303.
                 let here = self.session().player.region;
                 chains::DEBUG.store(std::env::var("PLAYBOT_SEQDBG_R").is_ok_and(|v| v.parse() == Ok(here)), std::sync::atomic::Ordering::Relaxed);
-                let avoid: HashSet<Target> = self.seq_fails.iter().filter(|e| *e.1 >= 3).map(|e| *e.0).collect();
+                // (PLAYBOT_SEQ_AVOID="W302": steps never to plan through, by hand.)
+                let by_hand: HashSet<Target> = std::env::var("PLAYBOT_SEQ_AVOID").map(|v| v.split(',').filter_map(target_from_code).collect()).unwrap_or_default();
+                let avoid: HashSet<Target> = self.seq_fails.iter().filter(|e| *e.1 >= 3).map(|e| *e.0).chain(by_hand).collect();
                 let seq = chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1, &avoid);
                 chains::DEBUG.store(false, std::sync::atomic::Ordering::Relaxed);
                 if seq.is_empty() {
@@ -2825,7 +2828,7 @@ impl<'a> Bot<'a> {
                             let lifts: HashSet<usize> = self.session().effects.lifts().into_iter().map(|(r, _)| r).collect();
                             // (The first perpetual lift on the way, first: boarding waits for it.)
                             let first_lift = route.iter().position(|r| lifts.contains(r));
-                            for k in first_lift.into_iter().chain([route.len() * 2 / 3, route.len() / 2, route.len() / 3]) {
+                            for k in first_lift.into_iter().chain([route.len() * 2 / 3, route.len() / 2, route.len() / 3, route.len() / 4, route.len() / 6]) {
                                 let Some(&r) = route.get(k).filter(|&&r| r != self.session().player.region) else { continue };
                                 let goal = {
                                     let w = &self.session().level.world;
@@ -3415,7 +3418,7 @@ impl<'a> Bot<'a> {
 fn main() -> AnyResult {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(dir) = args.first() else {
-        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal] [--record DIR] [--share FILE --seed N --episode-minutes M] | <GAME_DIR> --from-replay FILE [--record DIR]");
+        eprintln!("usage: playbot <GAME_DIR> [LIPSnn ...] [--minutes N] [--verbose] [--mortal] [--record DIR] [--share FILE --seed N --episode-minutes M] [--after-replay FILE] | <GAME_DIR> --from-replay FILE [--record DIR]");
         std::process::exit(2);
     };
     let verbose = args.iter().any(|a| a == "--verbose");
@@ -3429,6 +3432,10 @@ fn main() -> AnyResult {
     let share: Option<std::path::PathBuf> = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     let seed: u64 = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1);
     let rush = args.iter().any(|a| a == "--rush");
+    // --after-replay FILE: each episode first plays a player's recorded run (a quicksave), and
+    // the bot goes on from where it stopped; the route starts with the player's part. (LIPS01:
+    // a player got past regions the bots can't, the rest is the bot's.)
+    let after_replay: Option<String> = args.iter().position(|a| a == "--after-replay").and_then(|i| args.get(i + 1)).map(std::fs::read_to_string).transpose()?;
     let episode_minutes: Option<f64> = args.iter().position(|a| a == "--episode-minutes").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
     let mut levels: Vec<String> = args[1..].iter().filter(|a| a.starts_with("LIPS") && !a.ends_with(".share")).cloned().collect();
     if levels.is_empty() {
@@ -3467,9 +3474,20 @@ fn main() -> AnyResult {
         // (What the episodes before walked to in vain: not again.)
         let mut fails_kept: HashMap<Target, u32> = HashMap::new();
         loop {
-            let game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
+            let mut game = Game::new(&vfs, &Options { start_level: Some(level.clone()), save: None })?;
+            let played_route = match &after_replay {
+                Some(text) => Some(game.route_from_replay(&vfs, text).ok_or("the replay did not play")?),
+                None => None,
+            };
             let mut shared_taken = 0usize;
             let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: fails_kept.clone(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            // (After a player's run: no journal from the level's start, so no checkpoints.)
+            if let Some(r) = played_route {
+                let p = bot.session().player;
+                println!("{level}: episode {episode} starts after the replay ({} steps, at ({:.0}, {:.0}) r{})", r.steps.len(), p.x, p.y, p.region);
+                bot.route = r;
+                bot.journal = None;
+            }
             // (Another bot's furthest checkpoint, when it got further than ours.)
             if bot.journal.is_some() && let Some(sh) = &bot.shared && sh.ckpt_used() > resume.last().map_or(0, |c| c.used.len()).max(shared_bad)
                 && let Some((c, j)) = sh.take_ckpt()
