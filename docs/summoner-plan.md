@@ -137,6 +137,17 @@ other 50+ levels then mostly exercise already-built systems.
 - **Player reports come from quicksaves.** Reproducing from the player's own save was the
   fastest path to every reported bug; the Summoner save format should restore full view state
   (pitch, crouch) for this.
+- **Test at the player's settings, with the camera tilted.** LIPS01's "sky through the streets
+  while moving" only showed with true 3D look slightly up or down: clip edges of rounding
+  length cut wedges from portal windows, and the projection used the UI layer's rounded
+  aspect. Parity sweeps must vary pitch and odd window sizes, not only level views at 4:3.
+- **Original data is imperfect.** 13 LIPS01 regions miss a wall; the original's renderer hid
+  it, a mesh renderer didn't. Expect unclosed or overlapping geometry in S3D and repair it at
+  load, in a way the parity sweep can see.
+- **Players and bots finish levels together.** Where the bot planner was stuck (LIPS01's
+  unpressable remote switch), the player's replay plus `playbot --after-replay` (or the
+  player's whole finished run) produced the route. Summoner's party bot should be able to
+  continue from any recorded run as well.
 
 ## Engine work that carries over
 
