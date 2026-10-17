@@ -140,6 +140,7 @@ impl Automap {
             arrow(frame, to_screen(ox, oy), oa - turn, s, portal);
         }
         arrow(frame, (cx, cy), p.angle - turn, s, solid);
+        compass(frame, turn, s, style);
     }
 }
 
@@ -192,6 +193,30 @@ impl Automap {
             }
         }
         arrow(frame, (cx, cy), angle - turn, s, solid);
+        compass(frame, turn, s, style);
+    }
+}
+
+/// A compass in the top left: N, E, S and W round a ring, an arrow to north (+Y). It turns
+/// with the map when it rotates with the view.
+fn compass(frame: &mut Frame, turn: f32, s: i32, style: &Style) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let (_, border, text, highlight) = style.colors;
+    let r = 14.0 * s as f32;
+    let c = (r + 10.0 * s as f32, r + 10.0 * s as f32);
+    // (Screen angles: 0 = right, counter-clockwise; world north is +Y, up when not turned.)
+    let at = |a: f32, d: f32| (c.0 + a.cos() * d, c.1 - a.sin() * d);
+    for k in 0..32 {
+        let (a, b) = (k as f32 / 32.0 * 2.0 * PI, (k + 1) as f32 / 32.0 * 2.0 * PI);
+        line(frame, at(a, r * 0.72), at(b, r * 0.72), border);
+    }
+    let north = FRAC_PI_2 - turn;
+    arrow(frame, at(north, r * 0.32), north, s, highlight);
+    for (k, letter) in ["N", "W", "S", "E"].iter().enumerate() {
+        let a = north + k as f32 * FRAC_PI_2;
+        let (x, y) = at(a, r * 1.05);
+        let half = 4 * s;
+        crate::text::draw_text(frame, x as i32 - half, y as i32 - half, s as usize, if k == 0 { highlight } else { text }, letter);
     }
 }
 
