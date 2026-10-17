@@ -127,6 +127,8 @@ pub fn optimise(vfs: &Vfs, level: &str, route: &Route) -> Result<Route, String> 
         let p = bot.session().player;
         [p.x, p.y, p.z]
     };
+    // Doors shut at the start, by region: the tag that opens each.
+    let shut_doors: std::collections::HashMap<usize, i32> = bot.session().effects.doors().into_iter().filter(|(r, _)| world.regions[*r].ceiling - world.regions[*r].floor < 56.0).collect();
     let used: HashSet<Target> = all.iter().map(|st| target_of(st.target)).collect();
     // (A lift called is a region stepped into, in the recording.)
     let as_used = |t: Target| match t {
@@ -186,10 +188,21 @@ pub fn optimise(vfs: &Vfs, level: &str, route: &Route) -> Result<Route, String> 
         // The run's walk there, if it kept to the ways open then in the sequence (it may have
         // gone through a door a step left out had opened: then through the planned regions).
         let walked: Vec<[f32; 3]> = (at..=j).flat_map(|k| all[k].trail.iter().copied()).collect();
-        let open: HashSet<usize> = st.reach.iter().chain(&st.path).copied().collect();
-        let inside = |p: &[f32; 3]| world.region_at_z(p[0], p[1], Some(p[2] + 1.0)).or_else(|| world.region_at(p[0], p[1])).is_some_and(|r| open.contains(&r));
-        // (No walk on the map to it, a ride or a teleport: the run's way, as it went.)
-        let trail = if open.is_empty() || st.path.len() < 2 || walked.iter().all(inside) {
+        // The run's walk is the way, unless it goes through a door that started shut and that
+        // nothing kept so far (or a trigger crossed on the way) opens: then the planned way.
+        let mut fired: HashSet<i32> = out.steps.iter().flat_map(|o| tags_of(bot.session(), target_of(o.target))).collect();
+        let mut walk_ok = true;
+        for p in &walked {
+            let Some(r) = world.region_at_z(p[0], p[1], Some(p[2] + 1.0)).or_else(|| world.region_at(p[0], p[1])) else { continue };
+            fired.extend(tags_of(bot.session(), Target::Region(r)));
+            if let Some(t) = shut_doors.get(&r)
+                && !fired.contains(t)
+            {
+                walk_ok = false;
+                break;
+            }
+        }
+        let trail = if walk_ok || st.path.len() < 2 {
             untangle_in(&world, &walked, 96.0)
         } else {
             let from = out.steps.last().map_or(start, |p| p.pos);

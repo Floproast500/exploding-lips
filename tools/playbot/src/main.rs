@@ -344,6 +344,10 @@ struct Bot<'a> {
     /// `--rush`: only what the way to the exit needs (the chain solver's openers, teleports on
     /// the route, the exit), the rest only when that finds nothing.
     rush: bool,
+    /// `--follow-route`: the route's steps to do, in order (nothing else is used), and how many
+    /// are done.
+    follow: Option<Vec<Target>>,
+    follow_at: usize,
     /// The teleport the last route search ended its pick with (rushing tries it last).
     route_teleport: std::cell::Cell<Option<Goal>>,
     /// Camera-outside spots already reported (PLAYBOT_CAMCHECK).
@@ -386,7 +390,7 @@ struct Bot<'a> {
 
 /// A bot for following a route (`optimise`): rushing, in god mode, sharing nothing.
 fn fresh_bot<'a>(vfs: &'a Vfs, game: Game, level: &str, verbose: bool) -> Bot<'a> {
-    Bot { vfs, game, level: level.to_string(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: HashMap::new(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush: true, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god: true, log: Vec::new(), shared: None, rng: 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: None, journal: Some(Vec::new()), checkpoints: Vec::new() }
+    Bot { vfs, game, level: level.to_string(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: HashMap::new(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush: true, follow: None, follow_at: 0, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god: true, log: Vec::new(), shared: None, rng: 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: None, journal: Some(Vec::new()), checkpoints: Vec::new() }
 }
 
 fn facing(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -1305,7 +1309,33 @@ impl<'a> Bot<'a> {
         let teleports = |r: usize| triggers.iter().any(|(t, tags)| *t == r && tags.iter().any(|x| tele_tags.contains(x)));
         // (The boss stays a goal until killed: one round of shooting may not do it.)
         let boss = self.boss.map(|(b, _)| Target::Object(b));
-        goals.retain(|g| (Some(g.target) == boss || matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (o.effect == OWALK && o.counter > 0) || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
+        let following = self.follow.as_ref().and_then(|f| f.get(self.follow_at)).copied();
+        // (Following a route: its next step is a goal whatever it is; a region it stepped into,
+        // a lift called, the same.)
+        let following = following.map(|t| match t {
+            Target::Region(r) if !goals.iter().any(|g| g.target == t) && goals.iter().any(|g| g.target == Target::Lift(r)) => Target::Lift(r),
+            t => t,
+        });
+        if let Some(t) = following
+            && !goals.iter().any(|g| g.target == t)
+        {
+            let at = match t {
+                Target::Wall(wi) => {
+                    let (spots, mid) = switch_spots(w, wi);
+                    match spots.first() {
+                        Some(&(p, r)) => Some((Goal { target: t, at: [p.0, p.1, w.regions[r].floor], face: Some(facing(p, mid)), shoot: false }, ())),
+                        None => Some((Goal { target: t, at: [mid.0, mid.1, w.regions[w.walls[wi].front].floor + 24.0], face: None, shoot: true }, ())),
+                    }
+                }
+                Target::Object(i) => s.objects.list.get(i).map(|o| (Goal { target: t, at: [o.x, o.y, o.z], face: None, shoot: false }, ())),
+                Target::Region(r) | Target::Lift(r) => {
+                    let ((x0, y0), (x1, y1)) = w.regions[r].bounds;
+                    Some((Goal { target: t, at: [(x0 + x1) / 2.0, (y0 + y1) / 2.0, w.regions[r].floor], face: None, shoot: false }, ()))
+                }
+            };
+            goals.extend(at.map(|g| g.0));
+        }
+        goals.retain(|g| (Some(g.target) == boss || Some(g.target) == following || matches!(g.target, Target::Wall(_)) || matches!(g.target, Target::Region(r) if reopens(r) || moves(r) || lock(r) || teleports(r)) || matches!(g.target, Target::Object(i) if reswitch(i) || s.objects.list.get(i).is_some_and(|o| o.effect == OTELE || (o.effect == OWALK && o.counter > 0) || (matches!(o.effect, OTAGSW | OBUMPSW) && key_tags.contains(&o.tag)))) || !self.used.contains(&g.target)) && !self.unreachable.contains(&g.target) && self.failures.get(&g.target).is_none_or(|&n| n < 3));
         // (A teleporter taken twice since anything new was used: no way on there, LIPS01's
         // REST01/PARK01 pair.)
         goals.retain(|g| self.tele_uses.get(&g.target).is_none_or(|&n| n < 2));
@@ -1912,6 +1942,12 @@ impl<'a> Bot<'a> {
 
     /// Credit the previous use with the regions gained since, and start crediting `target`.
     fn credit_use(&mut self, target: Target) {
+        let same = |a: Target, b: Target| a == b || matches!((a, b), (Target::Region(x), Target::Lift(y)) | (Target::Lift(x), Target::Region(y)) if x == y);
+        if let Some(f) = &self.follow
+            && f.get(self.follow_at).is_some_and(|&t| same(t, target))
+        {
+            self.follow_at += 1;
+        }
         let known = self.known.len();
         if let (Some((t, before)), Some(sh)) = (self.credit.take(), &self.shared) {
             sh.write(&format!("use {} {t:?} {}", self.level, known as i64 - before as i64));
@@ -2710,7 +2746,24 @@ impl<'a> Bot<'a> {
                 // (PLAYBOT_SEQ_AVOID="W302": steps never to plan through, by hand.)
                 let by_hand: HashSet<Target> = std::env::var("PLAYBOT_SEQ_AVOID").map(|v| v.split(',').filter_map(target_from_code).collect()).unwrap_or_default();
                 let avoid: HashSet<Target> = self.seq_fails.iter().filter(|e| *e.1 >= 3).map(|e| *e.0).chain(by_hand).collect();
-                let seq = chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1, &avoid);
+                let seq = match &self.follow {
+                    // (Following a route: its steps left, nothing else.)
+                    Some(f) => {
+                        let w = &self.session().level.world;
+                        f[self.follow_at.min(f.len())..]
+                            .iter()
+                            .map(|&t| {
+                                let t = match t {
+                                    Target::Region(r) if !goals.iter().any(|g| g.target == t) && goals.iter().any(|g| g.target == Target::Lift(r)) => Target::Lift(r),
+                                    t => t,
+                                };
+                                let at = goals.iter().find(|g| g.target == t).and_then(|g| w.region_at_z(g.at[0], g.at[1], Some(g.at[2] + 1.0))).unwrap_or(self.session().player.region);
+                                chains::Step { target: t, why: "the route".into(), at, path: Vec::new() }
+                            })
+                            .collect()
+                    }
+                    None => chains::sequence(self.session(), self.death_tags(), Some(&can), self.used.len() > 1, &avoid),
+                };
                 chains::DEBUG.store(false, std::sync::atomic::Ordering::Relaxed);
                 if seq.is_empty() {
                     seq_lost += 1;
@@ -2887,7 +2940,7 @@ impl<'a> Bot<'a> {
                     }
                 }
             }
-            if found.is_none() && self.rush {
+            if found.is_none() && self.rush && self.follow.is_none() {
                 self.route_teleport.set(None);
                 let (pick, target) = self.door_on_route(&goals, &switches);
                 if self.verbose {
@@ -3438,6 +3491,18 @@ fn main() -> AnyResult {
     let share: Option<std::path::PathBuf> = args.iter().position(|a| a == "--share").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     let seed: u64 = args.iter().position(|a| a == "--seed").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok()).unwrap_or(1);
     let rush = args.iter().any(|a| a == "--rush");
+    // --follow-route FILE: do only that route's steps, in order (checking a route plays through).
+    let follow: Option<Vec<Target>> = match args.iter().position(|a| a == "--follow-route").and_then(|i| args.get(i + 1)) {
+        Some(f) => {
+            let route = godd_game::route::Route::parse(&std::fs::read_to_string(f)?).ok_or("not a route")?;
+            Some(route.steps.iter().map(|st| match st.target {
+                godd_game::route::RouteTarget::Wall(w) => Target::Wall(w),
+                godd_game::route::RouteTarget::Object(o) => Target::Object(o),
+                godd_game::route::RouteTarget::Region(r) => Target::Region(r),
+            }).collect())
+        }
+        None => None,
+    };
     // --after-replay FILE: each episode first plays a player's recorded run (a quicksave), and
     // the bot goes on from where it stopped; the route starts with the player's part. (LIPS01:
     // a player got past regions the bots can't, the rest is the bot's.)
@@ -3496,7 +3561,8 @@ fn main() -> AnyResult {
                 None => None,
             };
             let mut shared_taken = 0usize;
-            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: fails_kept.clone(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            let mut bot = Bot { vfs: &vfs, game, level: level.clone(), used: HashSet::new(), unreachable: HashSet::new(), failures: HashMap::new(), waits: 0, opened: HashSet::new(), repeats: 0, recent_old: Vec::new(), idle_respawns: 0, teleported: false, last_used: HashMap::new(), waypoint_fails: 0, false_portals: std::cell::OnceCell::new(), death_tags: std::cell::OnceCell::new(), rot_home: std::cell::OnceCell::new(), no_avoid: false, allow_traps: false, seq_fails: fails_kept.clone(), last_expanded: 0, route_tries: HashMap::new(), used_tags: HashMap::new(), tele_uses: HashMap::new(), route: godd_game::route::Route::default(), trail: Vec::new(), route_fails: HashSet::new(), failed_plans: HashSet::new(), failed_region_plans: HashSet::new(), reach_cache: None, corridor: None, node_cap: MAX_NODES, rush, follow: None, follow_at: 0, route_teleport: std::cell::Cell::new(None), cam_reported: HashSet::new(), boss: None, reached: HashSet::new(), bad_moves: HashSet::new(), visited: HashSet::new(), edges: HashMap::new(), world_key: 0, ticks: 0, verbose, god, log: Vec::new(), shared: shared.take(), rng: (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ episode.wrapping_mul(0xBF58_476D_1CE4_E5B9)) | 1, credit: None, known: HashSet::new(), last_progress: (0, 0), stale_decisions: 0, deaths_seen: 0, episode_ticks: episode_minutes.map(|m| (m * 60.0 * TICK_RATE as f64) as u64), journal: Some(Vec::new()), checkpoints: Vec::new() };
+            bot.follow = follow.clone();
             // (After a player's run: no journal from the level's start, so no checkpoints.)
             if let Some(r) = played_route {
                 let p = bot.session().player;
