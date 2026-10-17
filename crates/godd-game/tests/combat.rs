@@ -171,12 +171,15 @@ fn a_killed_bot_dies_on_the_second_shot_and_its_bones_do_not_stop_shots() {
             return;
         }
         assert!(ends.len() >= 4, "fixes {fixes}: shots {ends:?}");
-        assert!(ends[0].0 < 30.0 && ends[1].0 < 30.0, "fixes {fixes}: the first two hit the bot: {ends:?}");
+        // (g_fixes: anywhere on its sprite, which reaches 62 out from its middle.)
+        let reach = if fixes { 80.0 } else { 30.0 };
+        assert!(ends[0].0 < reach && ends[1].0 < reach, "fixes {fixes}: the first two hit the bot: {ends:?}");
         // (Its HK block runs a few ticks after the second shot lands.)
         assert!(ends[1].1 == 0 && ends[2].1 == 1, "fixes {fixes}: killed by the second shot: {ends:?}");
         let later = &ends[2..];
         if fixes {
-            assert!(later.iter().all(|e| e.0 > 60.0), "shots pass the bones: {ends:?}");
+            // (One may hit DETHBOT4, come up beside the pile.)
+            assert!(later.iter().any(|e| e.0 > 60.0), "shots pass the bones: {ends:?}");
         } else {
             assert!(later.iter().all(|e| e.0 < 30.0), "classic: shots burst on the bones: {ends:?}");
         }
@@ -429,4 +432,42 @@ fn shots_pass_walls_of_rooms_far_below() {
         }
     }
     assert!(furthest < 15000.0, "the shot flew on down the stair: got to y {furthest}");
+}
+
+/// Console `noclip`: Forward goes through LIPS00's start room wall (where walking stops at it),
+/// and Jump rises through the ceiling.
+#[test]
+fn noclip_flies_through_walls() {
+    use godd_game::Action;
+    for noclip in [false, true] {
+        let Some((vfs, mut game)) = start("LIPS00") else { return };
+        game.tick(&vfs, &godd_game::Input::default());
+        let (x0, region0) = {
+            let s = game.session_mut().unwrap();
+            s.noclip = noclip;
+            s.player.angle = std::f32::consts::PI; // west, into the start room's wall
+            s.previous = s.player;
+            (s.player.x, s.player.region)
+        };
+        let mut input = godd_game::Input::default();
+        input.set(Action::Forward, true);
+        input.set(Action::Run, true);
+        for _ in 0..120 {
+            game.tick(&vfs, &input);
+        }
+        let p = game.session().unwrap().player;
+        let far = x0 - p.x;
+        if noclip {
+            assert!(far > 2000.0 && p.region != region0, "noclip: flew {far} to r{}", p.region);
+            let z = p.z;
+            let mut up = godd_game::Input::default();
+            up.set(Action::Jump, true);
+            for _ in 0..30 {
+                game.tick(&vfs, &up);
+            }
+            assert!(game.session().unwrap().player.z > z + 200.0, "noclip: Jump rises");
+        } else {
+            assert!(far < 2000.0, "walking: stopped by walls after {far}");
+        }
+    }
 }

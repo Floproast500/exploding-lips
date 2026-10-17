@@ -22,6 +22,10 @@ fn view_game(dir: &Path, level: &str, rest: &[&str]) -> AnyResult<(godd_game::Vf
     let forward: f32 = if at_sprite.is_some() || at_region.is_some() { 0.0 } else { rest.get(2).map_or(Ok(0.0), |v| v.parse())? };
     let vfs = godd_game::Vfs::from_dir(dir)?;
     let mut game = godd_game::Game::new(&vfs, &godd_game::Options { start_level: Some(level.to_string()), save: None })?;
+    // (The level's route guide, as the game finds it in ./routes.)
+    if let Some(route) = std::fs::read_to_string(format!("routes/{level}.route")).ok().and_then(|t| godd_game::route::Route::parse(&t)) {
+        game.routes.insert(level.to_ascii_uppercase(), route);
+    }
     let idle = godd_game::Input::default();
     for _ in 0..30 {
         game.tick(&vfs, &idle);

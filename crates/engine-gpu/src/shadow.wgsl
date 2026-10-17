@@ -17,6 +17,7 @@ const SKY: u32 = 2u;
 const OBJECT: u32 = 32u;
 const VOID: u32 = 64u;
 const SCREEN: u32 = 128u;
+const GLOW: u32 = 256u;
 
 struct VsIn {
     @location(0) pos: vec3<f32>,
@@ -25,7 +26,7 @@ struct VsIn {
 
 @vertex
 fn vs_main(v: VsIn) -> @builtin(position) vec4<f32> {
-    if ((v.layer_flags.y & (TRANSPARENT | SKY | OBJECT | VOID | SCREEN)) != 0u) {
+    if ((v.layer_flags.y & (TRANSPARENT | SKY | OBJECT | VOID | SCREEN | GLOW)) != 0u) {
         return vec4<f32>(2.0, 2.0, 2.0, 1.0); // not a caster: outside the view
     }
     let rel = v.pos - face.light.xyz;

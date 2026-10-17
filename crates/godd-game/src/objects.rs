@@ -1834,7 +1834,7 @@ impl Objects {
                             && t.in_world()
                             && matches!(t.kind, Kind::Normal)
                             && (t.mover.as_ref().is_some_and(|m| !fixes || m.shootable()) || t.effect == fx::OWALK)
-                            && overlaps((t.x, t.y, t.z, t.radius, t.height), shot)
+                            && overlaps(shot_body(world, t, fixes, shot), shot)
                     });
                     if let Some(t) = target {
                         impact = Some(Some(t));
@@ -2055,6 +2055,33 @@ enum Trigger {
     Tag,
     Named,
     Bump,
+}
+
+/// What a player's shot hits on object `t`: its collision body, or with g_fixes the whole sprite
+/// as drawn (half its width round the feet, its full height up). The original's bodies are much
+/// smaller than many sprites: a level boss took hits only near the bottom of its middle.
+/// (Its opaque part: the texels round the middle column that aren't see-through, bottom up.)
+fn shot_body(world: &World, t: &Obj, fixes: bool, shot: (f32, f32, f32, f32, f32)) -> (f32, f32, f32, f32, f32) {
+    let drawn = t.sprite.filter(|_| fixes).and_then(|s| world.sprites.get(s)).and_then(|sp| {
+        let img = world.images.get(sp.frames.first()?.0)?;
+        let (w, h) = (img.width, img.height);
+        // (Only near it is the image looked at.)
+        if !overlaps((t.x, t.y, t.z, w as f32 * sp.scale / 2.0, h as f32 * sp.scale), shot) {
+            return None;
+        }
+        let (mut half, mut top) = (0usize, usize::MAX);
+        for y in 0..h {
+            for x in 0..w {
+                if img.pixels[y * w + x] != 0 {
+                    half = half.max((2 * x + 1).abs_diff(w) / 2 + 1);
+                    top = top.min(y);
+                }
+            }
+        }
+        (top != usize::MAX).then(|| (half as f32 * sp.scale, (h - top) as f32 * sp.scale))
+    });
+    let (radius, height) = drawn.map_or((t.radius, t.height), |(r, h)| (t.radius.max(r), t.height.max(h)));
+    (t.x, t.y, t.z, radius, height)
 }
 
 /// Whether moving from (x0,y0) to (x1,y1) crosses a blocking (solid one-sided) wall.

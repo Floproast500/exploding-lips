@@ -95,6 +95,8 @@ const CLAMP: u32 = 16u;
 const OBJECT: u32 = 32u;
 const VOID: u32 = 64u;
 const SCREEN: u32 = 128u;
+const GLOW: u32 = 256u;
+const GLOW_DOT: u32 = 512u;
 const HD: u32 = 65536u;
 const HD_NORMAL: u32 = 131072u;
 const TAU: f32 = 6.28318530718;
@@ -241,6 +243,28 @@ fn wrap(x: i32, n: i32) -> i32 {
     return ((x % n) + n) % n;
 }
 
+// A guide glow: strongest along its middle (and low down, for a beam), see-through by an
+// ordered dither so it needs no blending; under modern lighting bright enough to bloom.
+fn glow(in: VsOut, flags: u32) -> vec4<f32> {
+    var a: f32;
+    if ((flags & GLOW_DOT) != 0u) {
+        a = in.light * max(1.0 - length(in.uv), 0.0);
+    } else {
+        let across = pow(max(1.0 - abs(in.uv.x), 0.0), 2.0);
+        let up = clamp(in.uv.y, 0.0, 1.0);
+        a = in.light * across * (1.0 - up) * (1.0 - up * 0.5);
+    }
+    let p = vec2<u32>(u32(in.clip.x) % 4u, u32(in.clip.y) % 4u);
+    let bayer = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    if (a <= (bayer[p.y * 4u + p.x] + 0.5) / 16.0) {
+        discard;
+    }
+    if (u.modern.x > 0.5) {
+        return vec4<f32>(to_linear(in.normal) * 2.5, 1.0);
+    }
+    return vec4<f32>(in.normal, 1.0);
+}
+
 fn color_of(index: u32) -> vec4<f32> {
     return textureLoad(palette, vec2<i32>(i32(index), 0), 0);
 }
@@ -286,6 +310,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
     let flags = in.layer_flags.y;
+    if ((flags & GLOW) != 0u) {
+        return glow(in, flags);
+    }
     if ((flags & SKY) != 0u) {
         return sky(in.clip.xy);
     }

@@ -23,6 +23,12 @@ pub const VOID: u32 = 64;
 /// Screen-space quad (first-person weapon): `pos.xy` are normalized device coordinates, drawn
 /// in front of everything, unaffected by the camera and dynamic lights.
 pub const SCREEN: u32 = 128;
+/// A soft glow (guide beams and markers): fullbright, see-through, untextured. `normal` is its
+/// colour (sRGB), `light` its strength (0..1), `uv` its shape coordinates: u across from -1 to 1,
+/// v from 0 at the bottom to 1 at the top (a beam), or -1..1 with [`GLOW_DOT`] (a round dot).
+pub const GLOW: u32 = 256;
+/// With [`GLOW`]: round, fading from the middle.
+pub const GLOW_DOT: u32 = 512;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SceneVertex {

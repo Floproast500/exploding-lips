@@ -65,6 +65,8 @@ pub struct Session {
     pub physics_override: Option<PhysicsParams>,
     /// Cheat: enemy shots do not fire their hit tag (which usually sends the player back).
     pub god: bool,
+    /// Cheat (console `noclip`): fly through walls and floors, touching nothing.
+    pub noclip: bool,
     /// Original-game bug fixes on (cvar `g_fixes`; off = classic behaviour).
     pub fixes: bool,
     /// Portal hops from the player's region, for bot earshot: ((region, half-second), hops).
@@ -177,6 +179,7 @@ impl Session {
             remote_players: std::collections::HashMap::new(),
             physics_override: None,
             god: false,
+            noclip: false,
             fixes: false,
             hops_cache: ((usize::MAX, 0), Vec::new()),
             wants_options: false,
@@ -398,7 +401,30 @@ impl Session {
         self.tool = self.objects.tools.current;
         let mut contacts: Vec<PlayerEvent> = Vec::new();
         let pad_before = (self.player.on_ground && !self.player.flying).then(|| self.effects.bounce_speed(self.level.world.solid_floor(self.player.region).1)).flatten();
-        self.player.tick_with_events(&self.level.world, input, physics, &mut contacts);
+        if self.noclip {
+            // (The usual tick turns and looks; where it walked to, and what it touched, is
+            // dropped: the player flies where it looks instead.)
+            let before = self.player;
+            self.player.tick_with_events(&self.level.world, input, physics, &mut Vec::new());
+            let ticked = self.player;
+            self.player = before;
+            let p = &mut self.player;
+            (p.angle, p.look, p.direct_turn, p.direct_look) = (ticked.angle, ticked.look, ticked.direct_turn, ticked.direct_look);
+            (p.vz, p.on_ground, p.flying, p.crouching) = (0.0, false, true, false);
+            let axis = |a: Action, b: Action| input.held(a) as i32 as f32 - input.held(b) as i32 as f32;
+            let (forward, strafe, up) = (input.move_axis.1 + axis(Action::Forward, Action::Back), input.move_axis.0 + axis(Action::StrafeRight, Action::StrafeLeft), axis(Action::Jump, Action::Crouch));
+            let speed = if input.held(Action::Run) { 24.0 } else { 10.0 };
+            let pitch = PhysicsParams::look_to_pitch(p.look).atan();
+            let (sin, cos) = p.angle.sin_cos();
+            p.x += (cos * pitch.cos() * forward + sin * strafe) * speed;
+            p.y += (sin * pitch.cos() * forward - cos * strafe) * speed;
+            p.z += (pitch.sin() * forward + up) * speed;
+            if let Some(r) = self.level.world.region_at_z(p.x, p.y, Some(p.z + 1.0)) {
+                p.region = r;
+            }
+        } else {
+            self.player.tick_with_events(&self.level.world, input, physics, &mut contacts);
+        }
         // A jump started on a jump pad also gets the pad's speed (world-effects.md 3.3).
         if let Some(a) = pad_before
             && input.held(Action::Jump)

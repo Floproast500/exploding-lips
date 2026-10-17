@@ -478,7 +478,7 @@ impl Game {
     }
 
     fn console_input(&mut self, vfs: &Vfs, input: &Input) {
-        const COMMANDS: [&str; 11] = ["set", "get", "toggle", "reset", "cvarlist", "bind", "unbind", "unbindall", "warp", "god", "help"];
+        const COMMANDS: [&str; 12] = ["set", "get", "toggle", "reset", "cvarlist", "bind", "unbind", "unbindall", "warp", "god", "noclip", "help"];
         let words: Vec<&str> = COMMANDS.iter().copied().chain(self.cvars.iter().map(|v| v.name)).collect();
         self.console.edit(&input.text, &words);
         if input.pressed(Action::Menu) {
@@ -532,7 +532,18 @@ impl Game {
                 }
                 None => "no level loaded".into(),
             },
-            Some("help") => "warp LEVEL | god | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500 | Tab completes, Up/Down history, PgUp/PgDn scroll".into(),
+            Some("noclip") => match self.session_mut() {
+                Some(s) => {
+                    s.noclip = !s.noclip;
+                    if !s.noclip {
+                        // (Back to walking: falling from where we flew to, or out of a wall.)
+                        s.player.flying = false;
+                    }
+                    format!("noclip {}", if s.noclip { "on (Jump/Crouch: up/down)" } else { "off" })
+                }
+                None => "no level loaded".into(),
+            },
+            Some("help") => "warp LEVEL | god | noclip | set/get/toggle/reset/cvarlist | bind/unbind | INI commands, e.g. TAG=500 | Tab completes, Up/Down history, PgUp/PgDn scroll".into(),
             _ => match self.session_mut() {
                 Some(s) => {
                     s.run_command(&line);
@@ -1217,6 +1228,46 @@ impl Game {
                     frame.lights.push(engine_scene::scene::SceneLight { pos: g.pos, radius, color: g.kind.light().map(|v| v * pulse) });
                 }
             }
+        }
+        // The route guide's beam over the next thing to do and dots along the way: soft glows
+        // that show on any surface (its lights alone vanish on dark floors), in either lighting.
+        let route = self.routes.get(&session.name.to_ascii_uppercase()).filter(|_| c.get_bool("hud_route") && self.route_progress.0 == session.name);
+        if let Some(route) = route
+            && let Some(step) = self.route_progress.1.current(route)
+        {
+            use engine_scene::scene::{GLOW, GLOW_DOT, NO_DISTANCE, SceneVertex};
+            const GREEN: [f32; 3] = [0.35, 1.0, 0.45];
+            let t = self.uptime_ticks as f32 / TICK_RATE as f32;
+            let pulse = 0.85 + 0.15 * (t * std::f32::consts::TAU * 0.8).sin();
+            let (sin, cos) = cam.angle.sin_cos();
+            let w = &session.level.world;
+            let [x, y, z] = step.pos;
+            let room = w.region_at_z(x, y, Some(z + 1.0)).map_or(320.0, |r| w.regions[r].ceiling - z);
+            let first = frame.vertices.len();
+            let corner = |cx: f32, cy: f32, cz: f32, uv: [f32; 2], strength: f32, flags: u32| SceneVertex { pos: [cx, cy, cz], uv, image: u32::MAX, light: strength, flags: GLOW | NO_DISTANCE | flags, normal: GREEN };
+            // (Facing the camera, turning about the upright only.)
+            let (half, height, strength) = (9.0, room.clamp(48.0, 320.0), 0.55 * pulse);
+            let (rx, ry) = (sin * half, -cos * half);
+            frame.quad([
+                corner(x - rx, y - ry, z, [-1.0, 0.0], strength, 0),
+                corner(x + rx, y + ry, z, [1.0, 0.0], strength, 0),
+                corner(x + rx, y + ry, z + height, [1.0, 1.0], strength, 0),
+                corner(x - rx, y - ry, z + height, [-1.0, 1.0], strength, 0),
+            ]);
+            let p = &session.player;
+            for (k, spot) in self.route_progress.1.trail_ahead(route, [p.x, p.y, p.z], 96.0, 16).into_iter().enumerate() {
+                // (Brightening in a wave that runs on towards the beam.)
+                let wave = 0.7 + 0.3 * ((t * 3.0 - k as f32 * 0.6).sin() * 0.5 + 0.5);
+                let (r, [sx, sy, sz]) = (8.0, spot);
+                let (dx, dy, cz) = (sin * r, -cos * r, sz + 10.0);
+                frame.quad([
+                    corner(sx - dx, sy - dy, cz - r, [-1.0, -1.0], wave, GLOW_DOT),
+                    corner(sx + dx, sy + dy, cz - r, [1.0, -1.0], wave, GLOW_DOT),
+                    corner(sx + dx, sy + dy, cz + r, [1.0, 1.0], wave, GLOW_DOT),
+                    corner(sx - dx, sy - dy, cz + r, [-1.0, 1.0], wave, GLOW_DOT),
+                ]);
+            }
+            frame.batch(first, None);
         }
         let s = &self.settings;
         let view = GpuView {
