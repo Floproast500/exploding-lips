@@ -32,6 +32,7 @@ pub fn register_cvars(c: &mut CvarRegistry) {
     c.string("fs_mods", "Mods", Game, "");
     // Fix bugs and softlocks of the original game (off = classic behaviour, as lips.exe).
     c.bool("g_fixes", "Fix original game bugs", Game, true);
+    c.bool("g_ending", "End screen after winning", Game, true);
     c.float("snd_master", "Master volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_sfx", "Effects volume", Audio, (0.0, 1.0, 0.05), 1.0);
     c.float("snd_music", "Music volume", Audio, (0.0, 1.0, 0.05), 0.8);

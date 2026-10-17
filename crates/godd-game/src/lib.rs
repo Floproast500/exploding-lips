@@ -45,6 +45,8 @@ use session::{Entry, Session};
 
 /// Simulation rate in ticks per second.
 pub const TICK_RATE: f64 = 60.0;
+/// How long the win message shows before the end screen (ticks).
+const END_SCREEN_DELAY: u64 = 6 * TICK_RATE as u64;
 /// The original's logical screen (3D view and HUD).
 pub const CLASSIC_WIDTH: usize = 320;
 pub const CLASSIC_HEIGHT: usize = 200;
@@ -147,6 +149,10 @@ pub struct Game {
     pub routes: std::collections::HashMap<String, route::Route>,
     /// The level the route progress is for, and how far along it the player is.
     route_progress: (String, route::RouteProgress),
+    /// The game won (the last level's "YOU HAVE WON THE GAME" message): when, in uptime ticks,
+    /// and the totals then; the end screen follows (`g_ending`; the original leaves the player
+    /// standing in the last level).
+    ending: Option<(u64, [i32; script::STATE_COUNT])>,
 }
 
 /// One frame for a GPU renderer (see [`Game::gpu_frame`]).
@@ -354,6 +360,7 @@ impl Game {
             uptime_ticks: 0,
             routes: std::collections::HashMap::new(),
             route_progress: (String::new(), route::RouteProgress::default()),
+            ending: None,
             save: options
                 .save
                 .as_deref()
@@ -998,6 +1005,24 @@ impl Game {
                     }
             }
             State::Playing(session) => {
+                // The end screen: any key back to the title.
+                if let Some((at, _)) = self.ending
+                    && self.uptime_ticks > at + END_SCREEN_DELAY
+                {
+                    if [Action::MenuSelect, Action::Use, Action::Jump, Action::Menu].iter().any(|&a| input.pressed(a)) {
+                        self.ending = None;
+                        self.audio.push(AudioEvent::Music { name: None, looped: false });
+                        self.state = State::Title;
+                    }
+                    return;
+                }
+                if self.ending.is_none()
+                    && self.cvars.get_bool("g_ending")
+                    && session.messages.iter().chain(session.overlay_text.as_ref()).any(|m| m.text.to_ascii_uppercase().replace('_', " ").contains("WON THE GAME"))
+                {
+                    self.ending = Some((self.uptime_ticks, session.script.states));
+                    log::info!("the game is won: the end screen follows");
+                }
                 session.tick(input, &self.physics);
                 // The route guide follows what was used this tick (the logs are drained either way).
                 let walls = std::mem::take(&mut session.effects.touch_log);
@@ -1373,6 +1398,46 @@ impl Game {
     }
 
     /// Everything drawn over the view: automap, HUD, menus, options, console and FPS counter.
+    /// The end screen over the last view: the totals when the game was won.
+    fn draw_ending(&self, frame: &mut Frame) {
+        let Some((at, states)) = self.ending else { return };
+        if self.uptime_ticks <= at + END_SCREEN_DELAY {
+            return;
+        }
+        let s = (frame.height / CLASSIC_HEIGHT).max(1);
+        let si = s as i32;
+        // (The game's palette: a GPU UI layer's own may not be set.)
+        let pal = *self.palette();
+        let col = |rgb: [u8; 3]| text::nearest_color(&pal, rgb);
+        let (back, edge, title, label, value) = (col([12, 10, 18]), col([200, 40, 60]), col([255, 80, 110]), col([150, 210, 150]), col([240, 240, 240]));
+        let (w, h) = (220 * si, 132 * si);
+        let (x0, y0) = ((frame.width as i32 - w) / 2, (frame.height as i32 - h) / 2);
+        text::fill_rect(frame, x0 - 2 * si, y0 - 2 * si, (w + 4 * si) as usize, (h + 4 * si) as usize, edge);
+        text::fill_rect(frame, x0, y0, w as usize, h as usize, back);
+        let centre = |frame: &mut Frame, y: i32, color: u8, t: &str| {
+            let tw = text::text_width(t, s) as i32;
+            text::draw_text(frame, x0 + (w - tw) / 2, y, s, color, t);
+        };
+        centre(frame, y0 + 10 * si, title, "EXPLODING LIPS");
+        centre(frame, y0 + 22 * si, value, "Game complete!");
+        let secs = at / TICK_RATE as u64;
+        let rows = [
+            ("Experience", states[script::EXPERIENCE].to_string()),
+            ("Money", states[script::MONEY].to_string()),
+            ("Treasures found", states[script::TREASURES].to_string()),
+            ("Enemies killed", states[script::KILLS].to_string()),
+            ("Deaths", states[script::DEATHS].to_string()),
+            ("Playing time", format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)),
+        ];
+        for (k, (name, v)) in rows.iter().enumerate() {
+            let y = y0 + (40 + k as i32 * 12) * si;
+            text::draw_text(frame, x0 + 14 * si, y, s, label, name);
+            let vw = text::text_width(v, s) as i32;
+            text::draw_text(frame, x0 + w - 14 * si - vw, y, s, value, v);
+        }
+        centre(frame, y0 + h - 14 * si, label, "Press any key");
+    }
+
     pub fn render_ui(&mut self, frame: &mut Frame) {
         if let State::Playing(session) = &self.state {
             if self.show_map {
@@ -1464,6 +1529,7 @@ impl Game {
                 text::draw_text(frame, 2 * s as i32, ((2 + (line + k) * 10) * s) as i32, s, self.ui_colors.3, text);
             }
         }
+        self.draw_ending(frame);
     }
 }
 

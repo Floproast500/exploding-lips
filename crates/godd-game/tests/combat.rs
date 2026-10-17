@@ -471,3 +471,22 @@ fn noclip_flies_through_walls() {
         }
     }
 }
+
+/// Winning (LIPS17's switch fires tag 96: "CONGRATULATIONS! YOU HAVE WON THE GAME!!") leads to
+/// the end screen, and a key from there back to the title.
+#[test]
+fn winning_ends_at_the_title() {
+    use godd_game::Action;
+    let Some((vfs, mut game)) = start("LIPS17") else { return };
+    let idle = godd_game::Input::default();
+    game.tick(&vfs, &idle);
+    game.session_mut().unwrap().fire_tag(96);
+    for _ in 0..(7 * 60) {
+        game.tick(&vfs, &idle);
+    }
+    assert!(game.session().is_some(), "still in the level until a key");
+    let mut key = godd_game::Input::default();
+    key.set(Action::Use, true);
+    game.tick(&vfs, &key);
+    assert!(game.session().is_none(), "back at the title");
+}
